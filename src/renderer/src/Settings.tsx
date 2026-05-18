@@ -56,10 +56,36 @@ function suggestedModels(baseUrl: string): string[] {
   return []
 }
 
+/** IMAP presets for common providers. Port is always 993 (IMAPS). */
+const MAIL_PRESETS: { label: string; host: string; helpUrl: string }[] = [
+  { label: 'Gmail', host: 'imap.gmail.com', helpUrl: 'https://support.google.com/accounts/answer/185833' },
+  { label: 'Outlook', host: 'outlook.office365.com', helpUrl: 'https://support.microsoft.com/en-us/account-billing/manage-app-passwords-for-two-step-verification-d6dc8c6d-4bf7-4851-ad95-6d07799387e9' },
+  { label: 'iCloud', host: 'imap.mail.me.com', helpUrl: 'https://support.apple.com/en-us/102654' },
+  { label: '163', host: 'imap.163.com', helpUrl: 'https://mail.163.com/' },
+  { label: 'QQ', host: 'imap.qq.com', helpUrl: 'https://service.mail.qq.com/detail/0/351' },
+]
+
+type TabId = 'ai' | 'persona' | 'live2d' | 'mail' | 'window'
+const TABS: { id: TabId; label: string }[] = [
+  { id: 'ai', label: 'AI' },
+  { id: 'persona', label: '人设' },
+  { id: 'live2d', label: 'Live2D' },
+  { id: 'mail', label: '邮箱' },
+  { id: 'window', label: '窗口' },
+]
+
 export function Settings({ initial, onClose }: SettingsProps) {
   const [draft, setDraft] = useState<Config>(initial)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<TabId>('ai')
+  // Mail password input is local-only: we never preload the stored value
+  // (it's ciphertext) and we only write to config.mail.password on save if
+  // the user has actually typed something here.
+  const [mailPasswordInput, setMailPasswordInput] = useState('')
+  const [mailTestResult, setMailTestResult] = useState<
+    null | 'testing' | { ok: boolean; error?: string }
+  >(null)
 
   // Esc closes.
   useEffect(() => {
@@ -74,12 +100,33 @@ export function Settings({ initial, onClose }: SettingsProps) {
     setSaving(true)
     setError(null)
     try {
-      await window.api.config.set(draft)
+      // If the user typed a new mail password, hand the plaintext to main
+      // with passwordEncrypted=false — main re-encrypts via safeStorage
+      // before persisting. Otherwise the existing ciphertext flows through
+      // untouched.
+      let next = draft
+      if (mailPasswordInput) {
+        next = {
+          ...draft,
+          mail: { ...draft.mail, password: mailPasswordInput, passwordEncrypted: false },
+        }
+      }
+      await window.api.config.set(next)
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function testMail(): Promise<void> {
+    setMailTestResult('testing')
+    try {
+      const result = await window.api.mail.test(draft.mail, mailPasswordInput || undefined)
+      setMailTestResult(result)
+    } catch (err) {
+      setMailTestResult({ ok: false, error: err instanceof Error ? err.message : String(err) })
     }
   }
 
@@ -98,21 +145,53 @@ export function Settings({ initial, onClose }: SettingsProps) {
         fontFamily: 'system-ui, sans-serif',
       }}
     >
+      {/* Header — title + close. Always visible above the tab bar. */}
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          padding: '12px 16px 8px',
+          color: '#eee',
+        }}
+      >
+        <h2 style={{ margin: 0, fontSize: 16 }}>设置</h2>
+        <button onClick={onClose} style={closeBtnStyle}>
+          ×
+        </button>
+      </div>
+
+      {/* Tab bar — horizontal, scrolls if narrow. Underline-style active state. */}
+      <div
+        style={{
+          display: 'flex',
+          gap: 4,
+          padding: '0 12px',
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
+        }}
+      >
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setActiveTab(t.id)}
+            style={tabBtnStyle(activeTab === t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       <div
         style={{
           flex: 1,
           overflowY: 'auto',
-          padding: '14px 16px',
+          padding: '12px 16px',
           color: '#eee',
           fontSize: 13,
         }}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
-          <h2 style={{ margin: 0, fontSize: 16 }}>设置</h2>
-          <button onClick={onClose} style={closeBtnStyle}>×</button>
-        </div>
-
         {/* ---- Backend ---- */}
+        {activeTab === 'ai' && (
         <Section title="AI Backend">
           <Label>Base URL</Label>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 4 }}>
@@ -186,8 +265,10 @@ export function Settings({ initial, onClose }: SettingsProps) {
             ))}
           </datalist>
         </Section>
+        )}
 
         {/* ---- Persona ---- */}
+        {activeTab === 'persona' && (
         <Section title="人设">
           <Label>预设</Label>
           <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
@@ -247,8 +328,10 @@ export function Settings({ initial, onClose }: SettingsProps) {
             </div>
           )}
         </Section>
+        )}
 
         {/* ---- Live2D ---- */}
+        {activeTab === 'live2d' && (
         <Section title="Live2D">
           <Label>模型路径</Label>
           <input
@@ -278,8 +361,155 @@ export function Settings({ initial, onClose }: SettingsProps) {
             style={{ width: '100%' }}
           />
         </Section>
+        )}
+
+        {/* ---- Mail ---- */}
+        {activeTab === 'mail' && (
+        <Section title="邮箱（IMAP）">
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <input
+              type="checkbox"
+              checked={draft.mail.enabled}
+              onChange={(e) =>
+                setDraft({ ...draft, mail: { ...draft.mail, enabled: e.target.checked } })
+              }
+            />
+            启用邮箱读取
+          </label>
+
+          {draft.mail.enabled && (
+            <>
+              <Label>邮箱服务商</Label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
+                {MAIL_PRESETS.map((p) => (
+                  <button
+                    key={p.host}
+                    style={chipStyle(draft.mail.host === p.host)}
+                    onClick={() =>
+                      setDraft({
+                        ...draft,
+                        mail: { ...draft.mail, host: p.host, port: 993, secure: true },
+                      })
+                    }
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              {MAIL_PRESETS.find((p) => p.host === draft.mail.host) && (
+                <div style={{ fontSize: 11, color: '#999', marginTop: -2, marginBottom: 6 }}>
+                  需要"应用专用密码 / 授权码"（不是登录密码）。{' '}
+                  <a
+                    href={
+                      MAIL_PRESETS.find((p) => p.host === draft.mail.host)?.helpUrl ?? '#'
+                    }
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: '#7ab' }}
+                  >
+                    查看官方教程 →
+                  </a>
+                </div>
+              )}
+
+              <Label>IMAP Host</Label>
+              <input
+                placeholder="imap.gmail.com"
+                value={draft.mail.host}
+                onChange={(e) =>
+                  setDraft({ ...draft, mail: { ...draft.mail, host: e.target.value } })
+                }
+                style={inputStyle}
+              />
+
+              <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ flex: 1 }}>
+                  <Label>Port</Label>
+                  <input
+                    type="number"
+                    value={draft.mail.port}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        mail: { ...draft.mail, port: Number(e.target.value) || 993 },
+                      })
+                    }
+                    style={inputStyle}
+                  />
+                </div>
+                <div style={{ flex: 1, paddingTop: 18 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={draft.mail.secure}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          mail: { ...draft.mail, secure: e.target.checked },
+                        })
+                      }
+                    />
+                    TLS (IMAPS)
+                  </label>
+                </div>
+              </div>
+
+              <Label>用户名 / 邮箱地址</Label>
+              <input
+                placeholder="you@example.com"
+                value={draft.mail.username}
+                onChange={(e) =>
+                  setDraft({ ...draft, mail: { ...draft.mail, username: e.target.value } })
+                }
+                style={inputStyle}
+              />
+
+              <Label>密码 / 授权码</Label>
+              <input
+                type="password"
+                placeholder={
+                  draft.mail.password
+                    ? '已保存（输入新密码可替换）'
+                    : '应用专用密码 / 授权码'
+                }
+                value={mailPasswordInput}
+                onChange={(e) => setMailPasswordInput(e.target.value)}
+                style={inputStyle}
+              />
+              <div style={{ fontSize: 11, color: '#999', marginTop: -4, marginBottom: 8 }}>
+                保存到系统密钥库（macOS Keychain / Windows DPAPI / Linux libsecret）加密。
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  onClick={testMail}
+                  disabled={
+                    mailTestResult === 'testing' ||
+                    !draft.mail.host ||
+                    !draft.mail.username
+                  }
+                  style={btnStyle(false)}
+                >
+                  {mailTestResult === 'testing' ? '连接中...' : '测试连接'}
+                </button>
+                {mailTestResult && mailTestResult !== 'testing' && (
+                  <span
+                    style={{
+                      fontSize: 12,
+                      color: mailTestResult.ok ? '#8ec98e' : '#f88',
+                    }}
+                  >
+                    {mailTestResult.ok ? '✓ 连接成功' : `✗ ${mailTestResult.error}`}
+                  </span>
+                )}
+              </div>
+            </>
+          )}
+        </Section>
+        )}
 
         {/* ---- Window ---- */}
+        {activeTab === 'window' && (
         <Section title="窗口">
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
             <input
@@ -295,6 +525,7 @@ export function Settings({ initial, onClose }: SettingsProps) {
             始终置顶
           </label>
         </Section>
+        )}
 
         {error && (
           <div style={{ color: '#f88', fontSize: 12, marginTop: 8 }}>[保存失败] {error}</div>
@@ -369,6 +600,20 @@ function chipStyle(active: boolean): React.CSSProperties {
     background: active ? 'rgba(120, 160, 255, 0.4)' : 'rgba(255,255,255,0.06)',
     color: '#eee',
     cursor: 'pointer',
+  }
+}
+
+function tabBtnStyle(active: boolean): React.CSSProperties {
+  return {
+    fontSize: 13,
+    padding: '8px 14px',
+    background: 'transparent',
+    border: 'none',
+    borderBottom: active ? '2px solid #5a8edf' : '2px solid transparent',
+    color: active ? '#fff' : '#aaa',
+    cursor: 'pointer',
+    fontWeight: active ? 600 : 400,
+    transition: 'color 0.1s',
   }
 }
 

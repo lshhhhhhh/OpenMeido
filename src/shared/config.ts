@@ -130,6 +130,30 @@ export const configSchema = z.object({
       recentN: z.number().int().min(0).max(40).default(10),
     })
     .default({}),
+  mail: z
+    .object({
+      enabled: z.boolean().default(false),
+      host: z.string().default(''),
+      port: z.number().int().default(993),
+      /** IMAPS (TLS-from-the-start). Almost always true; only flip for legacy STARTTLS-on-143. */
+      secure: z.boolean().default(true),
+      username: z.string().default(''),
+      /**
+       * Mail password (usually an "app password" / "授权码", NOT the main
+       * account password). Either plaintext (when passwordEncrypted is false)
+       * or base64-encoded safeStorage ciphertext (when passwordEncrypted is
+       * true). Main process encrypts on setConfig if encryption is available;
+       * mail-host decrypts on use.
+       */
+      password: z.string().default(''),
+      /**
+       * Set by the main process after a successful safeStorage encryption.
+       * Renderer sets it to false when sending a freshly-typed plaintext
+       * password so the main process knows to re-encrypt before persisting.
+       */
+      passwordEncrypted: z.boolean().default(false),
+    })
+    .default({}),
 })
 
 export type Config = z.infer<typeof configSchema>

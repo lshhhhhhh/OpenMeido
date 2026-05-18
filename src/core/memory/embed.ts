@@ -1,9 +1,9 @@
 /**
  * Embedding client — talks to any OpenAI-compatible /embeddings endpoint.
  *
- * Takes explicit endpoint params (NOT the full Config) so this file has no
- * Electron-only imports and can be exercised from plain Node smoke tests.
- * Callers build the EmbedOptions from config in their own module.
+ * Pure web-standard API (fetch). Runs in Node, Electron main, browsers,
+ * Capacitor, service workers — anywhere `fetch` exists. No streaming, no
+ * platform globals.
  */
 
 export interface EmbedOptions {

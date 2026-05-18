@@ -166,16 +166,17 @@ export default function App() {
             onClick={() => setSettingsOpen(true)}
             title="设置"
             style={{
-              width: 20,
-              height: 20,
+              width: 26,
+              height: 22,
               border: 'none',
-              borderRadius: 10,
-              background: 'rgba(0,0,0,0.15)',
+              borderRadius: 6,
+              background: 'rgba(0,0,0,0.18)',
               color: '#444',
-              fontSize: 12,
-              lineHeight: '20px',
+              fontSize: 16,
+              lineHeight: '22px',
               cursor: 'pointer',
               padding: 0,
+              fontWeight: 600,
             }}
           >
             ⚙

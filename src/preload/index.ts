@@ -5,6 +5,8 @@ import { ConfigIPC } from '../shared/config-ipc.js'
 // Type-only import — erased at runtime, doesn't pull Zod into preload bundle.
 import type { Config } from '../shared/config.js'
 
+type MailTestResult = { ok: true } | { ok: false; error: string }
+
 /**
  * Typed bridge between renderer (sandboxed) and main (Node).
  *
@@ -45,6 +47,17 @@ const api = {
       return () => {
         ipcRenderer.off(ConfigIPC.Changed, handler)
       }
+    },
+  },
+
+  mail: {
+    /**
+     * Probe an IMAP connection without writing to disk. `passwordPlaintext`
+     * is passed when the user has typed a new password in Settings that
+     * hasn't been saved yet — otherwise main decrypts the stored ciphertext.
+     */
+    test(cfg: Config['mail'], passwordPlaintext?: string): Promise<MailTestResult> {
+      return ipcRenderer.invoke('mail:test', { cfg, passwordPlaintext }) as Promise<MailTestResult>
     },
   },
 }

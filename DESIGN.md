@@ -54,6 +54,47 @@ OpenMeido is a desktop AI companion for **non-programmers**: a transparent alway
 - **Renderer never talks to external HTTP directly.** All network calls go through main process. Renderer just streams strings / audio chunks back via IPC. This keeps API keys out of the renderer and gives us one place to add rate limiting / observability.
 - **No Python in OpenMeido itself.** GPT-SoVITS is the only Python dependency, and it's a user-installed external process the app speaks HTTP to.
 - **Renderer is stateless.** All persistence in main; reload the renderer without losing anything.
+- **`src/core/` is platform-agnostic.** It imports no `electron`, no `node:*`, no native modules — only fetch + web-standard primitives. Anything platform-specific (sqlite, electron-store, app paths, Notification API) lives behind an interface in `src/core/` and is implemented in `src/main/storage/` (or future `src/web/`, `src/capacitor/`). Business code depends on the interface, not the implementation.
+
+---
+
+## Platform compatibility
+
+Desktop is the v1 product (electron-builder → Windows / macOS / Linux). But mobile (PWA on Android/iOS, or Capacitor) is on the long-term roadmap, so we **design with cross-platform in mind from day one**, even though we don't ship mobile now.
+
+### Layering
+
+```
+src/
+  core/              ← pure TS, no platform imports. Reusable everywhere.
+    memory/          ← types, embed, MemoryAdapter interface, MemoryService
+    (chat pipeline, persona, reflection move here over time)
+  shared/            ← cross-process types (Config, ChatEvent wire shapes)
+  main/              ← Electron host: BrowserWindow, IPC, native-module impls
+    storage/         ← sqlite-memory-adapter.ts (better-sqlite3 + sqlite-vec)
+  preload/           ← contextBridge
+  renderer/          ← React + Live2D (works in any modern Chromium-based shell)
+```
+
+### Design rules (apply to every new feature)
+
+1. **Business logic in `src/core/`.** Never imports `electron`, never imports native modules.
+2. **Resource handles injected, not derived.** Functions take `dataDir`, `apiKey`, etc. as args instead of calling `app.getPath('userData')` or `process.env.X` themselves. Hosts wire those in at startup.
+3. **Platform capabilities behind interfaces.** Storage, notifications, screen capture, window controls → all defined as interfaces in `src/core/`. Each host (Electron / PWA / Capacitor) provides its own impl. Where a platform can't do something, the impl returns a graceful no-op and the UI hides the feature.
+4. **Async-first interfaces** even when the desktop impl is synchronous (better-sqlite3). The mobile impl will be async (IndexedDB / sql.js / Capacitor SQLite), and rewriting all the callers from sync to async later is painful.
+5. **Web-standard types at boundaries.** `Uint8Array` / `Blob` / `ReadableStream` / `ArrayBuffer` — not Node `Buffer` — on any cross-platform API. Adapter impls may use Buffer internally but should not surface it.
+
+### Desktop-only features (intentional)
+
+These define what makes the **desktop** product distinct; mobile gets a different metaphor:
+
+- Frameless transparent always-on-top window
+- Drag-to-reposition character on the desktop
+- Screen perception (`desktopCapturer`)
+- System-tray integration, global hotkeys
+- File-system access (importing custom Live2D models, voice clips)
+
+On mobile, the equivalent product is a regular full-screen app with the same character, persona, memory, and chat backend. We ship that when the desktop version has enough users to justify it — not before.
 
 ---
 
@@ -65,7 +106,7 @@ OpenMeido is a desktop AI companion for **non-programmers**: a transparent alway
 | Agent SDK | **Vercel AI SDK** (`ai` + `@ai-sdk/openai` + `@ai-sdk/react`) | Most polished agent SDK in any language (2026); provider-agnostic via `baseURL` override; native multimodal; MCP via `experimental_createMCPClient`; Zod-typed tools |
 | Default LLM | **Zhipu GLM-4V-Flash** via OpenAI-compatible endpoint | Free, multimodal, mainland-China-accessible. Switchable to OpenAI / Gemini / local in settings. |
 | Live2D | **Cubism 4 JS runtime** | Official, web-native, runs on `<canvas>` |
-| Persistence | **better-sqlite3** + **sqlite-vec** Node binding | Same C library as desktop-kanojo's Python sqlite-vec — schema 1:1 portable; sync API simpler than async; sqlite-vec gives us vector search without a separate vector DB |
+| Persistence (desktop) | **better-sqlite3** + **sqlite-vec** behind `MemoryAdapter` | Same C library as desktop-kanojo's Python sqlite-vec — schema 1:1 portable; sync API simpler than async; sqlite-vec gives us vector search without a separate vector DB. Wrapped behind `core/memory/adapter.ts` so a future PWA/Capacitor host can swap in an IndexedDB- or WASM-sqlite-vec-backed adapter without touching business code. |
 | Voice playback | **Web Audio API + AudioWorklet** | Streaming PCM from TTS without buffering whole clip |
 | Voice synthesis | **edge-tts** (Node port) default; **GPT-SoVITS** via HTTP optional | edge-tts is free + multilingual; SoVITS for cloned voices |
 | UI framework | **React** | Vercel AI SDK ships first-class React bindings (`useChat`, `useCompletion`) that handle streaming UI subscription for free. Solid/Vue would mean reinventing that. |
@@ -108,10 +149,10 @@ OpenMeido is a desktop AI companion for **non-programmers**: a transparent alway
 - Real Gmail / Calendar integrations (via MCP servers).
 - Per-output-device audio routing.
 
-**Not doing:**
+**Not doing (now):**
 - Coding-agent features (file editing, shell access, code execution).
-- Self-hosted server backend — desktop-only product.
-- Mobile clients.
+- Self-hosted server backend — strictly client-side persistence.
+- Mobile clients **in v1** — but the codebase is structured so a future PWA / Capacitor port reuses `src/core/` unchanged. See the "Platform compatibility" section.
 
 ---
 

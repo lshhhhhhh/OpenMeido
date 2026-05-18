@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url'
 
 import { runChat } from './chat.js'
 import { getConfig, setConfig, onConfigChange } from './config.js'
-import { initMemory } from './memory/store.js'
+import { initMemory } from './memory-host.js'
+import { testMailConfig } from './mail-host.js'
 import { IPC, type ChatSendPayload } from '../shared/ipc.js'
 import { configSchema, ConfigIPC, type Config } from '../shared/config.js'
 
@@ -106,8 +107,16 @@ ipcMain.handle(ConfigIPC.Set, (_event, next: Config) => {
   return setConfig(validated)
 })
 
+// ---- Mail IPC ----
+
+ipcMain.handle(
+  'mail:test',
+  (_event, payload: { cfg: Config['mail']; passwordPlaintext?: string }) =>
+    testMailConfig(payload.cfg, payload.passwordPlaintext),
+)
+
 void app.whenReady().then(() => {
-  initMemory(getConfig(), app.getPath('userData'))
+  initMemory()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

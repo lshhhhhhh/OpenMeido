@@ -7,7 +7,7 @@
  */
 
 import Store from 'electron-store'
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, safeStorage } from 'electron'
 
 import { configSchema, ConfigIPC, type Config } from '../shared/config.js'
 
@@ -29,6 +29,19 @@ export function getConfig(): Config {
 }
 
 export function setConfig(next: Config): Config {
+  // If the renderer sent a fresh plaintext mail password (passwordEncrypted
+  // = false but password non-empty), encrypt it now so plaintext never
+  // touches disk. safeStorage uses OS keychain on macOS, DPAPI on Windows,
+  // libsecret on Linux — falls back to plaintext on platforms where it's
+  // unavailable (then the flag stays false and we behave like API keys).
+  if (next.mail.password && !next.mail.passwordEncrypted && safeStorage.isEncryptionAvailable()) {
+    const ciphertext = safeStorage.encryptString(next.mail.password).toString('base64')
+    next = {
+      ...next,
+      mail: { ...next.mail, password: ciphertext, passwordEncrypted: true },
+    }
+  }
+
   current = configSchema.parse(next)
   store.store = current
 
@@ -41,6 +54,18 @@ export function setConfig(next: Config): Config {
   }
 
   return current
+}
+
+/** Decrypt the mail password if it was stored as ciphertext. Host-side use only. */
+export function decryptMailPassword(cfg: Config = current): string {
+  if (!cfg.mail.password) return ''
+  if (!cfg.mail.passwordEncrypted) return cfg.mail.password
+  try {
+    return safeStorage.decryptString(Buffer.from(cfg.mail.password, 'base64'))
+  } catch (err) {
+    console.warn('[config] failed to decrypt mail password:', err)
+    return ''
+  }
 }
 
 /** Subscribe inside the main process. Returns an unsubscribe function. */
