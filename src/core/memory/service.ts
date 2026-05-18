@@ -13,7 +13,9 @@
 import type { Config } from '../../shared/config.js'
 import type { MemoryAdapter } from './adapter.js'
 import type { Episode, SessionSummary, Speaker } from './types.js'
-import { embed, type EmbedOptions } from './embed.js'
+
+/** Pluggable embedding function. Host provides; default impl is local bge. */
+export type EmbedFn = (text: string) => Promise<Float32Array>
 
 export interface MemoryService {
   /**
@@ -59,8 +61,8 @@ export interface MemoryServiceDeps {
   adapter: MemoryAdapter
   /** Called per-operation so config changes apply immediately. */
   getConfig: () => Config
-  /** Returns the resolved API key for embedding calls. */
-  resolveApiKey: () => string
+  /** Pluggable embedding function. Production uses local bge-small-zh. */
+  embed: EmbedFn
   /**
    * Optional sink for "addEpisode failed" / "retrieve failed" notices.
    * The host (Electron main) wires this up to broadcast to renderer
@@ -74,24 +76,8 @@ function makeSessionId(): string {
   return globalThis.crypto.randomUUID()
 }
 
-/**
- * Pick an embedding model that matches the backend host. The schema's
- * default is `text-embedding-3-small` (OpenAI) — fine when chat goes to
- * OpenAI, but every other host (Gemini, Anthropic, LM Studio) rejects
- * that id with 404, which silently kills addEpisode. So if the user
- * never customised the embedding model, swap to a host-native one.
- */
-function inferEmbeddingModel(baseUrl: string, configured: string): string {
-  const isDefault = !configured || configured === 'text-embedding-3-small'
-  if (!isDefault) return configured
-  if (baseUrl.includes('googleapis.com')) return 'gemini-embedding-001'
-  // OpenAI itself, LM Studio (depends on what user loaded — best effort),
-  // and unknown self-hosted endpoints stay on the OpenAI default.
-  return 'text-embedding-3-small'
-}
-
 export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
-  const { adapter, getConfig, resolveApiKey, onError } = deps
+  const { adapter, embed, getConfig, onError } = deps
 
   let sessionId = makeSessionId()
 
@@ -101,22 +87,11 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     onError?.(operation, message)
   }
 
-  const embedOpts = (): EmbedOptions => {
-    const cfg = getConfig()
-    const baseUrl = cfg.embedding.baseUrl || cfg.backend.baseUrl
-    return {
-      baseUrl,
-      apiKey: cfg.embedding.apiKey || resolveApiKey(),
-      model: inferEmbeddingModel(baseUrl, cfg.embedding.model),
-      dim: cfg.embedding.dim,
-    }
-  }
-
   return {
     async addEpisode(speaker, text) {
       if (!text.trim()) return null
       try {
-        const vec = await embed(text, embedOpts())
+        const vec = await embed(text)
         return await adapter.addEpisode(speaker, text, vec, sessionId)
       } catch (err) {
         reportError('addEpisode', err)
@@ -130,7 +105,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       let recalled: Episode[] = []
       if (cfg.memory.topK > 0 && userMessage.trim()) {
         try {
-          const qVec = await embed(userMessage, embedOpts())
+          const qVec = await embed(userMessage)
           const exclude = new Set(recent.map((e) => e.id))
           recalled = await adapter.searchByEmbedding(qVec, cfg.memory.topK, exclude)
         } catch (err) {

@@ -56,10 +56,26 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
     CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
   `)
 
-  // vec0 locks `dim` at CREATE time. If the table already exists with a
-  // different dim, we leave it and trust the higher-level config-change
-  // listener to surface the mismatch — re-CREATEing would silently drop
-  // existing vectors.
+  // vec0 locks `dim` at CREATE time. Inspect any pre-existing episodes_vec
+  // table; if its dim doesn't match the requested one (e.g. user migrated
+  // from cloud 1536-dim embeddings to local bge 512-dim), drop and
+  // recreate. The companion episodes table is left alone — those rows
+  // simply won't be recallable until they're re-embedded, but they remain
+  // visible in the Memory inspector.
+  const existing = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'episodes_vec'")
+    .get() as { sql?: string } | undefined
+  if (existing?.sql) {
+    const m = existing.sql.match(/FLOAT\[(\d+)\]/i)
+    const existingDim = m && m[1] ? Number(m[1]) : NaN
+    if (existingDim && existingDim !== dim) {
+      console.warn(
+        `[memory] embedding dim changed (${existingDim} -> ${dim}); dropping vec0 table. ` +
+          'Existing episodes remain but won\'t participate in semantic recall until re-embedded.',
+      )
+      db.exec('DROP TABLE episodes_vec')
+    }
+  }
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS episodes_vec USING vec0(
       episode_id INTEGER PRIMARY KEY,

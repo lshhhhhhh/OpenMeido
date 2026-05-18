@@ -28,6 +28,7 @@
   "dependencies": {
     "@ai-sdk/google": "^3.0.75",
     "@ai-sdk/openai": "^3.0.64",
+    "@huggingface/transformers": "^4.2.0",
     "@pixi/core": "^7.4.3",
     "@pixi/display": "^7.4.3",
     "ai": "^6.0.184",

@@ -13,7 +13,8 @@ import { app, BrowserWindow } from 'electron'
 import { createMemoryService, type MemoryService } from '../core/memory/service.js'
 import { openSqliteMemory } from './storage/sqlite-memory-adapter.js'
 import type { MemoryAdapter } from '../core/memory/adapter.js'
-import { getConfig, resolveApiKey, onConfigChange } from './config.js'
+import { getConfig } from './config.js'
+import { embedLocal, LOCAL_EMBED_DIM, preloadLocalEmbed } from './local-embed.js'
 
 let adapter: MemoryAdapter | null = null
 let service: MemoryService | null = null
@@ -26,11 +27,13 @@ export function initMemory(): void {
   if (!cfg.memory.enabled) return
 
   try {
-    adapter = openSqliteMemory(app.getPath('userData'), cfg.embedding.dim)
+    // dim is locked to bge-small-zh-v1.5's native 512. The adapter handles
+    // migration if an older 1536-dim schema is on disk.
+    adapter = openSqliteMemory(app.getPath('userData'), LOCAL_EMBED_DIM)
     service = createMemoryService({
       adapter,
       getConfig,
-      resolveApiKey: () => resolveApiKey(),
+      embed: embedLocal,
       onError: (operation, message) => {
         // Broadcast so renderer windows can surface a toast / status pill.
         // Silently failing writes are the worst class of memory bug, so we
@@ -46,22 +49,14 @@ export function initMemory(): void {
         }
       },
     })
-    console.log('[memory] ready (sqlite, dim=' + cfg.embedding.dim + ')')
+    console.log(`[memory] ready (sqlite, local bge-small-zh, dim=${LOCAL_EMBED_DIM})`)
+    // Warm the ONNX model in the background so the first user turn doesn't
+    // pay the ~1-2s cold-start.
+    preloadLocalEmbed()
   } catch (err) {
     initError = err instanceof Error ? err.message : String(err)
     console.error('[memory] init failed — running without memory:', err)
   }
-
-  // Warn if the embedding dim later changes — the vec table is locked to
-  // whatever dim the first init used.
-  onConfigChange((next) => {
-    if (adapter && next.embedding.dim !== cfg.embedding.dim) {
-      console.warn(
-        `[memory] embedding.dim changed (${cfg.embedding.dim} -> ${next.embedding.dim}). ` +
-          'Existing vectors mismatch the new dim; delete memory.sqlite to recreate.',
-      )
-    }
-  })
 }
 
 export function getMemoryService(): MemoryService | null {
