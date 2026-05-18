@@ -12,7 +12,7 @@
 
 import type { Config } from '../../shared/config.js'
 import type { MemoryAdapter } from './adapter.js'
-import type { Episode, Speaker } from './types.js'
+import type { Episode, SessionSummary, Speaker } from './types.js'
 import { embed, type EmbedOptions } from './embed.js'
 
 export interface MemoryService {
@@ -32,6 +32,24 @@ export interface MemoryService {
 
   /** Diagnostic — episode count. */
   count(): Promise<number>
+
+  /** Most-recent N episodes for the Memory inspection UI; optionally one session only. */
+  listRecent(limit: number, sessionId?: string): Promise<Episode[]>
+
+  /** Per-session summaries with first-user-message preview for the picker. */
+  listSessions(): Promise<SessionSummary[]>
+
+  /** Wipe everything. Returns rows removed. */
+  clearAll(): Promise<number>
+
+  /** Delete a single session's episodes. */
+  deleteSession(sessionId: string): Promise<number>
+
+  /** Generate a new session id; future addEpisode calls tag with it. */
+  newSession(): string
+
+  /** Current session id (what new turns are being tagged with). */
+  currentSession(): string
 }
 
 export interface MemoryServiceDeps {
@@ -42,8 +60,15 @@ export interface MemoryServiceDeps {
   resolveApiKey: () => string
 }
 
+/** crypto.randomUUID is on globalThis in Node 20+ and all browsers we support. */
+function makeSessionId(): string {
+  return globalThis.crypto.randomUUID()
+}
+
 export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   const { adapter, getConfig, resolveApiKey } = deps
+
+  let sessionId = makeSessionId()
 
   const embedOpts = (): EmbedOptions => {
     const cfg = getConfig()
@@ -60,7 +85,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       if (!text.trim()) return null
       try {
         const vec = await embed(text, embedOpts())
-        return await adapter.addEpisode(speaker, text, vec)
+        return await adapter.addEpisode(speaker, text, vec, sessionId)
       } catch (err) {
         console.warn('[memory] addEpisode failed:', err)
         return null
@@ -85,6 +110,31 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
     count() {
       return adapter.count()
+    },
+
+    listRecent(limit, sessionId) {
+      return adapter.recent(limit, sessionId)
+    },
+
+    listSessions() {
+      return adapter.listSessions()
+    },
+
+    clearAll() {
+      return adapter.clear()
+    },
+
+    deleteSession(id) {
+      return adapter.deleteSession(id)
+    },
+
+    newSession() {
+      sessionId = makeSessionId()
+      return sessionId
+    },
+
+    currentSession() {
+      return sessionId
     },
   }
 }

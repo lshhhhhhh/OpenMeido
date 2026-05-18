@@ -4,8 +4,10 @@ import { fileURLToPath } from 'node:url'
 
 import { runChat } from './chat.js'
 import { getConfig, setConfig, onConfigChange } from './config.js'
-import { initMemory } from './memory-host.js'
+import { initMemory, getMemoryService } from './memory-host.js'
 import { testMailConfig } from './mail-host.js'
+import { testBackend } from './chat-host.js'
+import { captureAllScreensPng } from './screen-host.js'
 import { IPC, type ChatSendPayload } from '../shared/ipc.js'
 import { configSchema, ConfigIPC, type Config } from '../shared/config.js'
 
@@ -91,11 +93,20 @@ onConfigChange((next) => {
 // ---- Chat IPC ----
 
 ipcMain.on(IPC.ChatSend, (event, payload: ChatSendPayload) => {
-  void runChat(payload.messageId, payload.text, (chatEvent) => {
+  void runChat(payload.messageId, payload.text, payload.images, (chatEvent) => {
     if (!event.sender.isDestroyed()) {
       event.sender.send(IPC.ChatEvent, chatEvent)
     }
   })
+})
+
+ipcMain.handle('screen:capture', async () => {
+  const all = await captureAllScreensPng()
+  // Each entry is a base64 PNG — JSON-serialisable + small enough for IPC.
+  return all.map((bytes) => ({
+    mimeType: 'image/png',
+    base64: Buffer.from(bytes).toString('base64'),
+  }))
 })
 
 // ---- Config IPC ----
@@ -114,6 +125,52 @@ ipcMain.handle(
   (_event, payload: { cfg: Config['mail']; passwordPlaintext?: string }) =>
     testMailConfig(payload.cfg, payload.passwordPlaintext),
 )
+
+ipcMain.handle(
+  'chat:test',
+  (_event, payload: { cfg: Config['backend']; apiKeyOverride?: string }) =>
+    testBackend(payload.cfg, payload.apiKeyOverride),
+)
+
+// ---- Memory IPC ----
+
+ipcMain.handle('memory:status', async () => {
+  const svc = getMemoryService()
+  if (!svc) return { ready: false as const }
+  return {
+    ready: true as const,
+    count: await svc.count(),
+    sessionId: svc.currentSession(),
+  }
+})
+ipcMain.handle(
+  'memory:listRecent',
+  async (_event, limit: number = 50, sessionId?: string) => {
+    const svc = getMemoryService()
+    if (!svc) return []
+    return svc.listRecent(limit, sessionId)
+  },
+)
+ipcMain.handle('memory:listSessions', async () => {
+  const svc = getMemoryService()
+  if (!svc) return []
+  return svc.listSessions()
+})
+ipcMain.handle('memory:clear', async () => {
+  const svc = getMemoryService()
+  if (!svc) return 0
+  return svc.clearAll()
+})
+ipcMain.handle('memory:deleteSession', async (_event, sessionId: string) => {
+  const svc = getMemoryService()
+  if (!svc) return 0
+  return svc.deleteSession(sessionId)
+})
+ipcMain.handle('memory:newSession', () => {
+  const svc = getMemoryService()
+  if (!svc) return null
+  return svc.newSession()
+})
 
 void app.whenReady().then(() => {
   initMemory()

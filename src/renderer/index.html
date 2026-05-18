@@ -18,6 +18,13 @@
         background: transparent;
         overflow: hidden;
       }
+      /* Native <option> doesn't inherit color/background from the parent
+         <select> on most platforms — the OS draws the popup. Force dark on
+         every option so dropdowns inside the Settings modal stay readable. */
+      option {
+        background: #1e1f29;
+        color: #eee;
+      }
     </style>
   </head>
   <body>

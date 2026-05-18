@@ -8,7 +8,7 @@
  * IndexedDB / Capacitor SQLite cases where async is unavoidable.
  */
 
-import type { Episode, Speaker } from './types.js'
+import type { Episode, SessionSummary, Speaker } from './types.js'
 
 export interface MemoryAdapter {
   /** Persist a turn together with its embedding. Returns the new row id. */
@@ -19,8 +19,14 @@ export interface MemoryAdapter {
     sessionId?: string | null,
   ): Promise<number>
 
-  /** Most-recent N turns in chronological order (oldest first). */
-  recent(n: number): Promise<Episode[]>
+  /**
+   * Most-recent N turns in chronological order (oldest first). If `sessionId`
+   * is given, restrict to that session; otherwise return globally most-recent.
+   */
+  recent(n: number, sessionId?: string | null): Promise<Episode[]>
+
+  /** Per-session summaries, ordered by last-activity (newest first). */
+  listSessions(): Promise<SessionSummary[]>
 
   /**
    * Top-K cosine-nearest episodes to the query embedding. `excludeIds`
@@ -35,6 +41,12 @@ export interface MemoryAdapter {
 
   /** Total un-archived row count — for diagnostics / "/recent" UIs. */
   count(): Promise<number>
+
+  /** Wipe every episode and its embedding. Returns the number of rows removed. */
+  clear(): Promise<number>
+
+  /** Delete just one session's episodes. Returns rows removed. */
+  deleteSession(sessionId: string): Promise<number>
 
   /** Release resources. After close, all other methods reject. */
   close(): void

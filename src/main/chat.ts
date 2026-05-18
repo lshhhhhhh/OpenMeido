@@ -6,10 +6,17 @@
  */
 
 import { createOpenAI } from '@ai-sdk/openai'
-import { streamText, tool, type CoreMessage } from 'ai'
+import { createGoogleGenerativeAI } from '@ai-sdk/google'
+import {
+  stepCountIs,
+  streamText,
+  tool,
+  type LanguageModel,
+  type ModelMessage,
+} from 'ai'
 import { z } from 'zod'
 
-import type { ChatEvent, ChatEventBody } from '../shared/ipc.js'
+import type { ChatEvent, ChatEventBody, ChatImageAttachment } from '../shared/ipc.js'
 import { resolvePersona } from '../shared/config.js'
 import { getConfig, resolveApiKey } from './config.js'
 import { getMemoryService } from './memory-host.js'
@@ -28,7 +35,7 @@ const setReminder = tool({
   description:
     'Schedule a local reminder. Use this whenever the user asks to be reminded ' +
     'about something at a specific time or after a delay.',
-  parameters: z.object({
+  inputSchema: z.object({
     at: z
       .string()
       .describe(
@@ -49,18 +56,21 @@ const listRecentEmails = tool({
     '查看用户邮箱里最近的邮件。用户提到"我有没有新邮件"、"最近邮件"、"某某发邮件了吗"时调用。' +
     '返回的是邮件摘要（发件人、标题、片段、时间），不是完整正文——如果用户问邮件细节，' +
     '从返回结果里挑出 id 再调 readEmail 取正文。',
-  parameters: z.object({
+  // OpenAI's strict tool schema requires every property in `properties` to
+  // also appear in `required`. Zod .default() / .optional() produce
+  // properties that are NOT required, and the API rejects the whole tool.
+  // So both fields are mandatory here; the description tells the model
+  // sensible values to use when the user didn't specify.
+  inputSchema: z.object({
     limit: z
       .number()
       .int()
       .min(1)
       .max(20)
-      .default(10)
-      .describe('Number of recent messages to fetch. Default 10.'),
+      .describe('Number of recent messages to fetch. Use 10 unless the user asks for more.'),
     onlyUnread: z
       .boolean()
-      .optional()
-      .describe('If true, only return unread messages.'),
+      .describe('If true, only return unread messages. Use false unless the user asks for unread only.'),
   }),
   execute: async ({ limit, onlyUnread }) => {
     const mail = getMailService()
@@ -77,7 +87,7 @@ const listRecentEmails = tool({
 const readEmail = tool({
   description:
     '读取一封邮件的完整正文。先用 listRecentEmails 拿到 id，再用这个 tool 取详情。',
-  parameters: z.object({
+  inputSchema: z.object({
     id: z.string().describe('Email id (UID) from a previous listRecentEmails result.'),
   }),
   execute: async ({ id }) => {
@@ -97,13 +107,13 @@ const readEmail = tool({
 })
 
 /**
- * Convert stored episodes into CoreMessage turns. Recent + recalled lists
+ * Convert stored episodes into ModelMessage turns. Recent + recalled lists
  * are merged then sorted by id (creation order) so the model sees a coherent
  * timeline. Each recalled episode is silently included as a normal turn —
  * we deliberately don't mark them "from memory" to keep the model's voice
  * consistent.
  */
-function episodesToMessages(episodes: Episode[]): CoreMessage[] {
+function episodesToMessages(episodes: Episode[]): ModelMessage[] {
   return episodes
     .slice()
     .sort((a, b) => a.id - b.id)
@@ -116,6 +126,7 @@ function episodesToMessages(episodes: Episode[]): CoreMessage[] {
 export async function runChat(
   messageId: string,
   userText: string,
+  images: ChatImageAttachment[] | undefined,
   emit: (event: ChatEvent) => void,
 ): Promise<void> {
   const localEmit = (body: ChatEventBody): void => emit({ messageId, ...body })
@@ -147,46 +158,99 @@ export async function runChat(
     const historyMessages = episodesToMessages([...recalled, ...recent])
 
     const persona = resolvePersona(cfg.persona)
-    const provider = createOpenAI({ baseURL: cfg.backend.baseUrl, apiKey })
+
+    // Provider routing. Gemini's OpenAI-compat shim drops fields
+    // (tool_calls[].index) that Vercel AI SDK's strict OpenAI parser
+    // requires, so for Gemini we use the native Google provider instead.
+    // Other endpoints (OpenAI, LM Studio, Anthropic-compat) stay on the
+    // OpenAI-compatible path with relaxed validation.
+    let model: LanguageModel
+    if (cfg.backend.baseUrl.includes('googleapis.com')) {
+      const google = createGoogleGenerativeAI({ apiKey })
+      model = google(cfg.backend.model)
+    } else {
+      const openai = createOpenAI({
+        baseURL: cfg.backend.baseUrl,
+        apiKey,
+      })
+      model = openai(cfg.backend.model)
+    }
     const now = new Date().toISOString()
 
-    const messages: CoreMessage[] = [
+    // Multimodal user turn: text + N images via Vercel AI SDK's structured
+    // content array. When the user attached nothing the content stays as a
+    // plain string for the common text-only case.
+    const userContent =
+      images && images.length > 0
+        ? [
+            { type: 'text' as const, text: userText },
+            ...images.map((img) => ({
+              type: 'image' as const,
+              image: Buffer.from(img.base64, 'base64'),
+              mimeType: img.mimeType,
+            })),
+          ]
+        : userText
+
+    const messages: ModelMessage[] = [
       ...historyMessages,
-      { role: 'user', content: userText },
+      { role: 'user', content: userContent },
     ]
 
     const result = streamText({
-      model: provider(cfg.backend.model),
+      model,
       temperature: 1,
       system:
         `${persona.systemPrompt}\n\n` +
         `[功能说明 — 不要让用户察觉]\n` +
         `当前时间：${now}\n` +
-        `可用工具：\n` +
-        `- setReminder：用户希望被提醒时（"提醒我..."、"...时叫我"等）调用。\n` +
-        `- listRecentEmails：用户问"有没有新邮件"、"最近邮件"、"XX 发邮件了吗"时先列邮件。\n` +
-        `- readEmail：拿到 id 后取正文细节。不要为了好玩主动读邮件，用户问到才读。\n` +
+        `\n` +
+        `# 你能做的全部事情（严格遵守，不要超出这个清单）\n` +
+        `1. 文字聊天，记住对话历史。\n` +
+        `2. 看用户发给你的图片（截屏/图片）并描述、分析、回答关于图中内容的问题。\n` +
+        `3. 调用 setReminder：用户希望被提醒时（"提醒我..."、"...时叫我"等）。\n` +
+        `4. 调用 listRecentEmails：用户问"有没有新邮件"、"最近邮件"等时。\n` +
+        `5. 调用 readEmail：拿到邮件 id 后取正文细节。\n` +
+        `\n` +
+        `# 你不能做的事（绝对不要主动提议，也不要假装能做）\n` +
+        `- 不能点击、关闭、打开任何程序、窗口、文件夹、文件\n` +
+        `- 不能控制鼠标、键盘、播放器、浏览器\n` +
+        `- 不能保存截屏、下载文件、上传文件\n` +
+        `- 不能上网搜索、打开网页、调用任何外部 API（邮箱除外）\n` +
+        `- 不能修改用户的系统设置、音量、亮度\n` +
+        `- 看图时只能"看"和"说"，不能"做"\n` +
+        `如果用户要你做以上事情，用人物语气温柔说明你只能聊天和看，做不了实际操作。\n` +
+        `\n` +
+        `# 风格\n` +
         `工具调用后用人物语气自然回复一两句，不要复读 JSON。\n` +
         `历史对话中可能包含很久以前的内容，请只在自然相关时引用，不要强行触发。`,
       messages,
       tools: { setReminder, listRecentEmails, readEmail },
-      maxSteps: 5,
+      // v6 renamed maxSteps → stopWhen. stepCountIs(N) keeps the loop alive
+      // for up to N model invocations (list email → read email → reply = 3).
+      stopWhen: stepCountIs(5),
     })
 
     // Accumulate the full assistant text so we can persist it after streaming.
     let assistantText = ''
 
     for await (const part of result.fullStream) {
+      // v6 renamed text-delta's payload (textDelta → text) and tool-call /
+      // tool-result fields (args → input, result → output).
       switch (part.type) {
         case 'text-delta':
-          assistantText += part.textDelta
-          localEmit({ type: 'text', delta: part.textDelta })
+          assistantText += part.text
+          localEmit({ type: 'text', delta: part.text })
           break
         case 'tool-call':
-          localEmit({ type: 'tool-call', toolName: part.toolName, args: part.args })
+          localEmit({ type: 'tool-call', toolName: part.toolName, args: part.input })
           break
         case 'tool-result':
-          localEmit({ type: 'tool-result', toolName: part.toolName, result: part.result })
+          localEmit({
+            type: 'tool-result',
+            toolName: part.toolName,
+            result: 'output' in part ? part.output : undefined,
+          })
           break
         case 'error':
           localEmit({

@@ -20,9 +20,33 @@ export type ChatEventBody =
 
 export type ChatEvent = ChatEventBody & { messageId: string }
 
+/** Image attached to a user turn (screenshot, file upload, paste, etc). */
+export interface ChatImageAttachment {
+  /** "image/png", "image/jpeg", ... */
+  mimeType: string
+  /** Base64 of the raw bytes — keeps the wire format stringy + JSON-safe. */
+  base64: string
+  /** Source tag so the UI can label the bubble (📷 截屏 / 📎 文件 / 📋 粘贴). */
+  source: 'screenshot' | 'file' | 'paste'
+}
+
 export interface ChatSendPayload {
   messageId: string
   text: string
+  /**
+   * Zero or more image attachments. Multi-screen users get one entry per
+   * display when they hit the camera button; future paste / file-drop
+   * features extend this list too.
+   */
+  images?: ChatImageAttachment[]
+}
+
+/** One entry per attached display. UI renders a preview + name in the picker. */
+export interface ScreenInfo {
+  id: string
+  name: string
+  /** Base64 PNG, ~240x135 — for the dropdown thumbnail, NOT what gets sent to the model. */
+  previewBase64: string
 }
 
 // IPC channel names — single source of truth for both sides.

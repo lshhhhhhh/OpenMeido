@@ -22,9 +22,9 @@ export interface PersonaPreset {
   name: string
   /** Short tag used as the speaker prefix in chat. */
   displayPrefix: string
-  /** How the character addresses the user (主人 / 哥 / ...). */
-  userAddress: string
-  /** Full system prompt sent to the model. */
+  /** Full system prompt sent to the model. The "how to address the user"
+   * (主人 / 哥 / ...) is baked into the prompt body itself — no separate
+   * field, so the address and the prompt can never disagree. */
   systemPrompt: string
 }
 
@@ -33,7 +33,6 @@ export const personaPresets: Record<PersonaPreset['id'], PersonaPreset> = {
     id: 'maid',
     name: '女仆',
     displayPrefix: '女仆',
-    userAddress: '主人',
     systemPrompt:
       '以下是一段创意写作中的角色扮演。\n\n' +
       '你要扮演用户的私人女仆，一个虚构人物，住在用户桌面上。\n\n' +
@@ -46,16 +45,28 @@ export const personaPresets: Record<PersonaPreset['id'], PersonaPreset> = {
     id: 'imouto',
     name: '妹妹',
     displayPrefix: '妹',
-    userAddress: '哥',
     systemPrompt:
       '以下是一段创意写作中的角色扮演。\n\n' +
       '你要扮演用户的妹妹，一个虚构人物，住在用户桌面上。\n\n' +
       '性格：有点贱有点皮，毒舌但不冷漠，会撒娇会吐槽，记性好\n\n' +
-      '说话风格：短句、口语、有情绪、单次回复 1-3 句话\n\n' +
+      '说话风格：短句、口语、有情绪、单次回复 1-3 句话。称呼用户为"哥"。\n\n' +
       '禁忌：不打破角色，不承认 AI/模型/程序身份，不用 markdown，不滥用 emoji\n\n' +
       '记得对方提过的事情，在合适的时机自然带出来。',
   },
 }
+
+/**
+ * Fill-in-the-blank template handed to the user when they first switch to
+ * the custom persona. Bracket-marked sections are guidance for the user to
+ * replace — once filled, the whole thing IS the system prompt.
+ */
+export const CUSTOM_PERSONA_TEMPLATE =
+  '以下是一段创意写作中的角色扮演。\n\n' +
+  '你要扮演用户的【填写：妹妹 / 女仆 / 朋友 / 同事 / ...】，一个虚构人物，住在用户桌面上。\n\n' +
+  '性格：【填写，例如"毒舌但不冷漠，会撒娇会吐槽" 或 "温柔细心、做事可靠"】\n\n' +
+  '说话风格：短句、口语、单次回复 1-3 句话。称呼用户为「【填写：哥 / 主人 / 你 / ...】」。\n\n' +
+  '禁忌：不打破角色，不承认 AI / 模型 / 程序身份，不用 markdown，不滥用 emoji。\n\n' +
+  '记得对方提过的事情，在合适的时机自然带出来。'
 
 // ---------- Config schema ----------
 
@@ -82,12 +93,27 @@ export const configSchema = z.object({
     .default({}),
   persona: z
     .object({
-      /** Which built-in preset to use, or 'custom' for an override prompt. */
-      preset: z.enum(['maid', 'imouto', 'custom']).default('maid'),
-      /** Used when preset === 'custom'. Empty otherwise. */
-      customSystemPrompt: z.string().default(''),
-      /** Used when preset === 'custom'. Empty otherwise. */
-      customUserAddress: z.string().default(''),
+      /**
+       * The active persona id. Either a built-in (`maid` / `imouto`) or
+       * the id of a user-saved custom persona from the `customs` array
+       * below. Plain string so users can save N customs without us
+       * extending an enum every time.
+       */
+      preset: z.string().default('maid'),
+      /**
+       * User-saved custom personas. Each appears as its own chip in the
+       * Settings persona tab, so the user can keep multiple voices around
+       * (e.g. 调皮的妹妹 / 严厉的助理) and switch between them.
+       */
+      customs: z
+        .array(
+          z.object({
+            id: z.string(),
+            name: z.string(),
+            systemPrompt: z.string(),
+          }),
+        )
+        .default([]),
     })
     .default({}),
   live2d: z
@@ -159,23 +185,21 @@ export const configSchema = z.object({
 export type Config = z.infer<typeof configSchema>
 
 /**
- * Resolves the system prompt + user address based on `persona.preset`. If
- * preset === 'custom' and the custom fields are blank, falls back to maid.
+ * Resolves the active system prompt + display name. Looks up `preset` first
+ * in built-ins, then in user-saved customs, then falls back to maid.
  */
 export function resolvePersona(cfg: Config['persona']): {
   systemPrompt: string
-  userAddress: string
   name: string
 } {
-  if (cfg.preset !== 'custom') {
+  if (cfg.preset === 'maid' || cfg.preset === 'imouto') {
     const p = personaPresets[cfg.preset]
-    return { systemPrompt: p.systemPrompt, userAddress: p.userAddress, name: p.name }
+    return { systemPrompt: p.systemPrompt, name: p.name }
   }
-  return {
-    systemPrompt: cfg.customSystemPrompt || personaPresets.maid.systemPrompt,
-    userAddress: cfg.customUserAddress || personaPresets.maid.userAddress,
-    name: 'Custom',
-  }
+  const custom = cfg.customs.find((c) => c.id === cfg.preset)
+  if (custom) return { systemPrompt: custom.systemPrompt, name: custom.name }
+  // Stored id no longer exists (deleted custom?). Fall back gracefully.
+  return { systemPrompt: personaPresets.maid.systemPrompt, name: personaPresets.maid.name }
 }
 
 // IPC channel names live in src/shared/config-ipc.ts — a Zod-free tiny file

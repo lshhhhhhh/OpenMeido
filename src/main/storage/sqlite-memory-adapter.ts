@@ -23,7 +23,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { MemoryAdapter } from '../../core/memory/adapter.js'
-import type { Episode, Speaker } from '../../core/memory/types.js'
+import type { Episode, SessionSummary, Speaker } from '../../core/memory/types.js'
 
 interface EpisodeRow {
   id: number
@@ -81,6 +81,38 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
      ORDER BY id DESC
      LIMIT ?`,
   )
+  // COALESCE so the 'legacy' bucket id matches rows with session_id IS NULL.
+  const selectRecentInSession = db.prepare<[string, number]>(
+    `SELECT id, ts, speaker, text, session_id AS sessionId
+     FROM episodes
+     WHERE archived = 0 AND COALESCE(session_id, 'legacy') = ?
+     ORDER BY id DESC
+     LIMIT ?`,
+  )
+  /**
+   * Per-session summary. Episodes written before the session-id tracking
+   * existed have session_id = NULL — we COALESCE them into a synthetic
+   * 'legacy' bucket so the user can still see those chats in the picker.
+   * The correlated subquery pulls the first user message for the preview.
+   */
+  const selectSessions = db.prepare(
+    `SELECT
+        COALESCE(session_id, 'legacy') AS id,
+        COUNT(*) AS count,
+        MIN(ts) AS startTs,
+        MAX(ts) AS lastTs,
+        COALESCE(
+          (SELECT text FROM episodes e2
+           WHERE COALESCE(e2.session_id, 'legacy') = COALESCE(e.session_id, 'legacy')
+             AND e2.speaker = 'user'
+           ORDER BY e2.id ASC LIMIT 1),
+          ''
+        ) AS preview
+     FROM episodes e
+     WHERE archived = 0
+     GROUP BY COALESCE(session_id, 'legacy')
+     ORDER BY MAX(ts) DESC`,
+  )
   const selectByKnn = db.prepare<[Buffer, number]>(
     `SELECT e.id, e.ts, e.speaker, e.text, e.session_id AS sessionId, vc.distance
      FROM (
@@ -117,11 +149,18 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
       return addTxn(speaker, text, sessionId, embedding)
     },
 
-    async recent(n) {
+    async recent(n, sessionId) {
       ensureOpen()
       if (n <= 0) return []
-      const rows = selectRecent.all(n) as EpisodeRow[]
+      const rows = sessionId
+        ? (selectRecentInSession.all(sessionId, n) as EpisodeRow[])
+        : (selectRecent.all(n) as EpisodeRow[])
       return rows.reverse()
+    },
+
+    async listSessions() {
+      ensureOpen()
+      return selectSessions.all() as SessionSummary[]
     },
 
     async searchByEmbedding(queryEmbedding, k, excludeIds = new Set()) {
@@ -152,6 +191,38 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
       ensureOpen()
       const row = countEpisodes.get() as { c: number }
       return row.c
+    },
+
+    async clear() {
+      ensureOpen()
+      // Delete in a transaction so the two tables stay in sync. vec0 has no
+      // ON DELETE CASCADE hook, so we have to clear it explicitly.
+      const wipe = db.transaction(() => {
+        const result = db.prepare('DELETE FROM episodes').run()
+        db.prepare('DELETE FROM episodes_vec').run()
+        return Number(result.changes)
+      })
+      return wipe()
+    },
+
+    async deleteSession(sessionId: string) {
+      ensureOpen()
+      // Pull the doomed ids first so we can drop their vec rows too.
+      const wipe = db.transaction(() => {
+        const ids = db
+          .prepare<[string]>(
+            "SELECT id FROM episodes WHERE COALESCE(session_id, 'legacy') = ?",
+          )
+          .all(sessionId) as { id: number }[]
+        if (ids.length === 0) return 0
+        const delVec = db.prepare('DELETE FROM episodes_vec WHERE episode_id = ?')
+        for (const { id } of ids) delVec.run(BigInt(id))
+        const result = db
+          .prepare<[string]>("DELETE FROM episodes WHERE COALESCE(session_id, 'legacy') = ?")
+          .run(sessionId)
+        return Number(result.changes)
+      })
+      return wipe()
     },
 
     close() {

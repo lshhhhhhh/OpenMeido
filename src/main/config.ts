@@ -79,12 +79,18 @@ export function onConfigChange(cb: ChangeListener): () => void {
  * is in process.env for the matching provider". Shipped builds shouldn't
  * carry .env, but it's convenient for the developer to skip the GUI.
  */
-export function resolveApiKey(cfg: Config = current): string {
-  if (cfg.backend.apiKey) return cfg.backend.apiKey
-  const url = cfg.backend.baseUrl
+/** Same logic but takes just the backend subtree — useful when we have a
+ *  draft from Settings that isn't a full Config yet (e.g. the test button). */
+export function resolveBackendKey(backend: Config['backend']): string {
+  if (backend.apiKey) return backend.apiKey
+  const url = backend.baseUrl
   if (url.includes('googleapis.com')) return process.env.GEMINI_API_KEY ?? ''
   if (url.includes('anthropic.com')) return process.env.ANTHROPIC_API_KEY ?? ''
   if (url.includes('openai.com')) return process.env.OPENAI_API_KEY ?? ''
   // Local / self-hosted endpoints often don't need a real key.
   return process.env.OPENAI_API_KEY ?? ''
+}
+
+export function resolveApiKey(cfg: Config = current): string {
+  return resolveBackendKey(cfg.backend)
 }
