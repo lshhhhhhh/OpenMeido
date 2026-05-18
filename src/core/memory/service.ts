@@ -61,6 +61,12 @@ export interface MemoryServiceDeps {
   getConfig: () => Config
   /** Returns the resolved API key for embedding calls. */
   resolveApiKey: () => string
+  /**
+   * Optional sink for "addEpisode failed" / "retrieve failed" notices.
+   * The host (Electron main) wires this up to broadcast to renderer
+   * windows so silent storage failures become visible to the user.
+   */
+  onError?: (operation: string, message: string) => void
 }
 
 /** crypto.randomUUID is on globalThis in Node 20+ and all browsers we support. */
@@ -85,9 +91,15 @@ function inferEmbeddingModel(baseUrl: string, configured: string): string {
 }
 
 export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
-  const { adapter, getConfig, resolveApiKey } = deps
+  const { adapter, getConfig, resolveApiKey, onError } = deps
 
   let sessionId = makeSessionId()
+
+  const reportError = (operation: string, err: unknown): void => {
+    const message = err instanceof Error ? err.message : String(err)
+    console.warn(`[memory] ${operation} failed:`, err)
+    onError?.(operation, message)
+  }
 
   const embedOpts = (): EmbedOptions => {
     const cfg = getConfig()
@@ -107,7 +119,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
         const vec = await embed(text, embedOpts())
         return await adapter.addEpisode(speaker, text, vec, sessionId)
       } catch (err) {
-        console.warn('[memory] addEpisode failed:', err)
+        reportError('addEpisode', err)
         return null
       }
     },
@@ -122,7 +134,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
           const exclude = new Set(recent.map((e) => e.id))
           recalled = await adapter.searchByEmbedding(qVec, cfg.memory.topK, exclude)
         } catch (err) {
-          console.warn('[memory] retrieve search failed:', err)
+          reportError('retrieve', err)
         }
       }
       return { recent, recalled }

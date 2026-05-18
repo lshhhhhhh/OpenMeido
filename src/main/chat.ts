@@ -21,20 +21,15 @@ import { resolvePersona } from '../shared/config.js'
 import { getConfig, resolveApiKey } from './config.js'
 import { getMemoryService } from './memory-host.js'
 import { getMailService } from './mail-host.js'
+import { getReminderService } from './reminder-host.js'
 import type { Episode } from '../core/memory/types.js'
-
-// Spike-only in-memory reminder store. Real impl will persist to sqlite.
-interface Reminder {
-  id: number
-  at: string
-  message: string
-}
-const reminders: Reminder[] = []
 
 const setReminder = tool({
   description:
     'Schedule a local reminder. Use this whenever the user asks to be reminded ' +
-    'about something at a specific time or after a delay.',
+    'about something at a specific time or after a delay. The reminder is ' +
+    'persisted to disk and fires an OS notification at the scheduled time, ' +
+    'even across app restarts.',
   inputSchema: z.object({
     at: z
       .string()
@@ -45,9 +40,14 @@ const setReminder = tool({
     message: z.string().describe('Short text shown to the user when the reminder fires.'),
   }),
   execute: async ({ at, message }) => {
-    const id = reminders.length + 1
-    reminders.push({ id, at, message })
-    return { ok: true, id, scheduled_for: at }
+    const svc = getReminderService()
+    if (!svc) return { error: '提醒服务未初始化' }
+    try {
+      const id = await svc.schedule({ fireAt: at, message })
+      return { ok: true, id, scheduled_for: at }
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
   },
 })
 

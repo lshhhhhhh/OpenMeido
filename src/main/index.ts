@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { runChat } from './chat.js'
 import { getConfig, setConfig, onConfigChange } from './config.js'
 import { initMemory, getMemoryService } from './memory-host.js'
+import { initReminders, getReminderService } from './reminder-host.js'
 import { testMailConfig } from './mail-host.js'
 import { testBackend } from './chat-host.js'
 import { captureAllScreensPng } from './screen-host.js'
@@ -166,6 +167,20 @@ ipcMain.handle('memory:deleteSession', async (_event, sessionId: string) => {
   if (!svc) return 0
   return svc.deleteSession(sessionId)
 })
+
+// ---- Reminder IPC ----
+
+ipcMain.handle('reminders:list', async (_event, limit: number = 50) => {
+  const svc = getReminderService()
+  if (!svc) return []
+  return svc.listAll(limit)
+})
+ipcMain.handle('reminders:cancel', async (_event, id: number) => {
+  const svc = getReminderService()
+  if (!svc) return false
+  await svc.cancel(id)
+  return true
+})
 ipcMain.handle('memory:newSession', () => {
   const svc = getMemoryService()
   if (!svc) return null
@@ -178,8 +193,9 @@ ipcMain.handle('memory:setSession', (_event, id: string) => {
   return id
 })
 
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
   initMemory()
+  await initReminders()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

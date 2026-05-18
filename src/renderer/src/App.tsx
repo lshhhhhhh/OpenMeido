@@ -41,6 +41,8 @@ export default function App() {
   // LLM health — 'idle' (untested), 'ok' (last call succeeded), 'error'
   // (last call failed). Updates on chat events.
   const [llmStatus, setLlmStatus] = useState<'idle' | 'ok' | 'error'>('idle')
+  // Transient memory-write-failure banner. Auto-clears after 8 seconds.
+  const [memoryError, setMemoryError] = useState<string | null>(null)
   const activeIdRef = useRef<string | null>(null)
   const live2dRef = useRef<Live2DController>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
@@ -107,6 +109,29 @@ export default function App() {
   useEffect(() => {
     return window.api.chat.onStatus((status) => {
       setLlmStatus(status)
+    })
+  }, [])
+
+  // Memory write failures bubble up here so silent failures get visible.
+  useEffect(() => {
+    return window.api.memory.onError((info) => {
+      setMemoryError(`记忆 ${info.operation} 失败: ${info.message}`)
+      // Auto-dismiss after 8 seconds; user can also click ×.
+      setTimeout(() => setMemoryError(null), 8000)
+    })
+  }, [])
+
+  // Reminder fired in main → show it inline in chat as an assistant message
+  // so the user gets visual confirmation in addition to the OS notification.
+  useEffect(() => {
+    return window.api.reminders.onFired((reminder) => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          text: `⏰ 提醒：${reminder.message}`,
+        },
+      ])
     })
   }, [])
 
@@ -375,6 +400,35 @@ export default function App() {
               lineHeight: 1.45,
             }}
           >
+            {memoryError && (
+              <div
+                style={{
+                  fontSize: 11,
+                  color: '#a55',
+                  background: 'rgba(255, 200, 200, 0.5)',
+                  padding: '4px 8px',
+                  borderRadius: 4,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <span>⚠ {memoryError}</span>
+                <button
+                  onClick={() => setMemoryError(null)}
+                  style={{
+                    border: 'none',
+                    background: 'transparent',
+                    color: '#a55',
+                    cursor: 'pointer',
+                    fontSize: 13,
+                    padding: '0 4px',
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            )}
             {messages.length === 0 && !busy && (
               <div style={{ color: '#999', fontSize: 12 }}>开始聊天吧 ✨</div>
             )}

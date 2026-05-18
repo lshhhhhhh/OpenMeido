@@ -8,7 +8,7 @@
  * same core service to a different adapter.
  */
 
-import { app } from 'electron'
+import { app, BrowserWindow } from 'electron'
 
 import { createMemoryService, type MemoryService } from '../core/memory/service.js'
 import { openSqliteMemory } from './storage/sqlite-memory-adapter.js'
@@ -31,6 +31,20 @@ export function initMemory(): void {
       adapter,
       getConfig,
       resolveApiKey: () => resolveApiKey(),
+      onError: (operation, message) => {
+        // Broadcast so renderer windows can surface a toast / status pill.
+        // Silently failing writes are the worst class of memory bug, so we
+        // make sure the user can see when it happens.
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) {
+            win.webContents.send('memory:error', {
+              operation,
+              message,
+              ts: Date.now(),
+            })
+          }
+        }
+      },
     })
     console.log('[memory] ready (sqlite, dim=' + cfg.embedding.dim + ')')
   } catch (err) {

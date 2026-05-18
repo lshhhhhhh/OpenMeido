@@ -5,6 +5,7 @@ import { ConfigIPC } from '../shared/config-ipc.js'
 // Type-only import — erased at runtime, doesn't pull Zod into preload bundle.
 import type { Config } from '../shared/config.js'
 import type { Episode, SessionSummary } from '../core/memory/types.js'
+import type { Reminder } from '../core/reminders/types.js'
 
 type MailTestResult = { ok: true } | { ok: false; error: string }
 type MemoryStatus =
@@ -127,6 +128,32 @@ const api = {
     },
     setSession(id: string): Promise<string | null> {
       return ipcRenderer.invoke('memory:setSession', id) as Promise<string | null>
+    },
+    onError(
+      cb: (info: { operation: string; message: string; ts: number }) => void,
+    ): () => void {
+      const handler = (_: Electron.IpcRendererEvent, info: { operation: string; message: string; ts: number }): void => cb(info)
+      ipcRenderer.on('memory:error', handler)
+      return () => {
+        ipcRenderer.off('memory:error', handler)
+      }
+    },
+  },
+
+  reminders: {
+    list(limit: number = 50): Promise<Reminder[]> {
+      return ipcRenderer.invoke('reminders:list', limit) as Promise<Reminder[]>
+    },
+    cancel(id: number): Promise<boolean> {
+      return ipcRenderer.invoke('reminders:cancel', id) as Promise<boolean>
+    },
+    /** Fires when a scheduled reminder's timer goes off in main. */
+    onFired(cb: (reminder: Reminder) => void): () => void {
+      const handler = (_: Electron.IpcRendererEvent, r: Reminder): void => cb(r)
+      ipcRenderer.on('reminder:fired', handler)
+      return () => {
+        ipcRenderer.off('reminder:fired', handler)
+      }
     },
   },
 }
