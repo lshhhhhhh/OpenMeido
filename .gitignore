@@ -10,3 +10,8 @@ build
 .idea
 .env
 .env.local
+
+# Live2D models with restrictive licenses — keep out of git history.
+# Only models with explicit redistribution rights (e.g. Live2D official
+# samples under the Free Material License v1.6) should be tracked.
+src/renderer/public/live2d-models/haitu_vts/

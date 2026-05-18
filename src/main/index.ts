@@ -7,6 +7,14 @@ import { IPC, type ChatSendPayload } from '../shared/ipc.js'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
+// Force hardware-accelerated WebGL. Without these, Electron's renderer may
+// fall back to software rendering (SwiftShader), where MAX_TEXTURE_IMAGE_UNITS
+// returns 0 and PIXI's BatchRenderer init crashes. Must be set before
+// app.whenReady().
+app.commandLine.appendSwitch('ignore-gpu-blocklist')
+app.commandLine.appendSwitch('enable-gpu-rasterization')
+app.commandLine.appendSwitch('enable-zero-copy')
+
 // Load .env from project root. Available since Node 20.12 / 21.7,
 // which Electron 33 (Node 20.18) ships with. Optional — falls back to
 // whatever's already in process.env (e.g. shell-exported keys).

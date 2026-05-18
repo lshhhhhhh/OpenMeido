@@ -24,7 +24,11 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^1.0.0",
+    "@pixi/core": "^7.4.3",
+    "@pixi/display": "^7.4.3",
     "ai": "^4.0.0",
+    "pixi-live2d-display-lipsyncpatch": "^0.5.0-ls-8",
+    "pixi.js": "^7.4.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zod": "^3.23.0"

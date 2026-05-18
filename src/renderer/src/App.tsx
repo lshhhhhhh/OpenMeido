@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 
 import type { ChatEvent } from '../../shared/ipc'
+import { Live2DCanvas } from './live2d/Live2DCanvas'
+
+const MODEL_PATH = '/live2d-models/haitu_vts/海兔1.model3.json'
 
 interface ToolCall {
   name: string
@@ -18,7 +21,6 @@ export default function App() {
 
   useEffect(() => {
     return window.api.chat.onEvent((event: ChatEvent) => {
-      // Ignore stragglers from a previous send.
       if (event.messageId !== activeIdRef.current) return
 
       switch (event.type) {
@@ -63,67 +65,80 @@ export default function App() {
   }
 
   return (
-    <div
-      style={{
-        padding: 24,
-        fontFamily: 'system-ui, sans-serif',
-        maxWidth: 720,
-        margin: '0 auto',
-      }}
-    >
-      <h1 style={{ marginBottom: 4 }}>OpenMeido</h1>
-      <p style={{ color: '#888', marginTop: 0 }}>Spike 2 — chat in Electron with streaming + tools.</p>
-
-      <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault()
-              send()
-            }
-          }}
-          placeholder="试试：提醒我五分钟后喝水"
-          disabled={busy}
-          style={{ flex: 1, padding: '8px 10px', fontSize: 14 }}
-        />
-        <button onClick={send} disabled={busy || !input.trim()} style={{ padding: '8px 16px' }}>
-          {busy ? '…' : 'Send'}
-        </button>
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+      {/* Live2D stage — fills upper portion. */}
+      <div style={{ flex: '1 1 60%', minHeight: 0, background: '#f0e6f0' }}>
+        <Live2DCanvas modelPath={MODEL_PATH} fitMode="portrait" />
       </div>
 
-      {error && (
-        <pre style={{ color: '#c00', whiteSpace: 'pre-wrap', marginTop: 16 }}>
-          [error] {error}
-        </pre>
-      )}
-
-      {toolCalls.length > 0 && (
-        <div style={{ marginTop: 16, fontSize: 12, color: '#666' }}>
-          {toolCalls.map((tc, i) => (
-            <div key={i} style={{ borderLeft: '3px solid #ddd', padding: '4px 8px', marginBottom: 4 }}>
-              <div>
-                <b>{tc.name}</b> {JSON.stringify(tc.args)}
-              </div>
-              {tc.result !== undefined && <div>→ {JSON.stringify(tc.result)}</div>}
-            </div>
-          ))}
-        </div>
-      )}
-
+      {/* Chat panel — fixed-ish lower portion. */}
       <div
         style={{
-          marginTop: 16,
+          flex: '1 1 40%',
+          minHeight: 0,
           padding: 16,
-          background: '#f7f7f7',
-          borderRadius: 6,
-          minHeight: 80,
-          whiteSpace: 'pre-wrap',
-          lineHeight: 1.6,
+          borderTop: '1px solid #ddd',
+          background: '#fff',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          fontFamily: 'system-ui, sans-serif',
         }}
       >
-        {reply || (busy ? 'thinking…' : <span style={{ color: '#aaa' }}>reply appears here</span>)}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                send()
+              }
+            }}
+            placeholder="试试：提醒我五分钟后喝水"
+            disabled={busy}
+            style={{ flex: 1, padding: '8px 10px', fontSize: 14 }}
+          />
+          <button onClick={send} disabled={busy || !input.trim()} style={{ padding: '8px 16px' }}>
+            {busy ? '…' : 'Send'}
+          </button>
+        </div>
+
+        {error && (
+          <pre style={{ color: '#c00', whiteSpace: 'pre-wrap', margin: 0 }}>
+            [error] {error}
+          </pre>
+        )}
+
+        {toolCalls.length > 0 && (
+          <div style={{ fontSize: 12, color: '#666' }}>
+            {toolCalls.map((tc, i) => (
+              <div
+                key={i}
+                style={{ borderLeft: '3px solid #ddd', padding: '4px 8px', marginBottom: 4 }}
+              >
+                <div>
+                  <b>{tc.name}</b> {JSON.stringify(tc.args)}
+                </div>
+                {tc.result !== undefined && <div>→ {JSON.stringify(tc.result)}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div
+          style={{
+            flex: 1,
+            padding: 12,
+            background: '#f7f7f7',
+            borderRadius: 6,
+            overflowY: 'auto',
+            whiteSpace: 'pre-wrap',
+            lineHeight: 1.6,
+          }}
+        >
+          {reply || (busy ? 'thinking…' : <span style={{ color: '#aaa' }}>reply appears here</span>)}
+        </div>
       </div>
     </div>
   )
