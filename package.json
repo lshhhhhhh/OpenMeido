@@ -12,6 +12,8 @@
     "spike1": "node --env-file=.env --import tsx tools/spike1.ts"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -27,11 +29,13 @@
     "@pixi/core": "^7.4.3",
     "@pixi/display": "^7.4.3",
     "ai": "^4.0.0",
+    "better-sqlite3": "^12.10.0",
     "electron-store": "^11.0.2",
     "pixi-live2d-display-lipsyncpatch": "^0.5.0-ls-8",
     "pixi.js": "^7.4.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "sqlite-vec": "^0.1.9",
     "zod": "^3.23.0"
   }
 }

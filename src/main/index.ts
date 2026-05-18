@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 import { runChat } from './chat.js'
 import { getConfig, setConfig, onConfigChange } from './config.js'
+import { initMemory } from './memory/store.js'
 import { IPC, type ChatSendPayload } from '../shared/ipc.js'
 import { configSchema, ConfigIPC, type Config } from '../shared/config.js'
 
@@ -106,6 +107,7 @@ ipcMain.handle(ConfigIPC.Set, (_event, next: Config) => {
 })
 
 void app.whenReady().then(() => {
+  initMemory(getConfig(), app.getPath('userData'))
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

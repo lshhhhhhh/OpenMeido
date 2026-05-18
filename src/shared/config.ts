@@ -104,6 +104,32 @@ export const configSchema = z.object({
       height: z.number().int().min(400).default(620),
     })
     .default({}),
+  embedding: z
+    .object({
+      /** Empty = inherit from backend.baseUrl. */
+      baseUrl: z.string().default(''),
+      /** Empty = inherit from backend.apiKey / .env. */
+      apiKey: z.string().default(''),
+      /** OpenAI text-embedding-3-small is the cheap multilingual default. */
+      model: z.string().default('text-embedding-3-small'),
+      /**
+       * Vector dimension. Locked at first DB init — changing this later
+       * means re-embedding everything (we drop + recreate the vec table).
+       * 1536 is text-embedding-3-small's native; Gemini's embedding-001
+       * supports Matryoshka truncation to 1536 as well.
+       */
+      dim: z.number().int().default(1536),
+    })
+    .default({}),
+  memory: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** How many semantically-similar past episodes to inject. */
+      topK: z.number().int().min(0).max(20).default(5),
+      /** How many most-recent episodes to always include (working window). */
+      recentN: z.number().int().min(0).max(40).default(10),
+    })
+    .default({}),
 })
 
 export type Config = z.infer<typeof configSchema>

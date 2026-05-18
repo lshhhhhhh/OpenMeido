@@ -12,6 +12,12 @@ interface ToolCall {
   result?: unknown
 }
 
+interface ChatMessage {
+  role: 'user' | 'assistant'
+  text: string
+  toolCalls?: ToolCall[]
+}
+
 // `-webkit-app-region` isn't in @types/react's CSSProperties yet. Bridge it.
 type AppRegionStyle = React.CSSProperties & { WebkitAppRegion?: 'drag' | 'no-drag' }
 
@@ -21,15 +27,26 @@ const MIN_LIVE2D_HEIGHT = 120
 
 export default function App() {
   const [input, setInput] = useState('')
-  const [reply, setReply] = useState('')
-  const [toolCalls, setToolCalls] = useState<ToolCall[]>([])
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [chatHeight, setChatHeight] = useState(DEFAULT_CHAT_HEIGHT)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const activeIdRef = useRef<string | null>(null)
   const live2dRef = useRef<Live2DController>(null)
+  const messageListRef = useRef<HTMLDivElement>(null)
   const config = useConfig()
+
+  // Append a text delta or a tool event to the LAST assistant message. We
+  // create that message synchronously in send() so by the time stream events
+  // arrive, there's always a tail to append to.
+  function patchLastAssistant(patch: (m: ChatMessage) => ChatMessage): void {
+    setMessages((prev) => {
+      const last = prev[prev.length - 1]
+      if (!last || last.role !== 'assistant') return prev
+      return [...prev.slice(0, -1), patch(last)]
+    })
+  }
 
   useEffect(() => {
     return window.api.chat.onEvent((event: ChatEvent) => {
@@ -37,21 +54,24 @@ export default function App() {
 
       switch (event.type) {
         case 'text':
-          setReply((r) => r + event.delta)
+          patchLastAssistant((m) => ({ ...m, text: m.text + event.delta }))
           break
         case 'tool-call':
-          setToolCalls((tc) => [...tc, { name: event.toolName, args: event.args }])
+          patchLastAssistant((m) => ({
+            ...m,
+            toolCalls: [...(m.toolCalls ?? []), { name: event.toolName, args: event.args }],
+          }))
           break
         case 'tool-result':
-          setToolCalls((tc) => {
-            const next = [...tc]
-            for (let i = next.length - 1; i >= 0; i--) {
-              if (next[i]!.name === event.toolName && next[i]!.result === undefined) {
-                next[i] = { ...next[i]!, result: event.result }
+          patchLastAssistant((m) => {
+            const tc = (m.toolCalls ?? []).slice()
+            for (let i = tc.length - 1; i >= 0; i--) {
+              if (tc[i]!.name === event.toolName && tc[i]!.result === undefined) {
+                tc[i] = { ...tc[i]!, result: event.result }
                 break
               }
             }
-            return next
+            return { ...m, toolCalls: tc }
           })
           break
         case 'done':
@@ -65,13 +85,22 @@ export default function App() {
     })
   }, [])
 
+  // Autoscroll the message list to the bottom whenever it grows.
+  useEffect(() => {
+    const el = messageListRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages, busy])
+
   function send(): void {
     const text = input.trim()
     if (!text || busy) return
-    setReply('')
-    setToolCalls([])
     setError(null)
     setBusy(true)
+    setMessages((prev) => [
+      ...prev,
+      { role: 'user', text },
+      { role: 'assistant', text: '' },
+    ])
     activeIdRef.current = window.api.chat.send(text)
     setInput('')
   }
@@ -250,70 +279,106 @@ export default function App() {
           />
         </div>
 
-        <div style={{ padding: '4px 12px 12px', display: 'flex', flexDirection: 'column', gap: 8, flex: 1, minHeight: 0 }}>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                send()
-              }
-            }}
-            placeholder="试试：提醒我五分钟后喝水"
-            disabled={busy}
-            style={{ flex: 1, padding: '6px 10px', fontSize: 13 }}
-          />
-          <button onClick={send} disabled={busy || !input.trim()} style={{ padding: '6px 14px' }}>
-            {busy ? '…' : 'Send'}
-          </button>
-        </div>
-
-        {error && (
-          <pre style={{ color: '#c00', whiteSpace: 'pre-wrap', margin: 0, fontSize: 12 }}>
-            [error] {error}
-          </pre>
-        )}
-
-        {toolCalls.length > 0 && (
-          <div style={{ fontSize: 11, color: '#666' }}>
-            {toolCalls.map((tc, i) => (
-              <div
-                key={i}
-                style={{ borderLeft: '3px solid #ddd', padding: '3px 6px', marginBottom: 3 }}
-              >
-                <div>
-                  <b>{tc.name}</b> {JSON.stringify(tc.args)}
-                </div>
-                {tc.result !== undefined && <div>→ {JSON.stringify(tc.result)}</div>}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {(reply || busy) && (
+        <div
+          style={{
+            padding: '4px 12px 12px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            flex: 1,
+            minHeight: 0,
+          }}
+        >
+          {/* Message history — scrollable, takes all remaining vertical room. */}
           <div
+            ref={messageListRef}
             style={{
-              padding: 8,
-              background: 'rgba(0, 0, 0, 0.04)',
-              borderRadius: 6,
-              maxHeight: 140,
+              flex: 1,
+              minHeight: 0,
               overflowY: 'auto',
-              whiteSpace: 'pre-wrap',
-              lineHeight: 1.5,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
               fontSize: 13,
+              lineHeight: 1.45,
             }}
           >
-            {reply || 'thinking…'}
+            {messages.length === 0 && !busy && (
+              <div style={{ color: '#999', fontSize: 12 }}>开始聊天吧 ✨</div>
+            )}
+            {messages.map((m, i) => (
+              <MessageBubble key={i} message={m} busy={busy && i === messages.length - 1} />
+            ))}
+            {error && (
+              <pre style={{ color: '#c00', whiteSpace: 'pre-wrap', margin: 0, fontSize: 12 }}>
+                [error] {error}
+              </pre>
+            )}
           </div>
-        )}
+
+          {/* Input row pinned to the bottom of the chat card. */}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  send()
+                }
+              }}
+              placeholder="试试：提醒我五分钟后喝水"
+              disabled={busy}
+              style={{ flex: 1, padding: '6px 10px', fontSize: 13 }}
+            />
+            <button
+              onClick={send}
+              disabled={busy || !input.trim()}
+              style={{ padding: '6px 14px' }}
+            >
+              {busy ? '…' : 'Send'}
+            </button>
+          </div>
         </div>
       </div>
 
       {settingsOpen && config && (
         <Settings initial={config} onClose={() => setSettingsOpen(false)} />
       )}
+    </div>
+  )
+}
+
+function MessageBubble({ message, busy }: { message: ChatMessage; busy: boolean }) {
+  const isUser = message.role === 'user'
+  return (
+    <div style={{ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start' }}>
+      <div
+        style={{
+          maxWidth: '85%',
+          padding: '6px 10px',
+          borderRadius: 10,
+          background: isUser ? 'rgba(120, 160, 255, 0.18)' : 'rgba(0, 0, 0, 0.05)',
+          whiteSpace: 'pre-wrap',
+        }}
+      >
+        {message.text || (busy ? <span style={{ color: '#aaa' }}>thinking…</span> : '')}
+        {message.toolCalls && message.toolCalls.length > 0 && (
+          <div style={{ marginTop: 4, fontSize: 11, color: '#666' }}>
+            {message.toolCalls.map((tc, i) => (
+              <div
+                key={i}
+                style={{ borderLeft: '3px solid #ccc', padding: '2px 6px', marginTop: 2 }}
+              >
+                <b>{tc.name}</b> {JSON.stringify(tc.args)}
+                {tc.result !== undefined && (
+                  <div style={{ color: '#888' }}>→ {JSON.stringify(tc.result)}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
