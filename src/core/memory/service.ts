@@ -48,6 +48,9 @@ export interface MemoryService {
   /** Generate a new session id; future addEpisode calls tag with it. */
   newSession(): string
 
+  /** Switch the active session to an existing id (continue an old chat). */
+  setSession(id: string): void
+
   /** Current session id (what new turns are being tagged with). */
   currentSession(): string
 }
@@ -65,6 +68,22 @@ function makeSessionId(): string {
   return globalThis.crypto.randomUUID()
 }
 
+/**
+ * Pick an embedding model that matches the backend host. The schema's
+ * default is `text-embedding-3-small` (OpenAI) — fine when chat goes to
+ * OpenAI, but every other host (Gemini, Anthropic, LM Studio) rejects
+ * that id with 404, which silently kills addEpisode. So if the user
+ * never customised the embedding model, swap to a host-native one.
+ */
+function inferEmbeddingModel(baseUrl: string, configured: string): string {
+  const isDefault = !configured || configured === 'text-embedding-3-small'
+  if (!isDefault) return configured
+  if (baseUrl.includes('googleapis.com')) return 'gemini-embedding-001'
+  // OpenAI itself, LM Studio (depends on what user loaded — best effort),
+  // and unknown self-hosted endpoints stay on the OpenAI default.
+  return 'text-embedding-3-small'
+}
+
 export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   const { adapter, getConfig, resolveApiKey } = deps
 
@@ -72,10 +91,11 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
   const embedOpts = (): EmbedOptions => {
     const cfg = getConfig()
+    const baseUrl = cfg.embedding.baseUrl || cfg.backend.baseUrl
     return {
-      baseUrl: cfg.embedding.baseUrl || cfg.backend.baseUrl,
+      baseUrl,
       apiKey: cfg.embedding.apiKey || resolveApiKey(),
-      model: cfg.embedding.model,
+      model: inferEmbeddingModel(baseUrl, cfg.embedding.model),
       dim: cfg.embedding.dim,
     }
   }
@@ -131,6 +151,10 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     newSession() {
       sessionId = makeSessionId()
       return sessionId
+    },
+
+    setSession(id) {
+      sessionId = id
     },
 
     currentSession() {

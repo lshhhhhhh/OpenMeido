@@ -125,6 +125,9 @@ const api = {
     newSession(): Promise<string | null> {
       return ipcRenderer.invoke('memory:newSession') as Promise<string | null>
     },
+    setSession(id: string): Promise<string | null> {
+      return ipcRenderer.invoke('memory:setSession', id) as Promise<string | null>
+    },
   },
 }
 

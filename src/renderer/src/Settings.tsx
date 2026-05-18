@@ -888,7 +888,7 @@ function MemoryTab() {
         </button>
       </div>
 
-      <Label>查看会话</Label>
+      <Label>查看会话（切换需要点下方按钮）</Label>
       {sessions.length === 0 ? (
         <div style={{ color: '#777', fontSize: 12, padding: 8 }}>
           还没有任何对话记录。聊几句就有了。
@@ -897,6 +897,9 @@ function MemoryTab() {
         <>
           <select
             value={viewSessionId ?? ''}
+            // Dropdown is preview-only. Switching the ACTIVE session is a
+            // big deal (changes where future chat lands) so we require an
+            // explicit click on the "切换到此会话" button below.
             onChange={(e) => setViewSessionId(e.target.value)}
             style={{ ...inputStyle, marginBottom: 8 }}
           >
@@ -906,6 +909,28 @@ function MemoryTab() {
               </option>
             ))}
           </select>
+
+          {/* Switch button — appears only when peeking at a session that
+              isn't already the active one. Disabled on the current session
+              to make "this is already active" visible. */}
+          {viewSessionId && viewSessionId !== status.sessionId && (
+            <button
+              onClick={async () => {
+                if (!viewSessionId) return
+                setBusy(true)
+                try {
+                  await window.api.memory.setSession(viewSessionId)
+                  await refresh()
+                } finally {
+                  setBusy(false)
+                }
+              }}
+              disabled={busy}
+              style={{ ...btnStyle('primary'), marginBottom: 8, width: '100%' }}
+            >
+              切换到此会话 · 之后的对话都续在这里
+            </button>
+          )}
 
           <div
             style={{
@@ -941,7 +966,7 @@ function MemoryTab() {
             )}
           </div>
           <div style={{ fontSize: 10, color: '#777', marginTop: 4 }}>
-            ★ = 当前会话（新对话默认归入这里）。切换 dropdown 看历史会话。
+            ★ = 当前活跃会话（新对话会归入这里）。dropdown 只是预览，要切换请点上方按钮。
           </div>
         </>
       )}

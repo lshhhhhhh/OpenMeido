@@ -171,6 +171,12 @@ ipcMain.handle('memory:newSession', () => {
   if (!svc) return null
   return svc.newSession()
 })
+ipcMain.handle('memory:setSession', (_event, id: string) => {
+  const svc = getMemoryService()
+  if (!svc) return null
+  svc.setSession(id)
+  return id
+})
 
 void app.whenReady().then(() => {
   initMemory()
