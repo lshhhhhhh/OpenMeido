@@ -3,7 +3,9 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { runChat } from './chat.js'
+import { getConfig, setConfig, onConfigChange } from './config.js'
 import { IPC, type ChatSendPayload } from '../shared/ipc.js'
+import { configSchema, ConfigIPC, type Config } from '../shared/config.js'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
@@ -21,19 +23,23 @@ app.commandLine.appendSwitch('enable-zero-copy')
 try {
   process.loadEnvFile(join(__dirname, '../../.env'))
 } catch {
-  // .env missing — OK if the env is provided some other way.
+  // .env missing — OK in shipped builds (GUI config carries the keys).
 }
 
+let mainWindow: BrowserWindow | null = null
+
 function createWindow(): void {
+  const cfg = getConfig()
+
   const win = new BrowserWindow({
-    width: 360,
-    height: 620,
+    width: cfg.window.width,
+    height: cfg.window.height,
     minWidth: 260,
     minHeight: 400,
     transparent: true,
     frame: false,
     resizable: true,
-    alwaysOnTop: true,
+    alwaysOnTop: cfg.window.alwaysOnTop,
     // Explicit fully-transparent backgroundColor. Electron defaults to
     // '#FFFFFF' which paints opaque white before the renderer's CSS even
     // loads — on Windows that white sometimes "wins" against transparent.
@@ -42,9 +48,6 @@ function createWindow(): void {
     // thickFrame defaults to true on Windows and is what makes the otherwise-
     // invisible edges of a frame:false window draggable for resize. Don't
     // disable it unless you ship CSS-based resize handles in the renderer.
-    // Skipping the taskbar is optional — comment out if you want OpenMeido
-    // to appear in the Windows taskbar for easier alt-tabbing during dev.
-    // skipTaskbar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       sandbox: false,
@@ -56,20 +59,54 @@ function createWindow(): void {
   } else {
     void win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  // Persist the user's manual resize so next launch opens at the same size.
+  win.on('resize', () => {
+    if (win.isDestroyed()) return
+    const size = win.getSize()
+    const w = size[0] ?? cfg.window.width
+    const h = size[1] ?? cfg.window.height
+    const current = getConfig()
+    if (current.window.width !== w || current.window.height !== h) {
+      setConfig({ ...current, window: { ...current.window, width: w, height: h } })
+    }
+  })
+
+  mainWindow = win
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null
+  })
 }
+
+// Apply live config changes to the running window where possible. width/height
+// already persist via the resize listener above, so we don't push them back.
+onConfigChange((next) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setAlwaysOnTop(next.window.alwaysOnTop)
+  }
+})
+
+// ---- Chat IPC ----
 
 ipcMain.on(IPC.ChatSend, (event, payload: ChatSendPayload) => {
   void runChat(payload.messageId, payload.text, (chatEvent) => {
-    // Renderer may have been closed mid-stream; guard against destroyed sender.
     if (!event.sender.isDestroyed()) {
       event.sender.send(IPC.ChatEvent, chatEvent)
     }
   })
 })
 
+// ---- Config IPC ----
+
+ipcMain.handle(ConfigIPC.Get, () => getConfig())
+ipcMain.handle(ConfigIPC.Set, (_event, next: Config) => {
+  // Re-validate at the boundary — never trust raw renderer payloads.
+  const validated = configSchema.parse(next)
+  return setConfig(validated)
+})
+
 void app.whenReady().then(() => {
   createWindow()
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

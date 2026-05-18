@@ -3,8 +3,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { ChatEvent } from '../../shared/ipc'
 import { Live2DCanvas } from './live2d/Live2DCanvas'
 import type { Live2DController } from './live2d/stage'
-
-const MODEL_PATH = '/live2d-models/haitu_vts/海兔1.model3.json'
+import { Settings } from './Settings'
+import { useConfig } from './useConfig'
 
 interface ToolCall {
   name: string
@@ -26,8 +26,10 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [chatHeight, setChatHeight] = useState(DEFAULT_CHAT_HEIGHT)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const activeIdRef = useRef<string | null>(null)
   const live2dRef = useRef<Live2DController>(null)
+  const config = useConfig()
 
   useEffect(() => {
     return window.api.chat.onEvent((event: ChatEvent) => {
@@ -130,31 +132,57 @@ export default function App() {
         }}
       >
         <span>OpenMeido</span>
-        <button
-          onClick={() => window.close()}
-          title="Close"
-          style={{
-            ...noDragRegion,
-            width: 20,
-            height: 20,
-            border: 'none',
-            borderRadius: 10,
-            background: 'rgba(0,0,0,0.25)',
-            color: 'white',
-            fontSize: 13,
-            lineHeight: '20px',
-            cursor: 'pointer',
-            padding: 0,
-          }}
-        >
-          ×
-        </button>
+        <div style={{ ...noDragRegion, display: 'flex', gap: 6, alignItems: 'center' }}>
+          <button
+            onClick={() => setSettingsOpen(true)}
+            title="设置"
+            style={{
+              width: 20,
+              height: 20,
+              border: 'none',
+              borderRadius: 10,
+              background: 'rgba(0,0,0,0.15)',
+              color: '#444',
+              fontSize: 12,
+              lineHeight: '20px',
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            ⚙
+          </button>
+          <button
+            onClick={() => window.close()}
+            title="Close"
+            style={{
+              width: 20,
+              height: 20,
+              border: 'none',
+              borderRadius: 10,
+              background: 'rgba(0,0,0,0.25)',
+              color: 'white',
+              fontSize: 13,
+              lineHeight: '20px',
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            ×
+          </button>
+        </div>
       </div>
 
       {/* Live2D stage — fills the bulk of the window, transparent BG so the
           desktop shows through everywhere except where the character renders. */}
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        <Live2DCanvas ref={live2dRef} modelPath={MODEL_PATH} fitMode="portrait" />
+        {config && (
+          <Live2DCanvas
+            ref={live2dRef}
+            modelPath={config.live2d.modelPath}
+            fitMode="portrait"
+            portraitZoom={config.live2d.portraitZoom}
+          />
+        )}
         {/* Slice 2 test controls — floating top-left, no-drag so they're clickable. */}
         <div
           style={{
@@ -174,39 +202,55 @@ export default function App() {
         </div>
       </div>
 
-      {/* Invisible vertical resizer — 6px hit zone, no visual chrome. Cursor
-          turns into ns-resize when hovering between panes, which is the only
-          hint users get that the boundary is draggable. */}
-      <div
-        onMouseDown={startSplitterDrag}
-        title="拖动以调整聊天区高度"
-        style={{
-          ...noDragRegion,
-          flex: '0 0 auto',
-          height: 6,
-          cursor: 'ns-resize',
-          background: 'transparent',
-        }}
-      />
-
       {/* Chat panel — translucent card at the bottom, no-drag so the input
           and buttons receive normal clicks instead of starting a window drag.
-          Height is controlled by chatHeight state and the splitter above. */}
+          Height is controlled by chatHeight + the resize strip below.
+          Rounded top corners make the top edge look like an intentional card
+          boundary, not a frame. */}
       <div
         style={{
           ...noDragRegion,
           flex: '0 0 auto',
           height: chatHeight,
-          padding: 12,
           background: 'rgba(255, 255, 255, 0.88)',
           backdropFilter: 'blur(8px)',
+          borderRadius: '14px 14px 0 0',
           display: 'flex',
           flexDirection: 'column',
-          gap: 8,
           fontFamily: 'system-ui, sans-serif',
           overflow: 'hidden',
         }}
       >
+        {/* Resize strip — lives INSIDE the chat panel's top so its 6px height
+            inherits the white background instead of cutting a transparent
+            gap between Live2D and chat. Hit zone is taller than the visible
+            handle so the grab is forgiving. */}
+        <div
+          onMouseDown={startSplitterDrag}
+          title="拖动以调整聊天区高度"
+          style={{
+            ...noDragRegion,
+            flex: '0 0 auto',
+            height: 8,
+            cursor: 'ns-resize',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          {/* Tiny pill so users can see the handle exists; subtle enough not
+              to dominate. */}
+          <div
+            style={{
+              width: 32,
+              height: 3,
+              borderRadius: 2,
+              background: 'rgba(0,0,0,0.18)',
+            }}
+          />
+        </div>
+
+        <div style={{ padding: '4px 12px 12px', display: 'flex', flexDirection: 'column', gap: 8, flex: 1, minHeight: 0 }}>
         <div style={{ display: 'flex', gap: 8 }}>
           <input
             value={input}
@@ -264,7 +308,12 @@ export default function App() {
             {reply || 'thinking…'}
           </div>
         )}
+        </div>
       </div>
+
+      {settingsOpen && config && (
+        <Settings initial={config} onClose={() => setSettingsOpen(false)} />
+      )}
     </div>
   )
 }

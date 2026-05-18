@@ -54,7 +54,7 @@ async function main(): Promise<void> {
   console.log(`  (now = ${now})\n`)
 
   const result = await generateText({
-    model: openai('gpt-5-mini'),
+    model: openai('gpt-5.4-mini'),
     // gpt-5.x reasoning models only accept default temperature=1
     temperature: 1,
     system:

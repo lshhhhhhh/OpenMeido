@@ -1,17 +1,20 @@
 /**
- * AI pipeline for the main process. Same shape as tools/spike1.ts, but:
- *   - uses streamText (incremental output) instead of generateText
- *   - emits events through a callback so the IPC layer can forward to renderer
+ * AI pipeline for the main process. Builds an OpenAI-compatible client from
+ * config on every call (so settings changes apply immediately without a
+ * restart) and streams the response back to the renderer via the emit
+ * callback.
  *
  * The renderer never sees this module — it only sees the ChatEvent shape
  * defined in src/shared/ipc.ts.
  */
 
-import { openai } from '@ai-sdk/openai'
+import { createOpenAI } from '@ai-sdk/openai'
 import { streamText, tool } from 'ai'
 import { z } from 'zod'
 
 import type { ChatEvent, ChatEventBody } from '../shared/ipc.js'
+import { resolvePersona } from '../shared/config.js'
+import { getConfig, resolveApiKey } from './config.js'
 
 // Spike-only in-memory reminder store. Real impl will persist to sqlite.
 interface Reminder {
@@ -49,20 +52,29 @@ export async function runChat(
   const localEmit = (body: ChatEventBody): void => emit({ messageId, ...body })
 
   try {
-    if (!process.env.OPENAI_API_KEY) {
-      localEmit({ type: 'error', error: 'OPENAI_API_KEY not set in main process' })
+    const cfg = getConfig()
+    const apiKey = resolveApiKey(cfg)
+    if (!apiKey) {
+      localEmit({
+        type: 'error',
+        error: 'No API key set. Open settings (gear icon) and paste your key.',
+      })
       return
     }
 
+    const persona = resolvePersona(cfg.persona)
+    const provider = createOpenAI({ baseURL: cfg.backend.baseUrl, apiKey })
     const now = new Date().toISOString()
+
     const result = streamText({
-      model: openai('gpt-5-mini'),
+      model: provider(cfg.backend.model),
       temperature: 1,
       system:
-        `You are OpenMeido, a helpful Japanese-maid-flavored productivity assistant. ` +
-        `Current time: ${now}. ` +
-        `When the user wants to be reminded of something, ALWAYS call the setReminder tool. ` +
-        `Reply in the user's language.`,
+        `${persona.systemPrompt}\n\n` +
+        `[功能说明 — 不要让用户察觉]\n` +
+        `当前时间：${now}\n` +
+        `用户希望被提醒时（"提醒我..."、"...时叫我"等），调用 setReminder 工具。` +
+        `工具调用后用人物语气自然回复一两句确认。`,
       prompt: userText,
       tools: { setReminder },
       maxSteps: 3,

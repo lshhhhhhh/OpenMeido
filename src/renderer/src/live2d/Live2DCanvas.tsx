@@ -5,6 +5,7 @@ import { Live2DStage, type FitMode, type Live2DController } from './stage'
 interface Live2DCanvasProps {
   modelPath: string
   fitMode?: FitMode
+  portraitZoom?: number
   className?: string
   style?: React.CSSProperties
 }
@@ -21,7 +22,7 @@ interface Live2DCanvasProps {
  * canvas means each mount gets a brand-new GL context.
  */
 export const Live2DCanvas = forwardRef<Live2DController | null, Live2DCanvasProps>(
-  function Live2DCanvas({ modelPath, fitMode, className, style }, ref) {
+  function Live2DCanvas({ modelPath, fitMode, portraitZoom, className, style }, ref) {
     const hostRef = useRef<HTMLDivElement>(null)
     const stageRef = useRef<Live2DStage | null>(null)
 
@@ -44,16 +45,28 @@ export const Live2DCanvas = forwardRef<Live2DController | null, Live2DCanvasProp
       [],
     )
 
+    // Mount-time stage creation. Only modelPath is in the dep array — fitMode
+    // and portraitZoom are pushed in via separate effects below to avoid a
+    // costly full PIXI/model reload when the user just tweaks zoom.
     useEffect(() => {
       const host = hostRef.current
       if (!host) return
-      const stage = new Live2DStage({ host, modelPath, fitMode })
+      const stage = new Live2DStage({ host, modelPath, fitMode, portraitZoom })
       stageRef.current = stage
       return () => {
         stage.destroy()
         stageRef.current = null
       }
-    }, [modelPath, fitMode])
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [modelPath])
+
+    // Live-tunable props.
+    useEffect(() => {
+      if (fitMode) stageRef.current?.setFitMode(fitMode)
+    }, [fitMode])
+    useEffect(() => {
+      if (portraitZoom !== undefined) stageRef.current?.setPortraitZoom(portraitZoom)
+    }, [portraitZoom])
 
     return (
       <div

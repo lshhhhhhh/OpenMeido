@@ -54,6 +54,8 @@ export interface Live2DStageOptions {
   host: HTMLElement
   modelPath: string
   fitMode?: FitMode
+  /** In 'portrait' mode, scale the model so it's this many canvas widths wide. >1 crops the body off. */
+  portraitZoom?: number
   /** Cubism parameter id driving the mouth-open value (0–1). Default for most VTuber models. */
   mouthParamId?: string
   /** Auto-clear an emoted expression after this many ms. 0 = sticky. */
@@ -90,6 +92,7 @@ export class Live2DStage implements Live2DController {
   private readonly resizeObserver: ResizeObserver
   private model: Live2DDisplayable | null = null
   private fitMode: FitMode
+  private portraitZoom: number
   private mouthParamId: string
   private expressionDecayMs: number
   private expressionTimer: ReturnType<typeof setTimeout> | null = null
@@ -117,6 +120,7 @@ export class Live2DStage implements Live2DController {
 
   constructor(opts: Live2DStageOptions) {
     this.fitMode = opts.fitMode ?? 'portrait'
+    this.portraitZoom = opts.portraitZoom ?? 1.6
     this.mouthParamId = opts.mouthParamId ?? 'ParamMouthOpenY'
     this.expressionDecayMs = opts.expressionDecayMs ?? 8000
     this.host = opts.host
@@ -200,11 +204,10 @@ export class Live2DStage implements Live2DController {
     let baseY: number
     if (this.fitMode === 'portrait') {
       // Zoom in so only the upper body fits in the canvas — lower body
-      // falls below the visible area. 1.6 was eyeballed; tune if your model
-      // proportions differ. Head must still fit horizontally: avoid pushing
-      // past ~1.8 unless the model's head/body width ratio is small.
-      const portraitZoom = 1.6
-      this.model.scale.set((sw / mw) * portraitZoom)
+      // falls below the visible area. Configurable via Live2DStageOptions;
+      // 1.6 default. Head must still fit horizontally — avoid pushing past
+      // ~1.8 unless the model's head/body width ratio is small.
+      this.model.scale.set((sw / mw) * this.portraitZoom)
       this.model.anchor.set(0.5, 0.0)
       baseX = sw / 2
       baseY = 0
@@ -369,6 +372,11 @@ export class Live2DStage implements Live2DController {
   setFitMode(mode: FitMode): void {
     this.fitMode = mode
     this.userPos = null
+    this.fit()
+  }
+
+  setPortraitZoom(zoom: number): void {
+    this.portraitZoom = zoom
     this.fit()
   }
 
