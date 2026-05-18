@@ -3,6 +3,7 @@ dist
 out
 build
 *.log
+*.tsbuildinfo
 .DS_Store
 .vscode/*
 !.vscode/extensions.json
