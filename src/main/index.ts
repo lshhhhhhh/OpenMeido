@@ -26,8 +26,25 @@ try {
 
 function createWindow(): void {
   const win = new BrowserWindow({
-    width: 900,
-    height: 700,
+    width: 360,
+    height: 620,
+    minWidth: 260,
+    minHeight: 400,
+    transparent: true,
+    frame: false,
+    resizable: true,
+    alwaysOnTop: true,
+    // Explicit fully-transparent backgroundColor. Electron defaults to
+    // '#FFFFFF' which paints opaque white before the renderer's CSS even
+    // loads — on Windows that white sometimes "wins" against transparent.
+    // The 4-byte hex with leading zero alpha forces transparency.
+    backgroundColor: '#00000000',
+    // thickFrame defaults to true on Windows and is what makes the otherwise-
+    // invisible edges of a frame:false window draggable for resize. Don't
+    // disable it unless you ship CSS-based resize handles in the renderer.
+    // Skipping the taskbar is optional — comment out if you want OpenMeido
+    // to appear in the Windows taskbar for easier alt-tabbing during dev.
+    // skipTaskbar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       sandbox: false,

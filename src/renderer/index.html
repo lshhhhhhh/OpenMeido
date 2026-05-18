@@ -7,6 +7,18 @@
     <!-- Cubism Core SDK — proprietary, no npm package. Must load BEFORE
          pixi-live2d-display imports run, so it goes here, not in a module. -->
     <script src="/live2d-core/live2dcubismcore.min.js"></script>
+    <style>
+      /* The Electron BrowserWindow is { transparent: true, frame: false }.
+         Browsers default body/html to white — clear them so the desktop
+         shows through everywhere we don't explicitly paint. */
+      html, body, #root {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
