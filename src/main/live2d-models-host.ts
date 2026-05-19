@@ -53,24 +53,37 @@ function findBundledRoot(): string | null {
 }
 
 /**
- * On first launch, copy bundled starter models into userData. Skipped if the
- * userData dir already has any model — we never overwrite the user's edits
- * or imports.
+ * On every launch, copy any bundled model that's NOT already in userData.
+ * Additive — never overwrites existing user models (including their
+ * edited sidecars), so a user who imported their own models or edited
+ * the emotion mapping won't lose state. Conversely, when we bundle new
+ * models in a future release, old installs get them on next start.
+ *
+ * One side effect: a user who DELETES a bundled model from userData will
+ * see it come back on next launch. Documented; if it turns out to bother
+ * anyone, we can add a `.deleted` marker file to suppress re-seeding.
  */
 export async function initLive2DModels(): Promise<void> {
   const dst = getUserRoot()
   await fsp.mkdir(dst, { recursive: true })
-  const existing = await fsp.readdir(dst).catch(() => [])
-  if (existing.length > 0) return
 
   const src = findBundledRoot()
   if (!src) {
-    console.log('[live2d] no bundled models to seed; userData live2d-models is empty')
+    console.log('[live2d] no bundled models to seed')
     return
   }
-  // Node's fs.cp (v16.7+) recursively copies; matches `cp -r src/. dst/`.
-  await fsp.cp(src, dst, { recursive: true })
-  console.log(`[live2d] seeded userData live2d-models from ${src}`)
+  const bundledEntries = await fsp.readdir(src, { withFileTypes: true }).catch(() => [])
+  const seeded: string[] = []
+  for (const ent of bundledEntries) {
+    if (!ent.isDirectory()) continue
+    const dstDir = join(dst, ent.name)
+    if (existsSync(dstDir)) continue // user already has this model — leave alone
+    await fsp.cp(join(src, ent.name), dstDir, { recursive: true })
+    seeded.push(ent.name)
+  }
+  if (seeded.length > 0) {
+    console.log(`[live2d] seeded new bundled models: ${seeded.join(', ')}`)
+  }
 }
 
 /**
