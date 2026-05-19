@@ -18,8 +18,7 @@
  */
 
 import Database from 'better-sqlite3'
-import * as sqliteVec from 'sqlite-vec'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { MemoryAdapter } from '../../core/memory/adapter.js'
@@ -33,6 +32,38 @@ interface EpisodeRow {
   sessionId: string | null
 }
 
+/**
+ * Resolve the sqlite-vec native extension binary. The sqlite-vec npm package's
+ * own loader uses `import.meta.resolve` which doesn't reliably point at the
+ * `app.asar.unpacked/` copy in production Electron builds (returns paths
+ * inside the asar which dlopen can't read). We resolve manually instead:
+ *
+ *   1. Dev: `node_modules/sqlite-vec-<os>-<arch>/vec0.<ext>` next to the project.
+ *   2. Prod: `<resourcesPath>/app.asar.unpacked/node_modules/...`.
+ *
+ * Throws with a clear message if neither location has the file — that's the
+ * surface that bubbles up to the Settings → Memory error display.
+ */
+function resolveSqliteVecExtension(): string {
+  const ext = process.platform === 'win32' ? 'dll' : process.platform === 'darwin' ? 'dylib' : 'so'
+  const os = process.platform === 'win32' ? 'windows' : process.platform
+  const pkg = `sqlite-vec-${os}-${process.arch}`
+  const file = `vec0.${ext}`
+  const candidates = [
+    join(process.cwd(), 'node_modules', pkg, file),
+    process.resourcesPath
+      ? join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', pkg, file)
+      : '',
+  ].filter(Boolean) as string[]
+  for (const c of candidates) {
+    if (existsSync(c)) return c
+  }
+  throw new Error(
+    `sqlite-vec extension not found. Looked in: ${candidates.join(' | ')}. ` +
+      'Check that asarUnpack in electron-builder.yml includes node_modules/sqlite-vec-*/**.',
+  )
+}
+
 export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
   mkdirSync(dataDir, { recursive: true })
   const db = new Database(join(dataDir, 'memory.sqlite'))
@@ -40,7 +71,9 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
   db.pragma('journal_mode = WAL')
   db.pragma('synchronous = NORMAL')
   db.pragma('foreign_keys = ON')
-  sqliteVec.load(db)
+  // Load sqlite-vec ourselves — see resolveSqliteVecExtension for why we
+  // can't trust the package's built-in loader in production.
+  db.loadExtension(resolveSqliteVecExtension())
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS episodes (
