@@ -725,6 +725,40 @@ export function Settings({ initial, onClose }: SettingsProps) {
               </label>
             </Section>
 
+            <Section title="字体大小">
+              <div style={{ fontSize: 12, color: '#bbb', marginBottom: 8 }}>
+                整窗缩放，会影响所有文字 + 按钮。保存后立即生效。
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {[
+                  { label: '小', value: 0.9 },
+                  { label: '标准', value: 1.0 },
+                  { label: '大', value: 1.15 },
+                  { label: '特大', value: 1.3 },
+                  { label: '超大', value: 1.5 },
+                ].map(({ label, value }) => {
+                  const active = Math.abs(draft.ui.fontScale - value) < 0.01
+                  return (
+                    <button
+                      key={value}
+                      onClick={() =>
+                        setDraft({ ...draft, ui: { ...draft.ui, fontScale: value } })
+                      }
+                      style={{
+                        ...btnStyle(active ? 'primary' : 'secondary'),
+                        minWidth: 60,
+                      }}
+                    >
+                      {label}
+                      <span style={{ fontSize: 10, opacity: 0.7, marginLeft: 4 }}>
+                        {Math.round(value * 100)}%
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </Section>
+
             <Section title="Demo 模式">
               <div style={{ fontSize: 12, color: '#bbb', marginBottom: 8, lineHeight: 1.5 }}>
                 每条 demo 配一个热键，按下播台词 + Live2D 表情 + TTS。

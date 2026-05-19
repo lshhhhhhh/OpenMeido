@@ -135,25 +135,61 @@ const setLive2DExpression = tool({
 
 const setReminder = tool({
   description:
-    'Schedule a local reminder. Use this whenever the user asks to be reminded ' +
-    'about something at a specific time or after a delay. The reminder is ' +
-    'persisted to disk and fires an OS notification at the scheduled time, ' +
-    'even across app restarts.',
+    '设置一个本地提醒，到时间弹通知。\n' +
+    '**相对时间** ("一分钟后"、"10 秒后"、"半小时后"、"明天叫我") → 用 `delaySeconds`，' +
+    '直接传秒数（1 分钟 = 60，5 分钟 = 300，1 小时 = 3600，明天此时 = 86400）。' +
+    '**优先用这个**，不用算时区。`at` 留空字符串。\n' +
+    '**绝对时间** ("下午3点"、"明天上午10点") → 用 `at`，ISO 8601 含时区 ' +
+    '(e.g. "2026-05-19T15:00:00+08:00")。`delaySeconds` 传 0。\n' +
+    '**不要两个都传**——非零的 `delaySeconds` 永远优先。',
   inputSchema: z.object({
+    delaySeconds: z
+      .number()
+      .int()
+      .min(0)
+      .max(60 * 60 * 24 * 365)
+      .describe(
+        'Seconds from now until fire. Use for relative times. 0 means "use the `at` field instead".',
+      ),
     at: z
       .string()
       .describe(
-        'ISO 8601 datetime when the reminder should fire ' +
-          '(e.g. "2026-05-17T15:30:00+08:00"). Always include a timezone offset.',
+        'ISO 8601 datetime including timezone offset for absolute times. ' +
+          'Empty string means "use the `delaySeconds` field instead".',
       ),
     message: z.string().describe('Short text shown to the user when the reminder fires.'),
   }),
-  execute: async ({ at, message }) => {
+  execute: async ({ delaySeconds, at, message }) => {
     const svc = getReminderService()
     if (!svc) return { error: '提醒服务未初始化' }
+    let fireAt: string
+    if (delaySeconds > 0) {
+      // Trusted: model computed a relative delay. No timezone math needed.
+      fireAt = new Date(Date.now() + delaySeconds * 1000).toISOString()
+    } else if (at && at.trim()) {
+      const d = new Date(at)
+      if (isNaN(d.getTime())) {
+        return { error: `at="${at}" 不是合法的 ISO 8601 时间。试试用 delaySeconds 传秒数。` }
+      }
+      // Past-time guard: if the model botched the ISO arithmetic the result
+      // is often "now" or slightly earlier, which would fire immediately and
+      // surprise the user. Treat anything more than 5s in the past as an
+      // error and let the model retry with delaySeconds.
+      if (d.getTime() < Date.now() - 5000) {
+        return {
+          error:
+            `at="${at}" 已经过去了。如果是"N 分钟后"这种相对时间，请改用 delaySeconds（N*60）。`,
+        }
+      }
+      fireAt = d.toISOString()
+    } else {
+      return {
+        error: 'delaySeconds 和 at 至少要传一个有效值（delaySeconds > 0 或 at 是合法 ISO 8601）',
+      }
+    }
     try {
-      const id = await svc.schedule({ fireAt: at, message })
-      return { ok: true, id, scheduled_for: at }
+      const id = await svc.schedule({ fireAt, message })
+      return { ok: true, id, scheduled_for: fireAt }
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) }
     }

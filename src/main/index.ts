@@ -119,6 +119,14 @@ function createWindow(): void {
     void win.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
+  // Apply the persisted UI zoom on every load (covers HMR refresh in dev
+  // and full restart in prod). did-finish-load fires after the renderer's
+  // JS is ready, which is what setZoomFactor needs.
+  win.webContents.on('did-finish-load', () => {
+    const c = getConfig()
+    win.webContents.setZoomFactor(c.ui.fontScale)
+  })
+
   // Persist the user's manual resize so next launch opens at the same size.
   win.on('resize', () => {
     if (win.isDestroyed()) return
@@ -143,6 +151,7 @@ function createWindow(): void {
 onConfigChange((next) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setAlwaysOnTop(next.window.alwaysOnTop)
+    mainWindow.webContents.setZoomFactor(next.ui.fontScale)
   }
 })
 

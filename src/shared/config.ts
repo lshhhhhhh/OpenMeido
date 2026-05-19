@@ -290,6 +290,19 @@ export const configSchema = z.object({
       passwordEncrypted: z.boolean().default(false),
     })
     .default({}),
+  ui: z
+    .object({
+      /**
+       * Whole-window zoom factor. 1.0 = browser default. We apply this via
+       * Electron's `webContents.setZoomFactor`, so it scales every element
+       * uniformly — chat, buttons, settings, status pills — without us
+       * having to touch hundreds of hard-coded fontSize values. Default is
+       * 1.15 because the original design used 11-13px which feels small on
+       * modern hi-DPI displays.
+       */
+      fontScale: z.number().min(0.8).max(2.0).default(1.15),
+    })
+    .default({}),
 })
 
 export type Config = z.infer<typeof configSchema>
