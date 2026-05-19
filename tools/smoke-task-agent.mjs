@@ -12,9 +12,10 @@
  *
  * Run: node --env-file=.env --import tsx tools/smoke-task-agent.mjs
  */
-import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { stepCountIs, streamText, tool } from 'ai'
 import { z } from 'zod'
+
+import { getAgentBackends } from './agent-backends.mjs'
 
 // ---------- In-memory fake adapter ----------
 
@@ -151,19 +152,16 @@ async function drive({ model, prompt, tools, callLog }) {
 // ---------- Scoring ----------
 
 const results = []
+let currentBackendLabel = '(unknown)'
 const check = (name, ok, detail = '') => {
-  results.push({ name, ok, detail })
+  const labeled = `[${currentBackendLabel}] ${name}`
+  results.push({ name: labeled, ok, detail })
   console.log(ok ? `  ✅ ${name}` : `  ❌ ${name} :: ${detail}`)
 }
 
-async function main() {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) {
-    console.error('GEMINI_API_KEY missing')
-    process.exit(1)
-  }
-  const model = createGoogleGenerativeAI({ apiKey })('gemini-2.5-flash')
-
+async function runOnBackend(label, model) {
+  currentBackendLabel = label
+  console.log(`\n████ Backend: ${label} ████`)
   // Scenario 1: pure TODO
   console.log('\n=== Scenario 1: "记一下: 周五前给老板回邮件" → addTask (pure TODO) ===')
   {
@@ -265,9 +263,31 @@ async function main() {
     const zhouBaoRow = store.rows.find((r) => r.text === '周报')
     check('周报 row is now done', zhouBaoRow?.doneAt !== null)
   }
+}
 
+async function main() {
+  const backends = getAgentBackends()
+  console.log(`Running task-agent scenarios across ${backends.length} backend(s)`)
+  for (const b of backends) {
+    try {
+      await runOnBackend(b.label, b.model)
+    } catch (err) {
+      results.push({
+        name: `${b.label} crashed before completion`,
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err),
+      })
+      console.error(`  ❌ ${b.label} crashed:`, err instanceof Error ? err.message : err)
+    }
+  }
   const failed = results.filter((r) => !r.ok)
-  console.log(`\n${failed.length === 0 ? '✅' : '❌'} ${results.length - failed.length}/${results.length} passed`)
+  console.log(
+    `\n${failed.length === 0 ? '✅' : '❌'} ${results.length - failed.length}/${results.length} passed across all backends`,
+  )
+  if (failed.length > 0) {
+    console.log('\nFailed assertions:')
+    for (const f of failed) console.log(`  · ${f.name}${f.detail ? ` :: ${f.detail}` : ''}`)
+  }
   process.exit(failed.length === 0 ? 0 : 1)
 }
 

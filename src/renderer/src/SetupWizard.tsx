@@ -44,12 +44,19 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
     setSaving(true)
     setError(null)
     try {
+      const trimmed = apiKey.trim()
+      // Also record this key in the per-baseUrl map so a later provider
+      // switch in Settings doesn't drop it. The map exists so users can
+      // configure multiple backends and round-trip between them without
+      // re-entering keys.
+      const apiKeys = { ...initial.backend.apiKeys, [preset.url]: trimmed }
       await onSave({
         ...initial,
         backend: {
           baseUrl: preset.url,
           model: defaultModel,
-          apiKey: apiKey.trim(),
+          apiKey: trimmed,
+          apiKeys,
           // Preserve whatever toggle the user had before; this wizard is
           // about provider/key, not search settings.
           searchEnabled: initial.backend.searchEnabled,

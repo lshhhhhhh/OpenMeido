@@ -209,23 +209,30 @@ export function Settings({ initial, onClose }: SettingsProps) {
                 key={p.url}
                 style={chipStyle(draft.backend.baseUrl === p.url)}
                 onClick={() => {
-                  // Switching providers resets THREE fields so a stale value
-                  // from the previous backend doesn't silently get reused:
-                  //   - model: a gemini id has no meaning at the OpenAI URL
-                  //   - apiKey: an OpenAI key is invalid for DeepSeek/GLM/
-                  //     Qwen/etc. Leaving it set blocks the main-process
-                  //     .env fallback (which only kicks in when apiKey is ""),
-                  //     so the request fires with the WRONG provider's key
-                  //     and returns 401 (this exact bug bit us once).
+                  // Switching providers needs care:
+                  //   - model: a gemini id has no meaning at the OpenAI URL,
+                  //     so reset to the new provider's first suggested model
+                  //     unless the user's current pick happens to fit.
+                  //   - apiKey: an OpenAI key is invalid for GLM/DeepSeek/etc.
+                  //     Leaving it set would block the main-process .env
+                  //     fallback. But we DON'T want to lose it forever — the
+                  //     user might switch back. Solution: stash the current
+                  //     key under the OLD baseUrl in apiKeys{}, and pull the
+                  //     NEW baseUrl's saved key (or empty) into the live field.
                   const newSuggestions = suggestedModels(p.url)
                   const stillValid = newSuggestions.includes(draft.backend.model)
+                  const updatedMap = { ...draft.backend.apiKeys }
+                  if (draft.backend.apiKey) {
+                    updatedMap[draft.backend.baseUrl] = draft.backend.apiKey
+                  }
                   setDraft({
                     ...draft,
                     backend: {
                       ...draft.backend,
                       baseUrl: p.url,
                       model: stillValid ? draft.backend.model : newSuggestions[0] ?? draft.backend.model,
-                      apiKey: '',
+                      apiKey: updatedMap[p.url] ?? '',
+                      apiKeys: updatedMap,
                     },
                   })
                   setBackendTestResult(null)
@@ -248,9 +255,17 @@ export function Settings({ initial, onClose }: SettingsProps) {
             type="password"
             placeholder="sk-... 或 AIza..."
             value={draft.backend.apiKey}
-            onChange={(e) =>
-              setDraft({ ...draft, backend: { ...draft.backend, apiKey: e.target.value } })
-            }
+            onChange={(e) => {
+              // Mirror into the per-baseUrl map so switching providers and
+              // back doesn't drop this key. Saved on every keystroke; the
+              // outer Save propagates the whole config to disk.
+              const next = e.target.value
+              const map = { ...draft.backend.apiKeys, [draft.backend.baseUrl]: next }
+              setDraft({
+                ...draft,
+                backend: { ...draft.backend, apiKey: next, apiKeys: map },
+              })
+            }}
             style={inputStyle}
           />
           {(() => {

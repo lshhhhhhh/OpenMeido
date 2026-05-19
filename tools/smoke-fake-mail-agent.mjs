@@ -12,12 +12,11 @@
  * Run: node --env-file=.env --import tsx tools/smoke-fake-mail-agent.mjs
  */
 
-import { createOpenAI } from '@ai-sdk/openai'
-import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { stepCountIs, streamText, tool } from 'ai'
 import { z } from 'zod'
 
 import { createFakeMailAdapter } from '../src/main/mail/fake-adapter.ts'
+import { getAgentBackends } from './agent-backends.mjs'
 
 // ---------- Test rig: real adapter wired to ai-sdk tools ----------
 
@@ -80,19 +79,15 @@ async function drive({ model, prompt, tools, callLog }) {
 // ---------- Scoring ----------
 
 const results = []
+let currentBackendLabel = '(unknown)'
 const check = (name, ok, detail = '') => {
-  results.push({ name, ok, detail })
+  results.push({ name: `[${currentBackendLabel}] ${name}`, ok, detail })
   console.log(ok ? `  ✅ ${name}` : `  ❌ ${name} :: ${detail}`)
 }
 
-async function main() {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) {
-    console.error('GEMINI_API_KEY missing in .env')
-    process.exit(1)
-  }
-  const model = createGoogleGenerativeAI({ apiKey })('gemini-2.5-flash')
-
+async function runOnBackend(label, model) {
+  currentBackendLabel = label
+  console.log(`\n████ Backend: ${label} ████`)
   // ---------- Scenario 1: list — does the model pair at least one thread? ----------
   console.log('\n=== Scenario 1: "总结最近5封邮件" — does model pair parents? ===')
   {
@@ -202,11 +197,31 @@ async function main() {
       'model should treat this as a standalone newsletter',
     )
   }
+}
 
+async function main() {
+  const backends = getAgentBackends()
+  console.log(`Running fake-mail-agent scenarios across ${backends.length} backend(s)`)
+  for (const b of backends) {
+    try {
+      await runOnBackend(b.label, b.model)
+    } catch (err) {
+      results.push({
+        name: `[${b.label}] crashed before completion`,
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err),
+      })
+      console.error(`  ❌ ${b.label} crashed:`, err instanceof Error ? err.message : err)
+    }
+  }
   const failed = results.filter((r) => !r.ok)
   console.log(
-    `\n${failed.length === 0 ? '✅' : '❌'} ${results.length - failed.length}/${results.length} assertions passed`,
+    `\n${failed.length === 0 ? '✅' : '❌'} ${results.length - failed.length}/${results.length} assertions passed across all backends`,
   )
+  if (failed.length > 0) {
+    console.log('\nFailed assertions:')
+    for (const f of failed) console.log(`  · ${f.name}${f.detail ? ` :: ${f.detail}` : ''}`)
+  }
   process.exit(failed.length === 0 ? 0 : 1)
 }
 

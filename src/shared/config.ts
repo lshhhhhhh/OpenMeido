@@ -85,6 +85,16 @@ export const configSchema = z.object({
       baseUrl: z.string().default('https://api.openai.com/v1'),
       /** Empty string falls back to OPENAI_API_KEY / GEMINI_API_KEY / ANTHROPIC_API_KEY in .env (dev only). */
       apiKey: z.string().default(''),
+      /**
+       * Per-backend api-key storage. Keyed by `baseUrl`. Lets the user
+       * switch providers without losing previously-entered keys: when
+       * Settings swaps `baseUrl`, it stashes the current `apiKey` here
+       * under the old baseUrl and pulls the new one's saved key (if any).
+       * The active `apiKey` field above is always a mirror of the entry
+       * for the active baseUrl — keeping both lets older callsites that
+       * only read `apiKey` keep working without changes.
+       */
+      apiKeys: z.record(z.string()).default({}),
       // gpt-5.4-mini is the current cheap multimodal default in 2026-05.
       // Note: there is no gpt-5.5-mini — the 5.5 generation didn't ship a
       // mini tier, so 5.4-mini stays the budget pick after 5.5 launched.
