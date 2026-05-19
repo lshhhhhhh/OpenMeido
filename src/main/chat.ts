@@ -7,6 +7,8 @@
 
 import { clipboard, dialog } from 'electron'
 import { readFile as fsReadFile } from 'node:fs/promises'
+import { extname } from 'node:path'
+import * as mammoth from 'mammoth'
 
 import { createOpenAI } from '@ai-sdk/openai'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
@@ -425,7 +427,7 @@ const readFileTool = tool({
     '`path` 可以填具体的绝对路径（用户给的）；或者填空字符串 `""`，' +
     '系统会弹出文件选择器让用户挑文件。**用户没提路径时务必传空字符串**，' +
     '不要瞎编路径。\n' +
-    '只支持文本类文件（.txt .md .json .csv .yaml .py .ts 等）；二进制文件会拒绝。',
+    '支持的文件类型：.txt .md .json .csv .yaml .py .ts 等纯文本，以及 .docx Word 文档（自动提取正文）。.pdf 暂时不支持，会被拒绝。',
   inputSchema: z.object({
     path: z
       .string()
@@ -443,6 +445,7 @@ const readFileTool = tool({
         properties: ['openFile'],
         filters: [
           { name: '文本/Markdown', extensions: ['txt', 'md', 'mdx', 'rst', 'log'] },
+          { name: 'Word 文档', extensions: ['docx'] },
           { name: '配置/数据', extensions: ['json', 'yaml', 'yml', 'toml', 'csv', 'tsv', 'xml', 'ini'] },
           {
             name: '代码',
@@ -465,15 +468,45 @@ const readFileTool = tool({
     }
     try {
       const buf = await fsReadFile(absPath)
-      // Crude binary check: a null byte in the first 1KB strongly suggests
-      // a binary file (text rarely contains \x00).
+      const ext = extname(absPath).toLowerCase()
+      const MAX = 60_000
+
+      // .docx is a zip with XML inside; null-byte check would reject it.
+      // Route through mammoth which extracts plain text (no images, no
+      // tables — those become tab-separated lines).
+      if (ext === '.docx') {
+        try {
+          const { value } = await mammoth.extractRawText({ buffer: buf })
+          const text = value ?? ''
+          const content = text.length > MAX ? text.slice(0, MAX) + '\n…[截断]' : text
+          return {
+            path: absPath,
+            sizeBytes: buf.length,
+            sizeChars: text.length,
+            content,
+            truncated: text.length > MAX,
+            format: 'docx',
+          }
+        } catch (err) {
+          return {
+            error: `读取 docx 失败: ${err instanceof Error ? err.message : String(err)}`,
+          }
+        }
+      }
+
+      // Plain-text path: crude binary check (null byte in first 1KB
+      // strongly suggests a binary file). Catches .pdf, .xlsx, etc. that
+      // we don't have specific parsers for.
       const head = buf.subarray(0, Math.min(1024, buf.length))
       if (head.includes(0)) {
-        return { error: `${absPath} 看起来是二进制文件（含有空字节），我读不了。` }
+        return {
+          error:
+            `${absPath} 看起来是二进制文件（含有空字节），我读不了。` +
+            (ext === '.pdf'
+              ? ' PDF 暂时不支持，可以把内容复制到剪贴板或导出成 .txt / .docx 再让我看。'
+              : ''),
+        }
       }
-      // Defend against huge log files — cap at 60KB of text. Past that we
-      // truncate and tell the model.
-      const MAX = 60_000
       const text = buf.toString('utf-8')
       const content = text.length > MAX ? text.slice(0, MAX) + '\n…[截断]' : text
       return {
@@ -482,6 +515,7 @@ const readFileTool = tool({
         sizeChars: text.length,
         content,
         truncated: text.length > MAX,
+        format: 'text',
       }
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) }
