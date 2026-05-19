@@ -13,7 +13,14 @@
 import type { Config } from '../../shared/config.js'
 import type { MemoryAdapter } from './adapter.js'
 import { reflect, renderFactsBlock, type ReflectionExtractor } from './reflection.js'
-import type { Episode, Fact, SessionSummary, Speaker } from './types.js'
+import type {
+  Episode,
+  Fact,
+  SessionSummary,
+  Speaker,
+  ToolCallPart,
+  ToolResultPart,
+} from './types.js'
 
 /** Pluggable embedding function. Host provides; default impl is local bge. */
 export type EmbedFn = (text: string) => Promise<Float32Array>
@@ -23,8 +30,14 @@ export interface MemoryService {
    * Embed + persist a single turn. Returns null on any failure — a missed
    * memory write must never break chat. Errors are logged via console.warn
    * so the host can pipe them somewhere visible.
+   *
+   * `toolParts` carries agent-loop structure (see MemoryAdapter.addEpisode).
    */
-  addEpisode(speaker: Speaker, text: string): Promise<number | null>
+  addEpisode(
+    speaker: Speaker,
+    text: string,
+    toolParts?: (ToolCallPart | ToolResultPart)[],
+  ): Promise<number | null>
 
   /**
    * Build the context for the NEXT model call: top-K semantically relevant
@@ -136,11 +149,17 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   }
 
   return {
-    async addEpisode(speaker, text) {
-      if (!text.trim()) return null
+    async addEpisode(speaker, text, toolParts) {
+      // Tool-result rows can have empty text (the result is in toolParts)
+      // and assistant tool-only steps can be empty too. Allow empty text
+      // when there's at least toolParts. Reject only truly empty turns.
+      if (!text.trim() && (!toolParts || toolParts.length === 0)) return null
       try {
-        const vec = await embed(text)
-        return await adapter.addEpisode(speaker, text, vec, sessionId)
+        // Embed the text. Tool calls/results aren't semantic — embed the
+        // text alone (which may be empty for pure-tool rows) so vector
+        // recall remains a text-similarity operation.
+        const vec = await embed(text || ' ')
+        return await adapter.addEpisode(speaker, text, vec, sessionId, toolParts)
       } catch (err) {
         reportError('addEpisode', err)
         return null

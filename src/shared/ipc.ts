@@ -13,6 +13,12 @@
 
 export type ChatEventBody =
   | { type: 'text'; delta: string }
+  // Filter-driven rollback. Some models emit reasoning content + bare
+  // `</think>` without an opening tag — by the time we know it was
+  // reasoning, the prefix has already been streamed to the UI. The filter
+  // tells us how many chars of the current assistant bubble to discard so
+  // only the real reply that follows `</think>` remains visible.
+  | { type: 'text-reset'; length: number }
   | { type: 'tool-call'; toolName: string; args: unknown }
   | { type: 'tool-result'; toolName: string; result: unknown }
   | { type: 'done' }

@@ -28,20 +28,54 @@ function eq(label, got, want) {
 }
 
 /**
- * Feed `input` to a fresh filter in 1-3 char chunks, return concatenated
- * output + flush.
+ * Feed `input` to a fresh filter in 1-3 char chunks and play back the
+ * caller-side reduction the chat loop performs: append `emit`, but FIRST
+ * truncate `resetLength` chars when present. Returns the final visible
+ * accumulator string after flush.
  */
-function streamThrough(input) {
+function streamThrough(input, opts = {}) {
   const f = createTextDeltaFilter()
-  let out = ''
+  let acc = ''
+  const apply = (o) => {
+    if (o.resetLength && o.resetLength > 0) acc = acc.slice(0, -o.resetLength)
+    if (o.emit) acc += o.emit
+  }
   let i = 0
   while (i < input.length) {
     const n = 1 + (i % 3)
-    out += f.process(input.slice(i, i + n))
+    apply(f.process(input.slice(i, i + n)))
     i += n
   }
-  out += f.flush()
-  return out
+  apply(f.flush())
+  return acc
+}
+
+/**
+ * Drives the filter with two text segments separated by a checkpoint —
+ * mirrors what the chat loop does when a tool-call event arrives between
+ * two text-delta segments. After the checkpoint, an implicit `</think>`
+ * only rolls back text emitted SINCE the checkpoint.
+ */
+function streamTwoSegmentsWithCheckpoint(seg1, seg2) {
+  const f = createTextDeltaFilter()
+  let acc = ''
+  const apply = (o) => {
+    if (o.resetLength && o.resetLength > 0) acc = acc.slice(0, -o.resetLength)
+    if (o.emit) acc += o.emit
+  }
+  const feed = (s) => {
+    let i = 0
+    while (i < s.length) {
+      const n = 1 + (i % 3)
+      apply(f.process(s.slice(i, i + n)))
+      i += n
+    }
+  }
+  feed(seg1)
+  f.checkpoint()
+  feed(seg2)
+  apply(f.flush())
+  return acc
 }
 
 console.log('\n[plain pass-through]')
@@ -73,6 +107,37 @@ eq(
   'multiple blocks',
   streamThrough('a<think>x</think>b<think>y</think>c'),
   'abc',
+)
+
+console.log('\n[implicit </think> close — the GLM/Qwen3 thinking-mode bug]')
+eq(
+  'bare close discards prefix',
+  streamThrough('好的，主人，我看看邮件。</think>主人，这是你的邮件。'),
+  '主人，这是你的邮件。',
+)
+eq(
+  'bare close at very start (no prefix)',
+  streamThrough('</think>主人，邮件如下。'),
+  '主人，邮件如下。',
+)
+eq(
+  'bare </thinking> variant',
+  streamThrough('计划：先列邮件再读 WWDC。</thinking>好的，主人。'),
+  '好的，主人。',
+)
+eq(
+  'screenshot repro — duplicated content with one </think>',
+  streamThrough(
+    '好的，主人，我这就帮您查看最近的邮件。\n\n主人，这是最近收到的五封邮件。 </think>好的，主人，我这就帮您查看最近的邮件。\n\n主人，这是最近收到的五封邮件。',
+  ),
+  '好的，主人，我这就帮您查看最近的邮件。\n\n主人，这是最近收到的五封邮件。',
+)
+
+console.log('\n[checkpoint semantics — step-2 reset must not wipe step-1]')
+eq(
+  'checkpoint protects prior step content',
+  streamTwoSegmentsWithCheckpoint('你好', 'thinking...</think>答复'),
+  '你好答复',
 )
 
 console.log('\n[leaked tool-call XML]')

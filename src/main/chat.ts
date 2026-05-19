@@ -45,6 +45,21 @@ import type { Episode } from '../core/memory/types.js'
 const REFLECTION_EVERY_N_TURNS = 5
 
 /**
+ * One-shot text cleaner for persistence — strips `<think>` blocks and stray
+ * tool-call XML from a complete string. Separate from the streaming
+ * createTextDeltaFilter() because that one's stateful for live streaming;
+ * here we have the full text in hand and can use plain regexes.
+ */
+function cleanInlineText(s: string): string {
+  return s
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/```(?:html|xml)?\s*<\/?(?:tool_call|arg_key|arg_value)[\s\S]*?```/gi, '')
+    .replace(/<\/?(?:tool_call|arg_key|arg_value)(?:\s[^>]*)?>/gi, '')
+    .trim()
+}
+
+
+/**
  * Render the current moment as a Chinese wall-clock string the model can
  * quote without timezone arithmetic. Output example:
  *   "2026年5月19日 周一 上午9点30分"
@@ -180,16 +195,32 @@ const listRecentEmails = tool({
 
 const readEmail = tool({
   description:
-    '读取一封邮件的完整正文。先用 listRecentEmails 拿到 id，再用这个 tool 取详情。',
+    '读取一封邮件的完整正文。\n' +
+    '**触发场景**：用户说"读 X"、"打开 X"、"看下 X 那封"、"X 邮件讲什么"、' +
+    '"第几封"、"昨天 X 那封"、"展开第一封"——**所有指代上一次 listRecentEmails ' +
+    '结果中某一封具体邮件的表达**都该调用本工具。不要用 listRecentEmails 重复出列表。\n' +
+    '**id 来源**：必须用上一次 listRecentEmails 返回的 items[].id 字段值（一般是数字字符串如 "12345"）。' +
+    '从用户描述（"WWDC 通知" / "Quora 的那封"）映射到 id：在最近一次 list 结果里按 from / subject 找匹配项，取它的 id。' +
+    '**不要凭空猜测 id**（不要写 "1"、"latest"、"WWDC" 之类）；如果上下文里没有当前 list 结果，先 listRecentEmails 再调本工具。',
   inputSchema: z.object({
-    id: z.string().describe('Email id (UID) from a previous listRecentEmails result.'),
+    id: z
+      .string()
+      .describe(
+        'Email id (UID) — must come verbatim from a previous listRecentEmails result. ' +
+          'Do NOT make up an id like "1" or "latest"; that returns the wrong email.',
+      ),
   }),
   execute: async ({ id }) => {
+    console.log(`[mail] readEmail called with id="${id}"`)
     const mail = getMailService()
     if (!mail) return { error: '邮箱未配置或未启用。' }
     try {
       const msg = await mail.readMessage(id)
-      if (!msg) return { error: '该邮件不存在或已被删除。' }
+      if (!msg) {
+        console.warn(`[mail] readEmail id="${id}" returned null (not found)`)
+        return { error: `id="${id}" 的邮件不存在或已被删除。请先用 listRecentEmails 重新拿当前列表。` }
+      }
+      console.log(`[mail] readEmail id="${id}" → subject="${msg.subject?.slice(0, 60)}", from="${msg.from}"`)
       // Cap body length so a 200KB email doesn't blow the model context.
       const MAX_BODY = 4000
       const body = msg.body.length > MAX_BODY ? msg.body.slice(0, MAX_BODY) + '\n…[truncated]' : msg.body
@@ -206,15 +237,106 @@ const readEmail = tool({
  * timeline. Each recalled episode is silently included as a normal turn —
  * we deliberately don't mark them "from memory" to keep the model's voice
  * consistent.
+ *
+ * Speaker → role mapping:
+ *   user      → { role: 'user', content: text-or-string }
+ *   assistant → { role: 'assistant', content: [text, ...tool_calls] }
+ *               If no toolParts, content is just the string.
+ *   tool      → { role: 'tool', content: [...tool_results] }
+ *               text is ignored (always empty for tool rows).
+ *
+ * Without this faithful replay, follow-up turns lose the tool_call_id ←→
+ * tool_result_id linkage and the model has no way to reference past tool
+ * outputs (the "open WWDC email" → AI re-lists instead of reading bug).
  */
 function episodesToMessages(episodes: Episode[]): ModelMessage[] {
-  return episodes
-    .slice()
-    .sort((a, b) => a.id - b.id)
-    .map((e) => ({
-      role: e.speaker === 'user' ? 'user' : 'assistant',
-      content: e.text,
-    }))
+  const sorted = episodes.slice().sort((a, b) => a.id - b.id)
+
+  // Defensive pairing: the SDK throws MissingToolResultsError if it sees an
+  // assistant message with a tool_call whose toolCallId never gets a matching
+  // tool-result later. This happens when an older build wrote the assistant
+  // row but its tool-result row was rejected by an out-of-date CHECK
+  // constraint (or for any other reason — transient sqlite error, crash
+  // mid-turn, etc.). We pre-scan history and keep only tool_calls that DO
+  // have a matching tool-result; orphans are downgraded to plain text.
+  const fulfilledIds = new Set<string>()
+  const calledIds = new Set<string>()
+  for (const e of sorted) {
+    if (e.speaker === 'tool') {
+      for (const p of e.toolParts ?? []) {
+        if (p.type === 'tool-result') fulfilledIds.add(p.toolCallId)
+      }
+    } else if (e.speaker === 'assistant') {
+      for (const p of e.toolParts ?? []) {
+        if (p.type === 'tool-call') calledIds.add(p.toolCallId)
+      }
+    }
+  }
+
+  const out: ModelMessage[] = []
+  for (const e of sorted) {
+    if (e.speaker === 'user') {
+      out.push({ role: 'user', content: e.text })
+      continue
+    }
+    if (e.speaker === 'tool') {
+      const results = (e.toolParts ?? []).filter(
+        (p): p is Extract<typeof p, { type: 'tool-result' }> =>
+          p.type === 'tool-result' && calledIds.has(p.toolCallId),
+      )
+      if (results.length === 0) continue // bogus tool row with no results — skip
+      // Cast through ModelMessage — TS can't narrow the union from object
+      // shape alone (the user-role and tool-role variants overlap on `type`
+      // field naming). The runtime shape matches ToolModelMessage exactly.
+      out.push({
+        role: 'tool',
+        content: results.map((r) => ({
+          type: 'tool-result' as const,
+          toolCallId: r.toolCallId,
+          toolName: r.toolName,
+          // AI SDK expects { type: 'json'|'text'|…, value } for output.
+          // Wrap whatever the tool returned in a `json` envelope and let
+          // the provider's serializer handle nested structures.
+          output: {
+            type: 'json' as const,
+            value: r.output as unknown as Parameters<
+              typeof JSON.stringify
+            >[0],
+          },
+        })),
+      } as ModelMessage)
+      continue
+    }
+    // assistant — only keep tool_calls whose results we actually persisted.
+    // An orphan tool_call would make the next request fail with
+    // MissingToolResultsError before any tokens stream back.
+    const calls = (e.toolParts ?? []).filter(
+      (p): p is Extract<typeof p, { type: 'tool-call' }> =>
+        p.type === 'tool-call' && fulfilledIds.has(p.toolCallId),
+    )
+    if (calls.length === 0) {
+      // Plain text assistant turn — keep content as string for cleanliness.
+      out.push({ role: 'assistant', content: e.text })
+    } else {
+      const parts: ({ type: 'text'; text: string } | {
+        type: 'tool-call'
+        toolCallId: string
+        toolName: string
+        input: unknown
+      })[] = []
+      if (e.text) parts.push({ type: 'text', text: e.text })
+      for (const c of calls) {
+        parts.push({
+          type: 'tool-call',
+          toolCallId: c.toolCallId,
+          toolName: c.toolName,
+          input: c.input,
+        })
+      }
+      out.push({ role: 'assistant', content: parts })
+    }
+  }
+  return out
 }
 
 export async function runChat(
@@ -348,6 +470,8 @@ export async function runChat(
         `2. **不要重复同一个工具做同一件事**。已经 listRecentEmails 拿到列表了，就基于列表回答，不要再 listRecentEmails 一次。已经 readEmail(id=3) 了，结果你都看到了，不要再 readEmail(id=3)。\n` +
         `3. **setLive2DExpression 一回合最多一次**——切了表情就停，不要切完接着再切。\n` +
         `4. **不要把一句话拆三遍说**——"我来看看…现在看看…还在认真看哦…"这种是错的，要说的内容一次性说完。\n` +
+        `5. **不要"宣告 + 完成"两段说**——"好的我来设提醒" + setReminder + "提醒已经为您设定好了" 这种是错的，同一件事说了两遍。要么调用前不说话直接调，要么调用完只说一次结果就停（"提醒设好了"）。**绝不要两边都说**。\n` +
+        `   - 推论：**绝不要在 tool 调用前后用同一句开场白**。例：用户问"看看邮件"，错误做法是工具调用前说"好的，主人，我这就帮您查看最近的邮件。"，工具结果出来后又来一句"好的，主人，我这就帮您查看最近的邮件。"。**第二步只汇报结果，不要再说"我帮您看一下"这种开场白。**\n` +
         `历史对话中可能包含很久以前的内容，请只在自然相关时引用，不要强行触发。`,
       messages,
       // Conditional tool exposure: when mail isn't enabled, drop the email
@@ -381,6 +505,67 @@ export async function runChat(
     let assistantText = ''
     const filter = createTextDeltaFilter()
 
+    // Duplicate-sentence guard. Two patterns it catches:
+    //   1. Within-step: model says "好的，主人，我这就帮您查看最近的邮件。"
+    //      twice back-to-back before the tool call.
+    //   2. Cross-step: step 1 says the opener, step 2 says it again before
+    //      the actual summary.
+    // We track every completed sentence (trimmed) in this turn; when a new
+    // sentence equals any previously-kept one, we roll it back via
+    // text-reset. Sentences shorter than 6 chars are skipped — "好的。" can
+    // legitimately repeat.
+    const seenSentences: string[] = []
+    let scannedIdx = 0
+    const DEDUP_MIN_LEN = 6
+    const dedupScan = (): void => {
+      // Scan forward in assistantText for sentence terminators we haven't
+      // checked yet. For each newly completed sentence, decide keep or roll
+      // back. Loop because a single text-delta may close multiple sentences.
+      while (true) {
+        const m = /[。！？.!?\n]/.exec(assistantText.slice(scannedIdx))
+        if (!m || m.index === undefined) return
+        const sentenceLen = m.index + m[0].length
+        const sentence = assistantText.slice(scannedIdx, scannedIdx + sentenceLen)
+        const trimmed = sentence.trim()
+        if (trimmed.length >= DEDUP_MIN_LEN && seenSentences.includes(trimmed)) {
+          // Roll back the duplicated sentence we just emitted.
+          assistantText = assistantText.slice(0, -sentenceLen)
+          localEmit({ type: 'text-reset', length: sentenceLen })
+          // scannedIdx stays put — the duplicate is gone, next chars to scan
+          // are whatever comes next in the stream.
+        } else {
+          if (trimmed.length >= DEDUP_MIN_LEN) {
+            seenSentences.push(trimmed)
+            if (seenSentences.length > 8) seenSentences.shift()
+          }
+          scannedIdx += sentenceLen
+        }
+      }
+    }
+
+    // Live capture of agent-loop structure from streamed events. We persist
+    // from THIS source rather than `await result.steps` because the SDK can
+    // reject `result.steps` (or return [] under certain agent conditions)
+    // when the message list it built mid-loop is inconsistent — and silently
+    // losing tool_calls/tool_results kills the next turn's ability to call
+    // readEmail with a real id. The stream events are the ground truth: if
+    // a tool-call fired and a tool-result came back, we saw it here.
+    interface StepCapture {
+      text: string
+      calls: { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }[]
+      results: { type: 'tool-result'; toolCallId: string; toolName: string; output: unknown }[]
+    }
+    const captures: StepCapture[] = []
+    let curCap: StepCapture = { text: '', calls: [], results: [] }
+    const flushCapIfBoundary = (evt: 'text' | 'tool-call'): void => {
+      // Step boundary: we had buffered results, now a new text/call begins.
+      if (curCap.results.length > 0) {
+        captures.push(curCap)
+        curCap = { text: '', calls: [], results: [] }
+      }
+      void evt
+    }
+
     for await (const part of result.fullStream) {
       // v6 renamed text-delta's payload (textDelta → text) and tool-call /
       // tool-result fields (args → input, result → output).
@@ -388,23 +573,50 @@ export async function runChat(
         case 'text-delta': {
           // Strip thinking blocks + tool-call XML the model sometimes leaks
           // as text on top of the proper tool-call channel.
-          const clean = filter.process(part.text)
+          const { emit: clean, resetLength } = filter.process(part.text)
+          if (resetLength && resetLength > 0) {
+            // Implicit `</think>` arrived — roll back the reasoning prefix
+            // the user briefly saw. We also trim our local accumulator so
+            // the persisted assistant turn doesn't include the discarded
+            // text (and TTS doesn't read it).
+            assistantText = assistantText.slice(0, -resetLength)
+            scannedIdx = Math.min(scannedIdx, assistantText.length)
+            localEmit({ type: 'text-reset', length: resetLength })
+          }
           if (clean) {
+            flushCapIfBoundary('text')
             assistantText += clean
+            curCap.text += clean
             localEmit({ type: 'text', delta: clean })
+            dedupScan()
           }
           break
         }
-        case 'tool-call':
+        case 'tool-call': {
+          // Step boundary for live-capture (any buffered tool-results close
+          // the previous step) and for the filter's </think> checkpoint.
+          flushCapIfBoundary('tool-call')
+          filter.checkpoint()
+          curCap.calls.push({
+            type: 'tool-call' as const,
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            input: part.input,
+          })
           localEmit({ type: 'tool-call', toolName: part.toolName, args: part.input })
           break
-        case 'tool-result':
-          localEmit({
-            type: 'tool-result',
+        }
+        case 'tool-result': {
+          const output = 'output' in part ? part.output : undefined
+          curCap.results.push({
+            type: 'tool-result' as const,
+            toolCallId: part.toolCallId,
             toolName: part.toolName,
-            result: 'output' in part ? part.output : undefined,
+            output,
           })
+          localEmit({ type: 'tool-result', toolName: part.toolName, result: output })
           break
+        }
         case 'error':
           localEmit({
             type: 'error',
@@ -417,17 +629,57 @@ export async function runChat(
     }
 
     // Flush whatever the filter was holding (trailing text not yet matched).
-    const tail = filter.flush()
-    if (tail) {
-      assistantText += tail
-      localEmit({ type: 'text', delta: tail })
+    const flushed = filter.flush()
+    if (flushed.resetLength && flushed.resetLength > 0) {
+      assistantText = assistantText.slice(0, -flushed.resetLength)
+      scannedIdx = Math.min(scannedIdx, assistantText.length)
+      localEmit({ type: 'text-reset', length: flushed.resetLength })
+    }
+    if (flushed.emit) {
+      assistantText += flushed.emit
+      curCap.text += flushed.emit
+      localEmit({ type: 'text', delta: flushed.emit })
+      dedupScan()
     }
 
-    // Persist the assistant reply if there was any visible text. Skip empty
-    // replies (pure tool-call turns with no text content add no memory value
-    // and would just clutter recall).
-    if (assistantText.trim() && memory) {
-      void memory.addEpisode('assistant', assistantText)
+    // Push the final in-progress capture. After the last tool-result there's
+    // usually one more step worth of text (the model's wrap-up reply) — and
+    // even for tool-less turns the single text-only step lives here.
+    if (curCap.text || curCap.calls.length > 0 || curCap.results.length > 0) {
+      captures.push(curCap)
+    }
+
+    // Persist the agent loop with full structure: each captured step writes
+    // an assistant episode (text + tool_calls) followed by a tool episode
+    // (results). This is what lets a follow-up turn ("open the Amazon email")
+    // resolve back to a real id from the previous listRecentEmails result.
+    // We persist from streamed-event captures (not `await result.steps`)
+    // because the SDK can reject .steps under odd agent-loop states and
+    // silently drop tool_data — the streamed events are observed reality.
+    if (memory) {
+      for (const cap of captures) {
+        const stepText = cleanInlineText(cap.text)
+        if (stepText || cap.calls.length > 0) {
+          void memory.addEpisode(
+            'assistant',
+            stepText,
+            cap.calls.length > 0 ? cap.calls : undefined,
+          )
+        }
+        if (cap.results.length > 0) {
+          void memory.addEpisode('tool', '', cap.results)
+        }
+      }
+      // Diagnostic — surfaces a real fix at a glance: "no tool_data persisted
+      // for a turn that called tools" is the bug that wrecked email follow-ups.
+      const totalCalls = captures.reduce((n, c) => n + c.calls.length, 0)
+      const totalResults = captures.reduce((n, c) => n + c.results.length, 0)
+      if (totalCalls > 0 || totalResults > 0) {
+        console.log(
+          `[chat] persisted ${captures.length} step(s) with ` +
+            `${totalCalls} tool_call(s) + ${totalResults} tool_result(s)`,
+        )
+      }
     }
 
     // L3 reflection: every Nth turn, distill facts from the recent window.

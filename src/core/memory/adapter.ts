@@ -8,15 +8,28 @@
  * IndexedDB / Capacitor SQLite cases where async is unavoidable.
  */
 
-import type { Episode, Fact, NewFact, SessionSummary, Speaker } from './types.js'
+import type { Episode, Fact, NewFact, SessionSummary, Speaker, ToolCallPart, ToolResultPart } from './types.js'
 
 export interface MemoryAdapter {
-  /** Persist a turn together with its embedding. Returns the new row id. */
+  /**
+   * Persist a turn together with its embedding. Returns the new row id.
+   *
+   * `toolParts` carries the structured tool data for agent-loop replay:
+   *   - For `speaker: 'assistant'`, pass the ToolCallPart[] the model
+   *     emitted alongside its text on this step.
+   *   - For `speaker: 'tool'`, pass the ToolResultPart[] from the tools'
+   *     execute() outputs that match the previous assistant turn's calls.
+   *   - For `speaker: 'user'`, leave undefined.
+   * Without this round-tripping, ids returned by listRecentEmails die at
+   * the end of a turn and follow-up readEmail calls have nothing real to
+   * call against.
+   */
   addEpisode(
     speaker: Speaker,
     text: string,
     embedding: Float32Array,
     sessionId?: string | null,
+    toolParts?: (ToolCallPart | ToolResultPart)[],
   ): Promise<number>
 
   /**

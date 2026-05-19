@@ -30,6 +30,35 @@ interface EpisodeRow {
   speaker: Speaker
   text: string
   sessionId: string | null
+  /** Raw JSON text from the tool_data column; null when absent. */
+  toolDataRaw?: string | null
+}
+
+/**
+ * Parse the tool_data JSON column safely. Returns undefined for null /
+ * empty / malformed values so consumers don't have to defend against junk
+ * leaked from a manual DB edit.
+ */
+function parseToolData(raw: string | null | undefined): Episode['toolParts'] {
+  if (!raw) return undefined
+  try {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed) || parsed.length === 0) return undefined
+    return parsed
+  } catch {
+    return undefined
+  }
+}
+
+function rowToEpisode(r: EpisodeRow): Episode {
+  return {
+    id: r.id,
+    ts: r.ts,
+    speaker: r.speaker,
+    text: r.text,
+    sessionId: r.sessionId,
+    toolParts: parseToolData(r.toolDataRaw),
+  }
 }
 
 /**
@@ -79,11 +108,23 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
     CREATE TABLE IF NOT EXISTS episodes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       ts TEXT NOT NULL,
-      speaker TEXT NOT NULL CHECK (speaker IN ('user', 'assistant')),
+      -- 'tool' was added when we started persisting agent-loop tool results.
+      -- The CHECK is permissive; old DBs that pre-date it just won't have
+      -- 'tool' rows (we never wrote any), so the migration is invisible.
+      speaker TEXT NOT NULL CHECK (speaker IN ('user', 'assistant', 'tool')),
       text TEXT NOT NULL,
       session_id TEXT,
+      -- JSON: for 'assistant' rows, the ToolCallPart[] this turn emitted
+      -- (id + name + args). For 'tool' rows, the ToolResultPart[] returned
+      -- (id + name + result). NULL for plain text turns and for 'user' rows.
+      tool_data TEXT,
       archived INTEGER DEFAULT 0
     );
+
+    -- Migrate older DBs that pre-date the tool_data column. PRAGMA
+    -- table_info doesn't fail if the column already exists, but ALTER
+    -- TABLE ADD COLUMN does — wrap it in a try/catch outside this exec
+    -- string. See the runtime check below.
 
     CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts);
     CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
@@ -109,6 +150,47 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
     CREATE INDEX IF NOT EXISTS idx_facts_key_active
       ON facts(key) WHERE superseded_by IS NULL;
   `)
+
+  // Schema migration: tool_data column was added later. ALTER TABLE on an
+  // existing column would error, so check via PRAGMA first.
+  const cols = db.prepare("PRAGMA table_info(episodes)").all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'tool_data')) {
+    db.exec('ALTER TABLE episodes ADD COLUMN tool_data TEXT')
+    console.log('[memory] migrated: added episodes.tool_data column')
+  }
+
+  // Older DBs were created with `speaker IN ('user', 'assistant')` — that
+  // CHECK constraint rejects the 'tool' speaker we now write. SQLite has no
+  // way to widen a CHECK constraint in place, so we rebuild the table when
+  // we detect the old form. The companion episodes_vec table references
+  // episodes only by integer id (no SQL foreign key), so a rebuild that
+  // preserves ids leaves recall intact.
+  const tableSql = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='episodes'")
+    .get() as { sql?: string } | undefined
+  if (tableSql?.sql && !/CHECK\s*\(\s*speaker\s+IN\s*\([^)]*'tool'/i.test(tableSql.sql)) {
+    console.log('[memory] migrating: rebuilding episodes table to widen speaker CHECK')
+    const rebuild = db.transaction(() => {
+      db.exec(`
+        CREATE TABLE episodes_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts TEXT NOT NULL,
+          speaker TEXT NOT NULL CHECK (speaker IN ('user', 'assistant', 'tool')),
+          text TEXT NOT NULL,
+          session_id TEXT,
+          tool_data TEXT,
+          archived INTEGER DEFAULT 0
+        );
+        INSERT INTO episodes_new (id, ts, speaker, text, session_id, tool_data, archived)
+          SELECT id, ts, speaker, text, session_id, tool_data, archived FROM episodes;
+        DROP TABLE episodes;
+        ALTER TABLE episodes_new RENAME TO episodes;
+        CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts);
+        CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
+      `)
+    })
+    rebuild()
+  }
 
   // vec0 locks `dim` at CREATE time. Inspect any pre-existing episodes_vec
   // table; if its dim doesn't match the requested one (e.g. user migrated
@@ -138,14 +220,14 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
   `)
 
   // Prepared statements — better-sqlite3 caches them after first compile.
-  const insertEpisode = db.prepare<[string, Speaker, string, string | null]>(
-    'INSERT INTO episodes (ts, speaker, text, session_id) VALUES (?, ?, ?, ?)',
+  const insertEpisode = db.prepare<[string, Speaker, string, string | null, string | null]>(
+    'INSERT INTO episodes (ts, speaker, text, session_id, tool_data) VALUES (?, ?, ?, ?, ?)',
   )
   const insertVec = db.prepare<[bigint, Buffer]>(
     'INSERT INTO episodes_vec (episode_id, embedding) VALUES (?, ?)',
   )
   const selectRecent = db.prepare<[number]>(
-    `SELECT id, ts, speaker, text, session_id AS sessionId
+    `SELECT id, ts, speaker, text, session_id AS sessionId, tool_data AS toolDataRaw
      FROM episodes
      WHERE archived = 0
      ORDER BY id DESC
@@ -153,7 +235,7 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
   )
   // COALESCE so the 'legacy' bucket id matches rows with session_id IS NULL.
   const selectRecentInSession = db.prepare<[string, number]>(
-    `SELECT id, ts, speaker, text, session_id AS sessionId
+    `SELECT id, ts, speaker, text, session_id AS sessionId, tool_data AS toolDataRaw
      FROM episodes
      WHERE archived = 0 AND COALESCE(session_id, 'legacy') = ?
      ORDER BY id DESC
@@ -184,7 +266,8 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
      ORDER BY MAX(ts) DESC`,
   )
   const selectByKnn = db.prepare<[Buffer, number]>(
-    `SELECT e.id, e.ts, e.speaker, e.text, e.session_id AS sessionId, vc.distance
+    `SELECT e.id, e.ts, e.speaker, e.text, e.session_id AS sessionId,
+            e.tool_data AS toolDataRaw, vc.distance
      FROM (
        SELECT episode_id, distance
        FROM episodes_vec
@@ -258,9 +341,15 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
   })
 
   const addTxn = db.transaction(
-    (speaker: Speaker, text: string, sessionId: string | null, embedding: Float32Array): number => {
+    (
+      speaker: Speaker,
+      text: string,
+      sessionId: string | null,
+      embedding: Float32Array,
+      toolData: string | null,
+    ): number => {
       const ts = new Date().toISOString()
-      const row = insertEpisode.run(ts, speaker, text, sessionId)
+      const row = insertEpisode.run(ts, speaker, text, sessionId, toolData)
       const episodeId = Number(row.lastInsertRowid)
       insertVec.run(BigInt(episodeId), Buffer.from(embedding.buffer))
       return episodeId
@@ -273,9 +362,10 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
   }
 
   return {
-    async addEpisode(speaker, text, embedding, sessionId = null) {
+    async addEpisode(speaker, text, embedding, sessionId = null, toolParts) {
       ensureOpen()
-      return addTxn(speaker, text, sessionId, embedding)
+      const toolData = toolParts && toolParts.length > 0 ? JSON.stringify(toolParts) : null
+      return addTxn(speaker, text, sessionId, embedding, toolData)
     },
 
     async recent(n, sessionId) {
@@ -284,7 +374,7 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
       const rows = sessionId
         ? (selectRecentInSession.all(sessionId, n) as EpisodeRow[])
         : (selectRecent.all(n) as EpisodeRow[])
-      return rows.reverse()
+      return rows.reverse().map(rowToEpisode)
     },
 
     async listSessions() {
@@ -304,13 +394,7 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
       const filtered: Episode[] = []
       for (const r of rows) {
         if (excludeIds.has(r.id)) continue
-        filtered.push({
-          id: r.id,
-          ts: r.ts,
-          speaker: r.speaker,
-          text: r.text,
-          sessionId: r.sessionId,
-        })
+        filtered.push(rowToEpisode(r))
         if (filtered.length >= k) break
       }
       return filtered

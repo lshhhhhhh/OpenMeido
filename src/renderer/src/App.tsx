@@ -47,6 +47,12 @@ export default function App() {
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [busy, setBusy] = useState(false)
+  // While a reply is streaming, the input stays unlocked so the user can
+  // compose the next message. If they press Send/Enter while busy, we
+  // record that intent here and auto-fire the send once `busy` flips back
+  // to false. Refs because the auto-send happens inside the chat-event
+  // useEffect's stale closure.
+  const pendingSendRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [chatHeight, setChatHeight] = useState(DEFAULT_CHAT_HEIGHT)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -112,6 +118,16 @@ export default function App() {
         case 'text':
           patchLastAssistant((m) => ({ ...m, text: m.text + event.delta }))
           break
+        case 'text-reset':
+          // Filter detected a bare `</think>` and the reasoning prefix
+          // it preceded is being rolled back. Trim the last N chars
+          // from the visible bubble — the real reply will stream in
+          // right after via normal 'text' events.
+          patchLastAssistant((m) => ({
+            ...m,
+            text: event.length > 0 ? m.text.slice(0, -event.length) : m.text,
+          }))
+          break
         case 'tool-call':
           patchLastAssistant((m) => ({
             ...m,
@@ -153,6 +169,13 @@ export default function App() {
                 void speakRef.current(last.text, idx)
               }
             }
+          }
+          // If the user queued a Send while the reply was streaming, fire
+          // it now. Defer one tick so React commits setBusy(false) first —
+          // otherwise sendRef.current sees busy=true and re-queues forever.
+          if (pendingSendRef.current) {
+            pendingSendRef.current = false
+            setTimeout(() => sendRef.current(), 0)
           }
           break
         case 'error':
@@ -433,11 +456,22 @@ export default function App() {
   }
   speakRef.current = speak
 
+  // Stable ref to the latest send so the chat-event useEffect (empty deps)
+  // can call it without holding a stale closure.
+  const sendRef = useRef<() => void>(() => {})
   function send(): void {
     const text = input.trim()
     // Image-only sends are allowed: user can screenshot and hit Send with
     // no question, model will describe what it sees by default.
-    if ((!text && attachments.length === 0) || busy) return
+    if (!text && attachments.length === 0) return
+    // Already streaming a reply — queue the intent. The chat-event 'done'
+    // handler will replay this call once busy clears. We don't clear the
+    // input here; the user keeps seeing what they typed until the actual
+    // send happens.
+    if (busy) {
+      pendingSendRef.current = true
+      return
+    }
     setError(null)
     setBusy(true)
     const imageDataUrls = attachments.length
@@ -452,6 +486,7 @@ export default function App() {
     setInput('')
     setAttachments([])
   }
+  sendRef.current = send
 
 
   /** Capture every connected screen at once — let the model decide which is relevant. */
@@ -861,13 +896,19 @@ export default function App() {
                   send()
                 }
               }}
-              placeholder={attachments.length ? '可以加一句问她（也可以直接 Send）' : '试试：提醒我五分钟后喝水'}
-              disabled={busy}
+              placeholder={
+                busy
+                  ? '女仆思考中…可以先写下一句'
+                  : attachments.length
+                  ? '可以加一句问她（也可以直接 Send）'
+                  : '试试：提醒我五分钟后喝水'
+              }
               style={{ flex: 1, padding: '6px 10px', fontSize: 13 }}
             />
             <button
               onClick={send}
-              disabled={busy || (!input.trim() && attachments.length === 0)}
+              disabled={!input.trim() && attachments.length === 0}
+              title={busy ? '女仆还在回复，按 Send 会排队，等她说完自动发出' : 'Send'}
               style={{ padding: '6px 14px' }}
             >
               {busy ? '…' : 'Send'}

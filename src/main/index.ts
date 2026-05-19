@@ -44,6 +44,17 @@ app.commandLine.appendSwitch('ignore-gpu-blocklist')
 app.commandLine.appendSwitch('enable-gpu-rasterization')
 app.commandLine.appendSwitch('enable-zero-copy')
 
+// Last-resort safety net: AI SDK / streamText can sometimes propagate an
+// error asynchronously (e.g. MissingToolResultsError thrown inside an
+// unawaited Promise) that would otherwise crash the main process. We log
+// it loudly but keep the app alive — losing one turn beats a 闪退.
+process.on('unhandledRejection', (reason) => {
+  console.error('[main] unhandled promise rejection:', reason)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[main] uncaught exception:', err)
+})
+
 // Register the `meido-live2d://` scheme as standard + supportFetchAPI +
 // stream so the renderer can `fetch()` it the same as a regular http URL.
 // MUST run before app.whenReady — protocol.handle (registered later) needs

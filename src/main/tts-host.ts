@@ -63,10 +63,26 @@ export async function synthesize(
   text: string,
   override?: Config['tts'],
 ): Promise<TTSResult> {
-  if (!text.trim()) throw new Error('tts: empty text')
+  const safe = sanitizeForTTS(text)
+  if (!safe.trim()) throw new Error('tts: empty text')
   const cfg = override ?? getConfig().tts
-  if (cfg.backend === 'sovits') return synthesizeSovits(text, cfg.sovits)
-  return synthesizeEdge(text, cfg.voice)
+  if (cfg.backend === 'sovits') return synthesizeSovits(safe, cfg.sovits)
+  return synthesizeEdge(safe, cfg.voice)
+}
+
+/**
+ * Strip XML/HTML-looking tags before TTS. Edge TTS wraps the input in
+ * SSML server-side; if the input itself contains `<think>`, `</think>`,
+ * or other angle-bracketed garbage that a thinking-mode model leaked
+ * past the chat filter, the SSML becomes malformed and the service
+ * returns a binary payload that decodeAudioData later rejects with
+ * "Unable to decode audio data". Strip them here as belt-and-braces.
+ */
+function sanitizeForTTS(text: string): string {
+  return text
+    .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
+    .replace(/<\/?(?:think|thinking|tool_call|arg_key|arg_value)(?:\s[^>]*)?>/gi, '')
+    .trim()
 }
 
 /**
