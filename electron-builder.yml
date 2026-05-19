@@ -8,10 +8,12 @@
 # so we asarUnpack them. @huggingface/transformers is pure JS + WASM and
 # loads fine from inside asar.
 #
-# The bge-small-zh-v1.5 model (~95MB) is NOT bundled — it's lazily fetched
-# on first run and cached under userData/hf-cache. Bundling would balloon
-# the installer to ~110MB+; on-demand keeps it ~80MB while online users
-# get it once and offline users can mirror via env vars.
+# The bge-small-zh-v1.5 model (~95MB) IS bundled (see extraResources →
+# models/). Previously we lazily fetched it from huggingface.co on first
+# run — but mainland-China users got hung indefinitely (TCP connect stalls
+# for minutes, blocking the first chat turn). Bundling adds ~95MB to the
+# installer but eliminates the network dependency entirely. local-embed.ts
+# sets env.allowRemoteModels=false so transformers.js never reaches out.
 
 appId: com.openmeido.app
 productName: OpenMeido
@@ -67,6 +69,15 @@ extraResources:
     filter:
       - "**/*"
       - "!live2d-models/haitu_vts/**"
+  # Bundled bge-small-zh-v1.5 ONNX model. Ships in resources/models so
+  # local-embed.ts can load it directly without ever touching the network.
+  # Without this, first-run users (especially in mainland China where
+  # huggingface.co is blocked) hang for minutes trying to download — the
+  # whole first chat turn is blocked on embed(). See src/main/local-embed.ts.
+  - from: models
+    to: models
+    filter:
+      - "**/*"
 
 win:
   target:

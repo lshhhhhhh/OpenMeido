@@ -129,6 +129,28 @@ function makeSessionId(): string {
   return globalThis.crypto.randomUUID()
 }
 
+/**
+ * Wrap a promise with a hard timeout. Used to protect chat from hanging
+ * on a slow embed() call (transformers.js doesn't time out network
+ * fetches itself — in mainland China without a mirror, the TCP connect
+ * to huggingface.co can stall for minutes).
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} (${ms}ms)`)), ms)
+    p.then(
+      (v) => {
+        clearTimeout(t)
+        resolve(v)
+      },
+      (e) => {
+        clearTimeout(t)
+        reject(e)
+      },
+    )
+  })
+}
+
 export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   const { adapter, embed, getConfig, onError, reflectExtractor, initialSessionId } = deps
 
@@ -155,10 +177,11 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       // when there's at least toolParts. Reject only truly empty turns.
       if (!text.trim() && (!toolParts || toolParts.length === 0)) return null
       try {
-        // Embed the text. Tool calls/results aren't semantic — embed the
-        // text alone (which may be empty for pure-tool rows) so vector
-        // recall remains a text-similarity operation.
-        const vec = await embed(text || ' ')
+        // Same 5s ceiling as retrieve(). addEpisode is fire-and-forget
+        // from chat.ts (we void the promise), so the user isn't blocked
+        // on it — but if embed() hangs forever, we leak timers and
+        // eventually OOM. Bail loudly instead.
+        const vec = await withTimeout(embed(text || ' '), 5_000, 'embed timed out')
         return await adapter.addEpisode(speaker, text, vec, sessionId, toolParts)
       } catch (err) {
         reportError('addEpisode', err)
@@ -172,7 +195,17 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       let recalled: Episode[] = []
       if (cfg.memory.topK > 0 && userMessage.trim()) {
         try {
-          const qVec = await embed(userMessage)
+          // 5s timeout on the embed call. Without this, when the bge model
+          // download is reachable-but-slow (e.g. huggingface.co from
+          // mainland China, where TCP connect can hang for minutes), the
+          // whole chat turn is blocked — user types "总结邮件" and sees
+          // "思考中…" forever. Better to skip semantic recall this turn
+          // than to stall the whole agent loop.
+          const qVec = await withTimeout(
+            embed(userMessage),
+            5_000,
+            'embed timed out',
+          )
           const exclude = new Set(recent.map((e) => e.id))
           recalled = await adapter.searchByEmbedding(qVec, cfg.memory.topK, exclude)
         } catch (err) {

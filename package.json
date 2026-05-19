@@ -1,6 +1,6 @@
 {
   "name": "openmeido",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "description": "Productivity assistant + Live2D companion for non-programmers",
   "author": "lsh <laishaoheng1996@gmail.com>",
   "main": "./out/main/index.js",
@@ -19,8 +19,11 @@
     "test:mail-parent": "node --import tsx tools/smoke-mail-parent.mjs",
     "test:fake-mail": "node --import tsx tools/smoke-fake-mail.mjs",
     "test:fake-mail-agent": "node --env-file=.env --import tsx tools/smoke-fake-mail-agent.mjs",
-    "dist": "electron-vite build && electron-builder --win",
-    "dist:dir": "electron-vite build && electron-builder --win --dir",
+    "test:todo-adapter": "electron tools/smoke-todo-adapter.mjs",
+    "test:todo-agent": "node --env-file=.env --import tsx tools/smoke-todo-agent.mjs",
+    "ensure-embed-model": "node scripts/ensure-embed-model.mjs",
+    "dist": "node scripts/ensure-embed-model.mjs && electron-vite build && electron-builder --win",
+    "dist:dir": "node scripts/ensure-embed-model.mjs && electron-vite build && electron-builder --win --dir",
     "postinstall": "electron-builder install-app-deps"
   },
   "devDependencies": {
