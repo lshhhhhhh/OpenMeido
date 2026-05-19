@@ -734,17 +734,50 @@ export async function runChat(
         googleSearchTool = google.tools.googleSearch({})
       }
     } else {
-      if (cfg.backend.searchEnabled) {
+      // GLM (bigmodel.cn) supports a non-standard `web_search` tool that
+      // can't be expressed via the Vercel AI SDK's `tools` map (it expects
+      // function-shaped tools with inputSchema, not arbitrary types). We
+      // inject it by wrapping fetch and editing the request body before
+      // it goes to bigmodel.cn. The OpenAI-compat endpoint accepts the
+      // extra tool entry and the model autonomously calls search when
+      // useful. No grounding metadata is returned to us (Zhipu doesn't
+      // surface it in the OpenAI-compat shim), but the model's answer
+      // reflects fresh info — which is what users want.
+      const isGlm = cfg.backend.baseUrl.includes('bigmodel.cn')
+      const injectGlmSearch = isGlm && cfg.backend.searchEnabled
+      if (cfg.backend.searchEnabled && !isGlm) {
         console.warn(
-          '[chat] searchEnabled is set but the current backend (' +
+          '[chat] searchEnabled set but backend (' +
             cfg.backend.baseUrl +
-            ') does not yet support search. ' +
-            'GLM web_search wiring is a planned follow-up; Gemini works today.',
+            ') is not Gemini or GLM. No-op.',
         )
       }
+      // Custom fetch wrapper that injects {type:"web_search",...} into
+      // the outgoing tools array. Only constructed when injectGlmSearch
+      // is true so non-search calls have zero overhead.
+      const wrappedFetch = injectGlmSearch
+        ? ((async (url, init) => {
+            if (init && init.method === 'POST' && typeof init.body === 'string') {
+              try {
+                const body = JSON.parse(init.body) as { tools?: unknown[] }
+                const entry = { type: 'web_search', web_search: { enable: true } }
+                if (Array.isArray(body.tools)) body.tools.push(entry)
+                else body.tools = [entry]
+                init = { ...init, body: JSON.stringify(body) }
+              } catch {
+                /* malformed body — fall through to original fetch */
+              }
+            }
+            return globalThis.fetch(
+              url as Parameters<typeof globalThis.fetch>[0],
+              init as Parameters<typeof globalThis.fetch>[1],
+            )
+          }) as typeof globalThis.fetch)
+        : undefined
       const openai = createOpenAI({
         baseURL: cfg.backend.baseUrl,
         apiKey,
+        ...(wrappedFetch ? { fetch: wrappedFetch } : {}),
       })
       // .chat() forces the classic POST /chat/completions path. The default
       // openai(...) factory in @ai-sdk/openai v6 hits POST /responses (the

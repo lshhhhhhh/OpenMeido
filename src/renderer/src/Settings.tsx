@@ -373,6 +373,8 @@ export function Settings({ initial, onClose }: SettingsProps) {
               that it's a no-op until provider-specific support lands. */}
           {(() => {
             const isGemini = draft.backend.baseUrl.includes('googleapis.com')
+            const isGlm = draft.backend.baseUrl.includes('bigmodel.cn')
+            const supported = isGemini || isGlm
             return (
               <div style={{ marginTop: 12 }}>
                 <label
@@ -404,8 +406,12 @@ export function Settings({ initial, onClose }: SettingsProps) {
                   }}
                 >
                   {isGemini
-                    ? '✓ Gemini 支持：开启后，模型会自动决定何时谷歌搜索来获取最新信息，回答会标注引用。'
-                    : '⚠️ 当前 backend 暂未接入搜索（GLM / Qwen 等需要 provider 特定的工具协议，开发中）。打勾不会生效。'}
+                    ? '✓ Gemini 支持：开启后模型自动决定何时谷歌搜索，回答会标注引用来源。'
+                    : isGlm
+                    ? '✓ GLM 支持：开启后模型自动决定何时搜索（智谱内置 web_search 工具）。'
+                    : supported
+                    ? ''
+                    : '⚠️ 当前 backend 暂未接入搜索（Qwen / DeepSeek / LM Studio 等）。打勾不会生效。'}
                 </div>
               </div>
             )

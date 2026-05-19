@@ -16,6 +16,7 @@
  *
  * Run: node --env-file=.env --import tsx tools/smoke-search-agent.mjs
  */
+import { createOpenAI } from '@ai-sdk/openai'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { stepCountIs, streamText } from 'ai'
 
@@ -112,6 +113,64 @@ async function main() {
       gm === null || gm === undefined,
       `got groundingMetadata=${JSON.stringify(gm).slice(0, 60)}`,
     )
+  }
+
+  // ---------- GLM with web_search injected via fetch wrapper ----------
+  if (process.env.ZHIPU_API_KEY) {
+    console.log(`\n=== Backend: GLM glm-4.6 with web_search (fetch-wrapper) ===`)
+    // Reproduce the same wrapped-fetch pattern chat.ts uses, so this
+    // test exercises the actual wire path that ships.
+    const wrappedFetch = async (url, init) => {
+      if (init && init.method === 'POST' && typeof init.body === 'string') {
+        try {
+          const body = JSON.parse(init.body)
+          const entry = { type: 'web_search', web_search: { enable: true } }
+          if (Array.isArray(body.tools)) body.tools.push(entry)
+          else body.tools = [entry]
+          init = { ...init, body: JSON.stringify(body) }
+        } catch {}
+      }
+      return globalThis.fetch(url, init)
+    }
+    const openai = createOpenAI({
+      baseURL: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: process.env.ZHIPU_API_KEY,
+      fetch: wrappedFetch,
+    })
+    const model = openai.chat('glm-4.6')
+    try {
+      const { visible } = await ask(
+        model,
+        '请告诉我 2026 年 5 月的实时新闻——最新的中国互联网行业动态。需要最新信息。',
+      )
+      console.log(
+        `visible: ${visible.replace(/\n/g, ' ').slice(0, 300)}${visible.length > 300 ? '…' : ''}`,
+      )
+      check(
+        'GLM returned a non-empty answer',
+        visible.trim().length > 30,
+        `length=${visible.length}`,
+      )
+      // GLM with web_search shouldn't hedge with "I can't access realtime info."
+      // If hedging occurs, search wasn't actually invoked.
+      const hedgePhrases = ['无法访问', '无法获取', '我没有实时', '我无法查看实时', 'cannot access']
+      const hedged = hedgePhrases.some((p) => visible.includes(p))
+      check(
+        'GLM did NOT hedge about realtime access (suggests search was invoked)',
+        !hedged,
+        `looked for: ${hedgePhrases.join(' / ')}`,
+      )
+    } catch (err) {
+      // If GLM's API rejects the wrapped body, that's diagnostic too —
+      // we want to know immediately rather than silently shipping broken.
+      check(
+        'GLM web_search request did not 4xx',
+        false,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
+  } else {
+    console.log('\n(skipping GLM scenario — ZHIPU_API_KEY not in .env)')
   }
 
   console.log(`\n${pass} passed, ${fail} failed`)
