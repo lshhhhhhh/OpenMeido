@@ -79,6 +79,17 @@ export default function App() {
   const [llmStatus, setLlmStatus] = useState<'idle' | 'ok' | 'error'>('idle')
   // Transient memory-write-failure banner. Auto-clears after 8 seconds.
   const [memoryError, setMemoryError] = useState<string | null>(null)
+  // Naive-mode banner state. True when the embed model isn't on disk
+  // yet — banner persists (doesn't auto-clear) until the user finishes
+  // the in-app download. Flipped via embed.status() at boot + via the
+  // embed.onComplete listener.
+  const [naiveMode, setNaiveMode] = useState(false)
+  const [downloadInProgress, setDownloadInProgress] = useState(false)
+  const [downloadProgress, setDownloadProgress] = useState<{
+    received: number
+    total: number
+    file: string | null
+  }>({ received: 0, total: 0, file: null })
   const activeIdRef = useRef<string | null>(null)
   const live2dRef = useRef<Live2DController>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
@@ -217,6 +228,28 @@ export default function App() {
       // Auto-dismiss after 8 seconds; user can also click ×.
       setTimeout(() => setMemoryError(null), 8000)
     })
+  }, [])
+
+  // Naive-memory-mode boot check + download subscriptions. When the embed
+  // model isn't on disk, the banner stays visible until the user downloads.
+  useEffect(() => {
+    void window.api.embed.status().then((s) => {
+      setNaiveMode(s.naive)
+      setDownloadInProgress(s.inProgress)
+      setDownloadProgress({ received: s.receivedBytes, total: s.totalBytes, file: s.currentFile })
+    })
+    const offP = window.api.embed.onProgress((p) => {
+      setDownloadInProgress(p.inProgress)
+      setDownloadProgress({ received: p.receivedBytes, total: p.totalBytes, file: p.currentFile })
+    })
+    const offC = window.api.embed.onComplete((r) => {
+      setDownloadInProgress(false)
+      if (r.ok) setNaiveMode(false)
+    })
+    return () => {
+      offP()
+      offC()
+    }
   }, [])
 
   // Reminder fired in main → show it inline in chat as an assistant message.
@@ -797,6 +830,79 @@ export default function App() {
                 >
                   ×
                 </button>
+              </div>
+            )}
+
+            {/* Naive-memory-mode banner. Persists until the embed model is
+                downloaded. Becomes a progress bar during the download. */}
+            {naiveMode && (
+              <div
+                style={{
+                  fontSize: 11,
+                  color: '#664',
+                  background: 'rgba(255, 240, 180, 0.65)',
+                  padding: '6px 10px',
+                  borderRadius: 4,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 8,
+                }}
+              >
+                {downloadInProgress ? (
+                  <>
+                    <span style={{ flex: 1 }}>
+                      正在下载嵌入模型 ({downloadProgress.file ?? '...'}) —{' '}
+                      {downloadProgress.total > 0
+                        ? `${Math.round((100 * downloadProgress.received) / downloadProgress.total)}%`
+                        : `${(downloadProgress.received / 1_000_000).toFixed(1)} MB`}
+                    </span>
+                    <div
+                      style={{
+                        flex: '0 0 auto',
+                        width: 100,
+                        height: 6,
+                        background: 'rgba(0,0,0,0.1)',
+                        borderRadius: 3,
+                        overflow: 'hidden',
+                      }}
+                    >
+                      <div
+                        style={{
+                          height: '100%',
+                          background: '#cb9',
+                          width:
+                            downloadProgress.total > 0
+                              ? `${(100 * downloadProgress.received) / downloadProgress.total}%`
+                              : '20%',
+                          transition: 'width 200ms ease-out',
+                        }}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span style={{ flex: 1 }}>
+                      💡 暂未启用长期记忆。下载嵌入模型（约 95 MB）后女仆能记住更久之前的事。
+                    </span>
+                    <button
+                      onClick={() => {
+                        void window.api.embed.download()
+                      }}
+                      style={{
+                        padding: '3px 10px',
+                        fontSize: 11,
+                        background: '#cb9',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: 3,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      下载
+                    </button>
+                  </>
+                )}
               </div>
             )}
             {messages.length === 0 && !busy && (

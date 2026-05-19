@@ -15,12 +15,40 @@ import { openSqliteMemory } from './storage/sqlite-memory-adapter.js'
 import type { MemoryAdapter } from '../core/memory/adapter.js'
 import type { ReflectionExtractor } from '../core/memory/reflection.js'
 import { getConfig } from './config.js'
-import { embedLocal, LOCAL_EMBED_DIM, preloadLocalEmbed } from './local-embed.js'
+import { embedLocal, LOCAL_EMBED_DIM, preloadLocalEmbed, findBundledModel } from './local-embed.js'
 import { runExtraction } from './chat-host.js'
 
 let adapter: MemoryAdapter | null = null
 let service: MemoryService | null = null
 let initError: string | null = null
+
+/**
+ * "Naive mode" = the embed model isn't on disk yet so semantic recall (L2)
+ * is unavailable. We still persist + replay episodes (L1) and L3 facts
+ * work normally. The user sees a banner nudging them to download.
+ *
+ * Stays true until either (a) findBundledModel finds the files OR (b) the
+ * user-initiated download completes and we re-poll. The flag is read by
+ * MemoryService at every operation, so a flip-to-false takes effect on
+ * the next chat turn without re-init.
+ */
+let naiveMode = true
+
+/** Read by service.isNaiveMode() per-call. Exported for the renderer
+ *  status pill / banner via IPC. */
+export function isNaiveMemoryMode(): boolean {
+  return naiveMode
+}
+
+/** Called by the download host after the model lands on disk. */
+export function exitNaiveMemoryMode(): void {
+  if (naiveMode) {
+    naiveMode = false
+    console.log('[memory] exiting naive mode — model is now available')
+    // Warm the model so the next turn doesn't pay cold-start.
+    preloadLocalEmbed()
+  }
+}
 
 /** Init once at app whenReady. No-op if already up. */
 export async function initMemory(): Promise<void> {
@@ -44,16 +72,18 @@ export async function initMemory(): Promise<void> {
     const recent = await adapter.listSessions()
     const resumeId = recent.find((s) => s.id !== 'legacy')?.id
 
+    // Decide initial mode based on whether the model is reachable on disk.
+    const bundled = findBundledModel()
+    naiveMode = !bundled
+
     service = createMemoryService({
       adapter,
       getConfig,
       embed: embedLocal,
       reflectExtractor,
       initialSessionId: resumeId,
+      isNaiveMode: () => naiveMode,
       onError: (operation, message) => {
-        // Broadcast so renderer windows can surface a toast / status pill.
-        // Silently failing writes are the worst class of memory bug, so we
-        // make sure the user can see when it happens.
         for (const win of BrowserWindow.getAllWindows()) {
           if (!win.isDestroyed()) {
             win.webContents.send('memory:error', {
@@ -65,14 +95,24 @@ export async function initMemory(): Promise<void> {
         }
       },
     })
-    console.log(
-      `[memory] ready (sqlite, local bge-small-zh, dim=${LOCAL_EMBED_DIM})${
-        resumeId ? ` · resumed session ${resumeId.slice(0, 8)}…` : ' · new session'
-      }`,
-    )
-    // Warm the ONNX model in the background so the first user turn doesn't
-    // pay the ~1-2s cold-start.
-    preloadLocalEmbed()
+    if (naiveMode) {
+      console.log(
+        `[memory] ready in NAIVE mode (no embed model on disk) — ` +
+          `L1 recall + L3 facts work; L2 semantic recall disabled until ` +
+          `user downloads the model${
+            resumeId ? ` · resumed session ${resumeId.slice(0, 8)}…` : ' · new session'
+          }`,
+      )
+    } else {
+      console.log(
+        `[memory] ready (sqlite, local bge-small-zh, dim=${LOCAL_EMBED_DIM})${
+          resumeId ? ` · resumed session ${resumeId.slice(0, 8)}…` : ' · new session'
+        }`,
+      )
+      // Warm the ONNX model in the background so the first user turn doesn't
+      // pay the ~1-2s cold-start.
+      preloadLocalEmbed()
+    }
   } catch (err) {
     initError = err instanceof Error ? err.message : String(err)
     console.error('[memory] init failed — running without memory:', err)

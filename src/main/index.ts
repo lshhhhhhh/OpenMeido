@@ -7,9 +7,10 @@ import { fileURLToPath } from 'node:url'
 
 import { runChat } from './chat.js'
 import { getConfig, setConfig, onConfigChange } from './config.js'
-import { initMemory, getMemoryService, getMemoryInitError } from './memory-host.js'
+import { initMemory, getMemoryService, getMemoryInitError, isNaiveMemoryMode } from './memory-host.js'
 import { initReminders, getReminderService } from './reminder-host.js'
 import { initTasks, getTaskService } from './tasks-host.js'
+import { getDownloadState, startEmbedDownload } from './embed-download-host.js'
 import { testMailConfig } from './mail-host.js'
 import { testBackend, runExtraction } from './chat-host.js'
 import { readDemos, getDemosPath } from './demos-host.js'
@@ -347,6 +348,14 @@ ipcMain.handle('tasks:remove', async (_event, id: number) => {
   if (!svc) return false
   return svc.remove(id)
 })
+
+// ---- Embed model download ----
+
+ipcMain.handle('embed:status', () => ({
+  naive: isNaiveMemoryMode(),
+  ...getDownloadState(),
+}))
+ipcMain.handle('embed:download', () => startEmbedDownload())
 
 // ---- Sidebar window-resize ----
 

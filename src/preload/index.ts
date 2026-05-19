@@ -365,6 +365,70 @@ const api = {
       return ipcRenderer.invoke('sidebar:setOpen', open) as Promise<void>
     },
   },
+
+  // Embed-model download. The renderer kicks off the download via
+  // `download()` (which resolves when done), watches progress via
+  // `onProgress(cb)`, and queries current state via `status()` to
+  // decide whether to show the "下载嵌入模型" banner / Settings
+  // section in the first place.
+  embed: {
+    status(): Promise<{
+      naive: boolean
+      modelPresent: boolean
+      inProgress: boolean
+      totalBytes: number
+      receivedBytes: number
+      currentFile: string | null
+    }> {
+      return ipcRenderer.invoke('embed:status') as Promise<{
+        naive: boolean
+        modelPresent: boolean
+        inProgress: boolean
+        totalBytes: number
+        receivedBytes: number
+        currentFile: string | null
+      }>
+    },
+    download(): Promise<{ ok: true } | { ok: false; error: string }> {
+      return ipcRenderer.invoke('embed:download') as Promise<
+        { ok: true } | { ok: false; error: string }
+      >
+    },
+    /** Fires on each chunk during a download. */
+    onProgress(
+      cb: (p: {
+        inProgress: boolean
+        totalBytes: number
+        receivedBytes: number
+        currentFile: string | null
+      }) => void,
+    ): () => void {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        p: {
+          inProgress: boolean
+          totalBytes: number
+          receivedBytes: number
+          currentFile: string | null
+        },
+      ): void => cb(p)
+      ipcRenderer.on('embed:downloadProgress', handler)
+      return () => {
+        ipcRenderer.off('embed:downloadProgress', handler)
+      }
+    },
+    /** Fires once when the download finishes (ok=true) or errors out. */
+    onComplete(cb: (r: { ok: true } | { ok: false; error: string }) => void): () => void {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        r: { ok: true } | { ok: false; error: string },
+      ): void => cb(r)
+      ipcRenderer.on('embed:downloadComplete', handler)
+      return () => {
+        ipcRenderer.off('embed:downloadComplete', handler)
+      }
+    },
+  },
 }
 
 contextBridge.exposeInMainWorld('api', api)

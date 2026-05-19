@@ -351,7 +351,16 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
       const ts = new Date().toISOString()
       const row = insertEpisode.run(ts, speaker, text, sessionId, toolData)
       const episodeId = Number(row.lastInsertRowid)
-      insertVec.run(BigInt(episodeId), Buffer.from(embedding.buffer))
+      // Naive mode passes an empty Float32Array — we still persist the
+      // episode (so chat history survives), but skip the vec0 insert.
+      // Subsequent searchByEmbedding queries return only rows that DO
+      // have vectors, which is the correct behavior: an un-embedded row
+      // can't appear in semantic recall regardless. After the user
+      // downloads the model, future episodes get embedded normally;
+      // naive-era ones remain non-recallable (acceptable trade-off).
+      if (embedding.length > 0) {
+        insertVec.run(BigInt(episodeId), Buffer.from(embedding.buffer))
+      }
       return episodeId
     },
   )

@@ -21,6 +21,29 @@ import { join } from 'node:path'
 export const LOCAL_EMBED_DIM = 512
 export const LOCAL_EMBED_MODEL = 'Xenova/bge-small-zh-v1.5'
 
+/**
+ * Cheap synchronous check for whether the bundled model files are on
+ * disk somewhere we can load them from. Memory-host uses this at boot
+ * to decide between full mode and naive mode (see naive-memory docs).
+ * Returns the resolved path when present, null otherwise.
+ */
+export function findBundledModel(): { path: string } | null {
+  const candidates: string[] = []
+  if (process.resourcesPath) {
+    candidates.push(join(process.resourcesPath, 'models'))
+  }
+  candidates.push(join(process.cwd(), 'models'))
+  // userData/hf-cache catches users who already downloaded via the
+  // in-app download flow (the new naive→full upgrade path).
+  candidates.push(join(app.getPath('userData'), 'hf-cache'))
+  for (const dir of candidates) {
+    if (existsSync(join(dir, LOCAL_EMBED_MODEL, 'onnx', 'model.onnx'))) {
+      return { path: dir }
+    }
+  }
+  return null
+}
+
 let extractorPromise: Promise<FeatureExtractionPipeline> | null = null
 
 /**

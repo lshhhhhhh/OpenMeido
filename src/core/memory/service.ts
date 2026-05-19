@@ -102,8 +102,26 @@ export interface MemoryServiceDeps {
   adapter: MemoryAdapter
   /** Called per-operation so config changes apply immediately. */
   getConfig: () => Config
-  /** Pluggable embedding function. Production uses local bge-small-zh. */
+  /**
+   * Pluggable embedding function. Production uses local bge-small-zh.
+   * When `naiveMode` returns true (no model on disk), this function is
+   * never called — addEpisode skips embedding and retrieve skips
+   * semantic search.
+   */
   embed: EmbedFn
+  /**
+   * Returns true when the embed model isn't available yet (user hasn't
+   * downloaded it). Service then skips all embedding-dependent paths
+   * but keeps storing episodes (just without vectors) so the user's
+   * chat history isn't lost and recall-by-recency still works.
+   *
+   * When the user finishes downloading and the model is loadable,
+   * memory-host swaps this to return false and embeddings resume — but
+   * episodes added during naive mode never get backfilled (low value
+   * for the complexity cost; semantic recall over a fresh user's first
+   * dozen turns isn't worth a migration).
+   */
+  isNaiveMode?: () => boolean
   /**
    * Optional sink for "addEpisode failed" / "retrieve failed" notices.
    * The host (Electron main) wires this up to broadcast to renderer
@@ -152,7 +170,8 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 }
 
 export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
-  const { adapter, embed, getConfig, onError, reflectExtractor, initialSessionId } = deps
+  const { adapter, embed, getConfig, onError, reflectExtractor, initialSessionId, isNaiveMode } = deps
+  const naive = (): boolean => isNaiveMode?.() ?? false
 
   // Resume the previous session by default — users expect chat continuity
   // across restarts; they only get a fresh session when they explicitly
@@ -177,6 +196,19 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       // when there's at least toolParts. Reject only truly empty turns.
       if (!text.trim() && (!toolParts || toolParts.length === 0)) return null
       try {
+        // Naive mode: no model on disk. Persist the episode WITHOUT an
+        // embedding so the user's chat history is still saved and
+        // recent-N recall still works. Vector recall (L2) is the only
+        // thing degraded. Once the user downloads the model, this
+        // function starts producing vectors again — but episodes added
+        // during naive mode stay un-embedded (not worth a backfill).
+        if (naive()) {
+          // Pass a zero vector; the adapter writes it to episodes_vec
+          // but it'll never match anything semantically (cosine distance
+          // = 1 against any non-zero query). Cheap, keeps schema simple.
+          const zeros = new Float32Array(0)
+          return await adapter.addEpisode(speaker, text, zeros, sessionId, toolParts)
+        }
         // Same 5s ceiling as retrieve(). addEpisode is fire-and-forget
         // from chat.ts (we void the promise), so the user isn't blocked
         // on it — but if embed() hangs forever, we leak timers and
@@ -193,7 +225,11 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       const cfg = getConfig()
       const recent = await adapter.recent(cfg.memory.recentN)
       let recalled: Episode[] = []
-      if (cfg.memory.topK > 0 && userMessage.trim()) {
+      // Skip semantic search entirely in naive mode — there's no embed
+      // function to call, and any cached vec0 rows from naive-era inserts
+      // are zero-vectors that wouldn't match anyway. Recent-N already
+      // returned above; L2 just isn't a thing yet.
+      if (!naive() && cfg.memory.topK > 0 && userMessage.trim()) {
         try {
           // 5s timeout on the embed call. Without this, when the bge model
           // download is reachable-but-slow (e.g. huggingface.co from
