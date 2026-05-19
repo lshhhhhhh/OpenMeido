@@ -251,7 +251,25 @@ const markTaskDone = tool({
     if (!svc) return { error: '任务服务未初始化' }
     try {
       const ok = await svc.markDone(id)
-      if (!ok) return { error: `id=${id} 的任务找不到或已经完成。` }
+      if (!ok) {
+        // Validator: id not in active set. Include the actual active
+        // task list so the model can pick a real id on retry. Same
+        // pattern as readEmail. Cheap (single sqlite query) and avoids
+        // having to bloat the system prompt with "don't guess ids".
+        try {
+          const active = await svc.listActive()
+          const idList = active
+            .map((t) => `id=${t.id}: ${t.text.slice(0, 40)}`)
+            .join(' | ')
+          return {
+            error:
+              `id=${id} 不在当前活跃任务里（可能已经完成或被删除）。` +
+              `当前活跃任务：${idList || '(无)'}。请挑一个真实的 id 再调用。`,
+          }
+        } catch {
+          return { error: `id=${id} 的任务找不到或已经完成。` }
+        }
+      }
       return { ok: true, id }
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) }
@@ -319,8 +337,29 @@ const readEmail = tool({
     try {
       const msg = await mail.readMessage(id)
       if (!msg) {
+        // Validator: id wasn't found. Include the current inbox so the
+        // model can self-correct on retry. This is cheap insurance —
+        // adds one IMAP listInbox call only when readEmail FAILS, and
+        // gives the model concrete valid ids to choose from instead of
+        // guessing again. See openmeido-prompt-experiment-findings.md
+        // for why this approach beats adding more prompt rules.
         console.warn(`[mail] readEmail id="${id}" returned null (not found)`)
-        return { error: `id="${id}" 的邮件不存在或已被删除。请先用 listRecentEmails 重新拿当前列表。` }
+        try {
+          const recent = await mail.listInbox({ limit: 10, onlyUnread: false })
+          const idList = recent
+            .map((r) => `"${r.id}" (${r.from} - ${r.subject?.slice(0, 40) ?? ''})`)
+            .join('; ')
+          return {
+            error:
+              `id="${id}" 在邮箱里找不到。当前最近 10 封邮件的 id：${idList || '(空)'}。` +
+              `请从这里挑一个真实的 id 再调用 readEmail。`,
+          }
+        } catch {
+          // Fallback to the original message if the re-list also fails
+          return {
+            error: `id="${id}" 的邮件不存在或已被删除。请先用 listRecentEmails 重新拿当前列表。`,
+          }
+        }
       }
       console.log(`[mail] readEmail id="${id}" → subject="${msg.subject?.slice(0, 60)}", from="${msg.from}"`)
       // Cap body length so a 200KB email doesn't blow the model context.
