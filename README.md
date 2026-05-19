@@ -65,6 +65,10 @@
 - **Live2D Cubism Core** —— [Cubism SDK Release License](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_zh.html)
 - **Cubism Components**（JS runtime）—— MIT
 
+### 致谢
+
+- **INVC. 老潘** —— 早期产品想法 + 功能需求反馈
+
 ---
 
 ## English
@@ -125,6 +129,10 @@ Download a sample zip from the [Live2D sample page](https://www.live2d.com/en/le
 - **Hiyori Pro / Haru Greeter Pro** — © Live2D Inc., distributed under the [Live2D Free Material License Agreement](https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html). Read the terms before commercial use
 - **Live2D Cubism Core** — [Cubism SDK Release License](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html)
 - **Cubism Components** (the JS runtime) — MIT
+
+### Acknowledgements
+
+- **INVC. 老潘 (Lao Pan)** — early product direction + feature requirements feedback
 
 ### Build from source
 
