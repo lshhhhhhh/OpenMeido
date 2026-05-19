@@ -207,9 +207,12 @@ const setReminder = tool({
 
 const listRecentEmails = tool({
   description:
-    '查看用户邮箱里最近的邮件。用户提到"我有没有新邮件"、"最近邮件"、"某某发邮件了吗"时调用。' +
-    '返回的是邮件摘要（发件人、标题、片段、时间），不是完整正文——如果用户问邮件细节，' +
-    '从返回结果里挑出 id 再调 readEmail 取正文。',
+    '查看用户邮箱里最近的邮件。用户提到"我有没有新邮件"、"最近邮件"、"某某发邮件了吗"时调用。\n' +
+    '返回 items[] 的每一项是邮件摘要（id、from、subject、snippet、ts、unread）；' +
+    '**如果某条邮件是回复某封信，items[i].parent 会包含用户当初发出的那封原信的摘要**' +
+    '（同样的字段），用来生成"对方说了什么 + 你之前说了什么"的成对总结。' +
+    'parent === null 表示是回复但找不到原信；parent === undefined 表示这条不是回复或没查。\n' +
+    '如果用户问邮件细节正文，从某一项的 id 再调 readEmail 取全文。',
   // OpenAI's strict tool schema requires every property in `properties` to
   // also appear in `required`. Zod .default() / .optional() produce
   // properties that are NOT required, and the API rejects the whole tool.
@@ -632,7 +635,11 @@ export async function runChat(
       { role: 'user', content: userContent },
     ]
 
-    const mailEnabled = cfg.mail.enabled
+    // Fake-mail dev mode bypasses real IMAP config but the mail tools still
+    // need to be exposed to the model — otherwise the synthetic data is
+    // unreachable. mail-host.ts also reads OPENMEIDO_FAKE_MAIL; the two must
+    // agree, hence the same env-var check here.
+    const mailEnabled = cfg.mail.enabled || process.env.OPENMEIDO_FAKE_MAIL === '1'
     const result = streamText({
       model,
       temperature: 1,

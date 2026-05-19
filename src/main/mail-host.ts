@@ -6,6 +6,7 @@
  */
 
 import { createImapAdapter } from './mail/imap-adapter.js'
+import { createFakeMailAdapter } from './mail/fake-adapter.js'
 import { createMailService, type MailService } from '../core/mail/service.js'
 import type { MailAdapter } from '../core/mail/adapter.js'
 import { decryptMailPassword, getConfig, onConfigChange } from './config.js'
@@ -24,8 +25,28 @@ function isConfigured(cfg: Config['mail']): boolean {
   return cfg.enabled && !!cfg.host && !!cfg.username && !!cfg.password
 }
 
+/** When set, mail-host uses a hardcoded in-memory adapter with synthetic
+ *  reply chains instead of dialing real IMAP. For testing email-with-context
+ *  flows on inboxes that don't have suitable threads. Set via:
+ *    $env:OPENMEIDO_FAKE_MAIL = '1'  (PowerShell)
+ *    OPENMEIDO_FAKE_MAIL=1           (POSIX)
+ *  before launching the app, or use `npm run dev:fake-mail`. */
+const FAKE_MODE = process.env.OPENMEIDO_FAKE_MAIL === '1'
+
 /** Lazy getter — returns null when mail isn't fully configured. */
 export function getMailService(): MailService | null {
+  // Fake mode bypasses real config entirely — we don't need IMAP credentials,
+  // and we don't need the user to flip mail.enabled. chat.ts mirrors the same
+  // env-var check so the mail tools get exposed to the model.
+  if (FAKE_MODE) {
+    if (!service) {
+      adapter = createFakeMailAdapter()
+      service = createMailService(adapter)
+      configuredHash = 'fake'
+    }
+    return service
+  }
+
   const cfg = getConfig().mail
   if (!isConfigured(cfg)) return null
 

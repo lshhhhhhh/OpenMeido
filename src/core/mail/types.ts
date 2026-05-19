@@ -14,6 +14,21 @@ export interface MailSummary {
   /** ISO 8601 timestamp the server reports the message arrived. */
   ts: string
   unread: boolean
+  /**
+   * RFC 5322 In-Reply-To: the parent message's Message-Id, or undefined
+   * for thread roots. Surfaces so the model can correlate items even when
+   * the parent body isn't included (e.g. parent was not in Sent).
+   */
+  inReplyTo?: string
+  /**
+   * email-with-context: when THIS message is a reply AND we found the
+   * parent in the user's Sent folder, this carries the parent's summary
+   * (same shape, but never recursive — only one level up). Lets the model
+   * produce paired "they said / you had said" summaries from a single
+   * listRecentEmails call. `null` means "we looked and didn't find";
+   * `undefined` means "this isn't a reply / didn't look".
+   */
+  parent?: Omit<MailSummary, 'parent'> | null
 }
 
 /** Full message body. readMessage returns this. */
@@ -31,6 +46,27 @@ export interface MailMessage {
    * Avoids the LLM seeing 50MB PDFs in its context.
    */
   attachments: { filename: string; sizeBytes: number; mimeType: string }[]
+  /**
+   * RFC 5322 Message-Id of this email. Stable across mailboxes (unlike UID),
+   * so it's what we use to walk reply chains. May be missing for poorly-
+   * formed messages.
+   */
+  messageId?: string
+  /**
+   * Message-Id of the immediate parent in the reply chain — the message
+   * THIS email is replying to. From the `In-Reply-To` header. Missing for
+   * thread roots (the first message in a conversation).
+   */
+  inReplyTo?: string
+  /**
+   * When THIS message is a reply (has inReplyTo) AND we successfully located
+   * its parent on the server (typically in the user's Sent folder), this is
+   * the parent's full content. Walked one level only — for deeper history,
+   * the model can call readEmail(parent.id) to recurse.
+   * `null` (vs undefined) means "we tried and didn't find it" — the parent
+   * may have been deleted, archived elsewhere, or never stored locally.
+   */
+  parent?: MailMessage | null
 }
 
 export interface ListInboxOptions {
@@ -38,4 +74,10 @@ export interface ListInboxOptions {
   limit: number
   /** If true, only messages with the \Seen flag missing. */
   onlyUnread?: boolean
+  /**
+   * email-with-context: when true (default), reply items get their parent
+   * attached from the Sent folder. Adds ~50-100ms per reply since each
+   * lookup is an extra IMAP search + envelope fetch. Set false to skip.
+   */
+  includeParents?: boolean
 }

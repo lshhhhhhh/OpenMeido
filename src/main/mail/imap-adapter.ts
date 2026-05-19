@@ -31,6 +31,23 @@ export interface ImapAdapterOptions {
 
 const SNIPPET_LEN = 200
 
+/**
+ * Pull the first parent Message-Id out of an `In-Reply-To` header value.
+ * mailparser returns it as:
+ *   - a string `"<abc@x.com>"` for the common single-parent case
+ *   - a space-joined string for multi-parent threads (RFC 5322 allows it)
+ *   - an array in some rare paths
+ * We always return the first id so reply-chain walking is single-track.
+ * Tested by tools/smoke-mail-parent.mjs.
+ */
+function normalizeInReplyTo(raw: unknown): string | undefined {
+  if (Array.isArray(raw)) return typeof raw[0] === 'string' ? raw[0] : undefined
+  if (typeof raw !== 'string') return undefined
+  const ids = raw.match(/<[^>]+>/g)
+  if (ids && ids.length > 0) return ids[0]
+  return raw
+}
+
 export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
   let client: ImapFlow | null = null
   let closed = false
@@ -74,30 +91,190 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
       .slice(0, SNIPPET_LEN)
   }
 
+  /**
+   * Locate the user's Sent mailbox. Different servers name it differently
+   * ("Sent", "Sent Items", "[Gmail]/Sent Mail", "已发送邮件", ...) so we
+   * prefer the IMAP SPECIAL-USE attribute `\Sent` and fall back to a
+   * case-insensitive name match. Returns null when no Sent box is found —
+   * unusual but possible on minimal IMAP servers.
+   */
+  async function findSentMailbox(c: ImapFlow): Promise<string | null> {
+    type Box = { path: string; name?: string; specialUse?: string }
+    const list = (await c.list()) as Box[]
+    const bySpecial = list.find((b) => b.specialUse === '\\Sent')
+    if (bySpecial) return bySpecial.path
+    const byName = list.find((b) => /^sent/i.test(b.name ?? '') || /sent[\s_-]?(items|mail)/i.test(b.path))
+    return byName?.path ?? null
+  }
+
+  /**
+   * Search the Sent mailbox for a message with the given RFC 5322
+   * Message-Id (including the angle brackets) and return its UID, or null
+   * if not found. Caller is responsible for the surrounding mailbox lock
+   * lifecycle — we acquire and release our own here, so the caller must
+   * NOT already hold a different mailbox lock.
+   */
+  async function findSentUidByMessageId(
+    c: ImapFlow,
+    messageId: string,
+  ): Promise<number | null> {
+    const sentPath = await findSentMailbox(c)
+    if (!sentPath) return null
+    const lock = await c.getMailboxLock(sentPath)
+    try {
+      const uids = (await c.search(
+        // `header` search clauses are { name: value } in imapflow's typing.
+        { header: { 'message-id': messageId } },
+        { uid: true },
+      )) as number[] | false
+      if (!uids || uids.length === 0) return null
+      // If a Message-Id appears multiple times (Bcc trick, copy-to-self,
+      // reassigned id), prefer the most recent UID.
+      return uids[uids.length - 1] ?? null
+    } finally {
+      lock.release()
+    }
+  }
+
+  /**
+   * Recursive readMessage that mirrors the public adapter signature but
+   * decrements a depth budget as it walks up the reply chain. depth=1
+   * fetches the message + its immediate parent; depth=0 fetches just the
+   * message (used to prevent the parent's parent's... recursion).
+   */
+  async function readMessageWithDepth(
+    id: string,
+    depth: number,
+  ): Promise<MailMessage | null> {
+    const uid = Number(id)
+    if (!Number.isFinite(uid)) return null
+
+    // First leg: fetch + parse the requested message from INBOX. We release
+    // the INBOX lock BEFORE looking at Sent because imapflow serializes
+    // mailbox access per connection — holding INBOX while we ask for Sent
+    // would deadlock.
+    const main = await withInbox(async (c) => {
+      const msg = await c.fetchOne(String(uid), { source: true }, { uid: true })
+      if (!msg || !msg.source) return null
+      const parsed = await simpleParser(msg.source)
+      return parsed
+    })
+    if (!main) return null
+
+    const parsed = main
+    const toList = Array.isArray(parsed.to)
+      ? parsed.to.flatMap((a) => a.value)
+      : parsed.to?.value ?? []
+    // mailparser variants for In-Reply-To:
+    //   - single parent → string like "<abc@x.com>"
+    //   - multi-parent (rare, RFC 5322 allows it) → space-joined string
+    //     "<a@x.com> <b@x.com>" OR an array. Take the first id.
+    const inReplyTo = normalizeInReplyTo(parsed.inReplyTo)
+
+    const result: MailMessage = {
+      id,
+      from: parsed.from?.text ?? '',
+      to: toList.map((a) => a.address ?? '').filter(Boolean),
+      subject: parsed.subject ?? '',
+      body: (parsed.text ?? '').trim(),
+      ts: (parsed.date ?? new Date()).toISOString(),
+      unread: false,
+      attachments: (parsed.attachments ?? []).map((a) => ({
+        filename: a.filename ?? '(unnamed)',
+        sizeBytes: a.size ?? 0,
+        mimeType: a.contentType ?? 'application/octet-stream',
+      })),
+      messageId: parsed.messageId,
+      inReplyTo,
+    }
+
+    // Second leg: walk up one parent if this message is a reply and depth
+    // allows. We restrict the parent search to the Sent folder because the
+    // user's documented use case is "I got a reply, what did I say earlier?"
+    // For inbound chains (someone else's reply to someone else) the parent
+    // wouldn't be in Sent anyway. Failing silently is fine: parent stays
+    // null and the model sees that the chain ends here.
+    if (depth > 0 && inReplyTo) {
+      try {
+        const c = await getClient()
+        const parentUid = await findSentUidByMessageId(c, inReplyTo)
+        if (parentUid !== null) {
+          // Fetch from Sent directly (NOT via withInbox).
+          const sentPath = await findSentMailbox(c)
+          if (sentPath) {
+            const lock = await c.getMailboxLock(sentPath)
+            try {
+              const pmsg = await c.fetchOne(
+                String(parentUid),
+                { source: true },
+                { uid: true },
+              )
+              if (pmsg && pmsg.source) {
+                const pparsed = await simpleParser(pmsg.source)
+                const pTo = Array.isArray(pparsed.to)
+                  ? pparsed.to.flatMap((a) => a.value)
+                  : pparsed.to?.value ?? []
+                result.parent = {
+                  id: `sent:${parentUid}`,
+                  from: pparsed.from?.text ?? '',
+                  to: pTo.map((a) => a.address ?? '').filter(Boolean),
+                  subject: pparsed.subject ?? '',
+                  body: (pparsed.text ?? '').trim(),
+                  ts: (pparsed.date ?? new Date()).toISOString(),
+                  unread: false,
+                  attachments: (pparsed.attachments ?? []).map((a) => ({
+                    filename: a.filename ?? '(unnamed)',
+                    sizeBytes: a.size ?? 0,
+                    mimeType: a.contentType ?? 'application/octet-stream',
+                  })),
+                  messageId: pparsed.messageId,
+                  inReplyTo: normalizeInReplyTo(pparsed.inReplyTo),
+                  // We deliberately don't recurse further — depth=1 fetches
+                  // exactly one parent. The model can ask for grandparents
+                  // by reading the parent.id explicitly.
+                }
+              }
+            } finally {
+              lock.release()
+            }
+          }
+        } else {
+          // We tried and didn't find it — surface null so the model knows
+          // the chain is broken (vs missing inReplyTo entirely).
+          result.parent = null
+        }
+      } catch {
+        // Parent lookup is best-effort. Network blip / permission error
+        // shouldn't fail the main read.
+        result.parent = null
+      }
+    }
+
+    return result
+  }
+
   return {
     async listInbox(o: ListInboxOptions) {
-      return withInbox(async (c) => {
-        // search() returns UIDs matching the criteria.
-        // SEARCH UNSEEN for onlyUnread; otherwise SEARCH ALL.
+      // Phase 1: read INBOX, collect summaries + the In-Reply-To header on
+      // each so we know which ones are replies.
+      const results = await withInbox(async (c) => {
         const uids = (await c.search(
           o.onlyUnread ? { seen: false } : { all: true },
           { uid: true },
         )) as number[]
-        // Newest first; take the last `limit` UIDs (IMAP UIDs are monotonic).
         const recent = uids.slice(-o.limit).reverse()
-        if (recent.length === 0) return []
+        if (recent.length === 0) return [] as MailSummary[]
 
-        const results: MailSummary[] = []
-        // Fetch envelope (subject/from/date), flags, and bodyparts for snippet.
+        const out: MailSummary[] = []
         for await (const msg of c.fetch(
           recent,
           {
             envelope: true,
             flags: true,
-            // 'TEXT' is the whole body section sans headers. Cheaper than
-            // fetching the full RFC822 source — and good enough for a
-            // 200-char preview.
             bodyParts: ['TEXT'],
+            // Pull these two headers so we can correlate replies → parents
+            // without re-fetching. Cheap (one extra RFC822 line each).
+            headers: ['in-reply-to'],
           },
           { uid: true },
         )) {
@@ -107,47 +284,99 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
             ? `${from.name ? `${from.name} ` : ''}<${from.address ?? ''}>`.trim()
             : ''
           const snippet = extractSnippet(msg.bodyParts?.get('TEXT'))
-          results.push({
+          // headers in imapflow comes back as a Buffer of the raw RFC822
+          // lines. We parse out In-Reply-To with a regex; full-fledged
+          // header parsing is overkill for a single line.
+          let inReplyTo: string | undefined
+          const headersBuf = msg.headers as Buffer | undefined
+          if (headersBuf) {
+            const headerText = headersBuf.toString('utf8')
+            const m = /^in-reply-to:\s*(.+)$/im.exec(headerText)
+            if (m && m[1]) inReplyTo = normalizeInReplyTo(m[1].trim())
+          }
+          out.push({
             id: String(msg.uid),
             from: fromStr,
             subject: env?.subject ?? '',
             snippet,
             ts: new Date(env?.date ?? msg.internalDate ?? Date.now()).toISOString(),
             unread: !msg.flags?.has('\\Seen'),
+            inReplyTo,
           })
         }
-        return results
+        return out
       })
+
+      // Phase 2 (email-with-context): look up each reply's parent in Sent.
+      // Default ON — user wanted summarizing 10 emails to actually pull in
+      // the ~30 messages of context (10 + their parents). Caller can pass
+      // includeParents:false to skip (e.g. for a "fast list" UI later).
+      if (results.length === 0 || o.includeParents === false) return results
+      const needsParent = results.filter((r) => r.inReplyTo)
+      if (needsParent.length === 0) return results
+      try {
+        const c = await getClient()
+        const sentPath = await findSentMailbox(c)
+        if (!sentPath) return results
+        const lock = await c.getMailboxLock(sentPath)
+        try {
+          for (const item of needsParent) {
+            try {
+              const messageId = item.inReplyTo
+              if (!messageId) continue
+              const uids = (await c.search(
+                { header: { 'message-id': messageId } },
+                { uid: true },
+              )) as number[] | false
+              if (!uids || uids.length === 0) {
+                item.parent = null
+                continue
+              }
+              const parentUid = uids[uids.length - 1]
+              if (parentUid === undefined) continue
+              // Fetch envelope + body for the parent summary.
+              const pmsg = await c.fetchOne(
+                String(parentUid),
+                { envelope: true, bodyParts: ['TEXT'] },
+                { uid: true },
+              )
+              if (!pmsg) {
+                item.parent = null
+                continue
+              }
+              const env = pmsg.envelope
+              const from = env?.from?.[0]
+              const fromStr = from
+                ? `${from.name ? `${from.name} ` : ''}<${from.address ?? ''}>`.trim()
+                : ''
+              const psnippet = extractSnippet(pmsg.bodyParts?.get('TEXT'))
+              item.parent = {
+                id: `sent:${parentUid}`,
+                from: fromStr,
+                subject: env?.subject ?? '',
+                snippet: psnippet,
+                ts: new Date(
+                  env?.date ?? pmsg.internalDate ?? Date.now(),
+                ).toISOString(),
+                unread: false,
+              }
+            } catch {
+              // Per-item failure shouldn't kill the whole list. Leave parent
+              // as undefined and move on.
+            }
+          }
+        } finally {
+          lock.release()
+        }
+      } catch {
+        // Sent folder unreachable / lock failed. List works without parents,
+        // just not as informative.
+      }
+      return results
     },
 
     async readMessage(id: string) {
-      const uid = Number(id)
-      if (!Number.isFinite(uid)) return null
-      return withInbox(async (c) => {
-        const msg = await c.fetchOne(String(uid), { source: true }, { uid: true })
-        if (!msg || !msg.source) return null
-
-        const parsed = await simpleParser(msg.source)
-        const toList = Array.isArray(parsed.to)
-          ? parsed.to.flatMap((a) => a.value)
-          : parsed.to?.value ?? []
-        return {
-          id,
-          from: parsed.from?.text ?? '',
-          to: toList.map((a) => a.address ?? '').filter(Boolean),
-          subject: parsed.subject ?? '',
-          body: (parsed.text ?? '').trim(),
-          ts: (parsed.date ?? new Date()).toISOString(),
-          // We didn't refetch flags here — readMessage doesn't really need
-          // the unread state and the server may auto-mark on fetch.
-          unread: false,
-          attachments: (parsed.attachments ?? []).map((a) => ({
-            filename: a.filename ?? '(unnamed)',
-            sizeBytes: a.size ?? 0,
-            mimeType: a.contentType ?? 'application/octet-stream',
-          })),
-        } satisfies MailMessage
-      })
+      return readMessageWithDepth(id, 1)
     },
 
     async testConnection() {
