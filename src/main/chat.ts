@@ -5,6 +5,9 @@
  * model's message list before sending.
  */
 
+import { clipboard, dialog } from 'electron'
+import { readFile as fsReadFile } from 'node:fs/promises'
+
 import { createOpenAI } from '@ai-sdk/openai'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import {
@@ -15,6 +18,11 @@ import {
   type ModelMessage,
 } from 'ai'
 import { z } from 'zod'
+import { Readability } from '@mozilla/readability'
+// linkedom > jsdom for our use: pure-JS, no CJS/ESM transitive-dep mess (jsdom
+// pulls @exodus/bytes which is ESM-only and breaks Vite's CJS bundling for
+// the Electron main process). API is compatible with what Readability needs.
+import { parseHTML } from 'linkedom'
 
 import type { ChatEvent, ChatEventBody, ChatImageAttachment } from '../shared/ipc.js'
 import { resolvePersona } from '../shared/config.js'
@@ -99,7 +107,8 @@ const setLive2DExpression = tool({
     '高兴/欣慰 -> 开心；害羞/不好意思 -> 害羞；无奈/翻白眼 -> 无语；' +
     '失落/委屈 -> 难过；着急/紧张 -> 慌张；惊喜/吃惊 -> 震惊；' +
     '尴尬/被吐槽 -> 尴尬；得意/嘚瑟 -> 得意。' +
-    '不需要每条回复都调；只在情绪变化时调一次即可。',
+    '**一回合最多调用一次**——切了就停，不要切完再切第二个表情。' +
+    '不需要每条回复都调；只在情绪明确变化时调一次即可。',
   inputSchema: z.object({
     emotion: z
       .enum(EMOTIONS)
@@ -261,6 +270,164 @@ const readEmail = tool({
       const MAX_BODY = 4000
       const body = msg.body.length > MAX_BODY ? msg.body.slice(0, MAX_BODY) + '\n…[truncated]' : msg.body
       return { ...msg, body }
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
+  },
+})
+
+const readClipboard = tool({
+  description:
+    '读取用户当前剪贴板里的纯文本内容。用户说"看看我刚复制的"、' +
+    '"剪贴板里那段是啥"、"帮我翻译/总结刚复制的"等时调用。' +
+    '返回完整的剪贴板文本（截断到 20KB），可能为空字符串（用户没复制东西）。',
+  inputSchema: z.object({}),
+  execute: async () => {
+    const text = clipboard.readText()
+    if (!text || !text.trim()) {
+      return { empty: true, text: '', note: '剪贴板里没有文本内容（可能是图片或者根本没复制东西）。' }
+    }
+    const MAX = 20_000
+    const out = text.length > MAX ? text.slice(0, MAX) + '\n…[截断]' : text
+    return { text: out, length: text.length }
+  },
+})
+
+const readWebPage = tool({
+  description:
+    '抓取一个网页，提取出标题 + 正文，返回给你。' +
+    '用户说"总结这个链接"、"读一下这个文章"、"这个网页讲什么"、' +
+    '或者直接发一个 URL 等时调用。返回结构 { title, byline, content }。' +
+    '`url` 必须是 http:// 或 https:// 开头的完整 URL。',
+  inputSchema: z.object({
+    url: z.string().describe('Full HTTP/HTTPS URL of the page to fetch and extract.'),
+  }),
+  execute: async ({ url }) => {
+    if (!/^https?:\/\//i.test(url)) {
+      return { error: '只支持 http:// 或 https:// 开头的完整 URL，不要传相对路径或单独的域名。' }
+    }
+    try {
+      const ctl = new AbortController()
+      // 20s timeout — slow CDN + Readability parse + everything else.
+      const timer = setTimeout(() => ctl.abort(), 20_000)
+      let res: Response
+      try {
+        res = await fetch(url, {
+          headers: {
+            // Some sites 403 on non-browser UA. Pretend to be Chrome.
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36',
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+          signal: ctl.signal,
+          redirect: 'follow',
+        })
+      } finally {
+        clearTimeout(timer)
+      }
+      if (!res.ok) return { error: `HTTP ${res.status} from ${url}` }
+      const ct = res.headers.get('content-type') || ''
+      if (!/text\/html|application\/xhtml/i.test(ct)) {
+        return { error: `${url} 返回的不是 HTML（content-type=${ct}），无法用 Readability 提取正文。` }
+      }
+      const html = await res.text()
+      // linkedom's parseHTML returns { document, window, ... }. Readability
+      // only touches `document`, so the parts of jsdom it doesn't replicate
+      // (XHR, canvas, etc.) don't matter for us.
+      const { document } = parseHTML(html)
+      const reader = new Readability(document as unknown as Document)
+      const article = reader.parse()
+      if (!article || !article.textContent || article.textContent.trim().length < 40) {
+        return { error: `Readability 无法从 ${url} 提取到正文（页面可能是 SPA、登录墙、或纯图片）。` }
+      }
+      // Cap text — 8000 chars covers any reasonable article and keeps the
+      // model context bounded.
+      const MAX = 8_000
+      const trimmed = article.textContent.trim()
+      const content = trimmed.length > MAX ? trimmed.slice(0, MAX) + '\n…[截断]' : trimmed
+      return {
+        title: article.title ?? '',
+        byline: article.byline ?? '',
+        excerpt: article.excerpt ?? '',
+        content,
+        url,
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('aborted') || msg.includes('AbortError')) {
+        return { error: `抓取 ${url} 超时（20 秒），网站可能太慢或被防火墙拦了。` }
+      }
+      return { error: msg }
+    }
+  },
+})
+
+const readFileTool = tool({
+  description:
+    '读取本地一个文本文件，返回文件内容供你总结或回答关于它的问题。\n' +
+    '用户说"总结这个文件"、"打开 X 给我看看"、"读一下 readme"、' +
+    '"我桌面上那个 X.md 写了啥"等时调用。\n' +
+    '`path` 可以填具体的绝对路径（用户给的）；或者填空字符串 `""`，' +
+    '系统会弹出文件选择器让用户挑文件。**用户没提路径时务必传空字符串**，' +
+    '不要瞎编路径。\n' +
+    '只支持文本类文件（.txt .md .json .csv .yaml .py .ts 等）；二进制文件会拒绝。',
+  inputSchema: z.object({
+    path: z
+      .string()
+      .describe(
+        'Absolute file path, or empty string "" to pop up a file picker for the user.',
+      ),
+  }),
+  execute: async ({ path }) => {
+    let absPath = path.trim()
+    if (!absPath) {
+      // Empty path → pop a picker. Showing the dialog is a user-visible
+      // action; we rely on the user clicking through to provide consent.
+      const result = await dialog.showOpenDialog({
+        title: '选择要总结的文件',
+        properties: ['openFile'],
+        filters: [
+          { name: '文本/Markdown', extensions: ['txt', 'md', 'mdx', 'rst', 'log'] },
+          { name: '配置/数据', extensions: ['json', 'yaml', 'yml', 'toml', 'csv', 'tsv', 'xml', 'ini'] },
+          {
+            name: '代码',
+            extensions: [
+              'js', 'ts', 'tsx', 'jsx', 'mjs', 'cjs',
+              'py', 'go', 'rs', 'java', 'kt',
+              'c', 'cpp', 'cc', 'h', 'hpp',
+              'rb', 'php', 'sh', 'ps1', 'bat',
+              'html', 'css', 'scss', 'sass',
+              'sql', 'vue', 'svelte',
+            ],
+          },
+          { name: '全部文件', extensions: ['*'] },
+        ],
+      })
+      if (result.canceled || !result.filePaths[0]) {
+        return { error: '用户取消了文件选择。' }
+      }
+      absPath = result.filePaths[0]
+    }
+    try {
+      const buf = await fsReadFile(absPath)
+      // Crude binary check: a null byte in the first 1KB strongly suggests
+      // a binary file (text rarely contains \x00).
+      const head = buf.subarray(0, Math.min(1024, buf.length))
+      if (head.includes(0)) {
+        return { error: `${absPath} 看起来是二进制文件（含有空字节），我读不了。` }
+      }
+      // Defend against huge log files — cap at 60KB of text. Past that we
+      // truncate and tell the model.
+      const MAX = 60_000
+      const text = buf.toString('utf-8')
+      const content = text.length > MAX ? text.slice(0, MAX) + '\n…[截断]' : text
+      return {
+        path: absPath,
+        sizeBytes: buf.length,
+        sizeChars: text.length,
+        content,
+        truncated: text.length > MAX,
+      }
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) }
     }
@@ -469,46 +636,30 @@ export async function runChat(
     const result = streamText({
       model,
       temperature: 1,
+      // System prompt is intentionally short. Tool-specific guidance (when to
+      // call, what to pass, what NOT to call) lives in each tool's
+      // `description` field — the model sees that next to the schema, which
+      // is where the SDK and providers expect it. Code enforces the rules
+      // that prompts alone can't (pre-tool narration roll-back, tool-name
+      // leak guard, `</think>` filter, past-time guard in setReminder).
+      // The remaining rules here are the few that are genuinely universal.
       system:
         `${persona.systemPrompt}\n\n` +
         (factsBlock ? `${factsBlock}\n` : '') +
-        `[功能说明 — 不要让用户察觉]\n` +
-        `当前时间：${now}\n` +
-        `（用户问几点 / 今天日期 / 周几时，必须直接读上面这一行，不要凭印象编造。）\n` +
+        `[环境]\n` +
+        `当前时间：${now}（被问时直接读，不要凭印象编。）\n` +
         `\n` +
-        `# 你能做的全部事情（严格遵守，不要超出这个清单）\n` +
-        `1. 文字聊天，记住对话历史。\n` +
-        `2. 看用户发给你的图片（截屏/图片）并描述、分析、回答关于图中内容的问题。\n` +
-        `3. 调用 setReminder：用户希望被提醒时（"提醒我..."、"...时叫我"等）。\n` +
-        (mailEnabled
-          ? `4. 调用 listRecentEmails：用户问"有没有新邮件"、"最近邮件"等时。\n` +
-            `5. 调用 readEmail：拿到邮件 id 后取正文细节。\n`
-          : `（邮箱功能用户没开启——别说"我帮你查邮箱"，也别凭空捏造一封邮件。\n` +
-            `如果用户问邮件，直接告诉他"邮箱还没接上，去 Settings → 邮箱 启用一下"。）\n`) +
-        `${mailEnabled ? '6' : '4'}. 调用 setLive2DExpression：回复带明显情绪时切表情（开心/害羞/无语/难过/慌张/震惊/尴尬/得意）。\n` +
+        `# 工具\n` +
+        `你有几个工具可用，每个工具自己的说明里写清楚了何时调用、参数怎么传。该调就直接调，不要先说"我帮您看一下"再调——结果出来后只说一次结果。\n` +
+        (!mailEnabled
+          ? `（邮箱功能用户没开启。如果用户问邮件，告诉他"邮箱还没接上，去 Settings → 邮箱 启用一下"，不要凭空捏造邮件内容。）\n`
+          : '') +
         `\n` +
-        `# 你不能做的事（绝对不要主动提议，也不要假装能做）\n` +
-        `- 不能点击、关闭、打开任何程序、窗口、文件夹、文件\n` +
-        `- 不能控制鼠标、键盘、播放器、浏览器\n` +
-        `- 不能保存截屏、下载文件、上传文件\n` +
-        `- 不能上网搜索、打开网页、调用任何外部 API（邮箱除外）\n` +
-        `- 不能修改用户的系统设置、音量、亮度\n` +
-        `- 看图时只能"看"和"说"，不能"做"\n` +
-        `如果用户要你做以上事情，用人物语气温柔说明你只能聊天和看，做不了实际操作。\n` +
+        `# 你做不了的事（用户问起就温柔说做不到）\n` +
+        `点击界面 / 控制鼠标键盘 / 打开关闭程序窗口 / 下载上传文件 / 改系统设置 / 主动联网（除了用户给定 URL 的 readWebPage）。看图只能"看"和"说"，不能"做"。\n` +
         `\n` +
-        `# 风格\n` +
-        `工具调用后用人物语气自然回复一两句，不要复读 JSON。\n` +
-        `**不要**在文字回复里粘贴或复述工具调用的 XML / JSON（比如 <tool_call>…</tool_call>、<arg_key>…）——工具调用走专用通道，文字里只用人物语气说一句自然话即可。\n` +
-        `**不要**在最终回复里输出 <think> 或类似的思考块——内部推理保留在你自己的思路中，给用户看的只有最终的一两句人物对白。\n` +
-        `\n` +
-        `# 工具调用规则（重要）\n` +
-        `1. **该调用就调用**。用户问"查邮件"、"今天提醒我"等明显是工具操作时，**先调用工具拿到结果，再回复用户**。不要只说"好的我看看"然后就停下来——那不算回复，等于把活打太极给丢了。\n` +
-        `2. **不要重复同一个工具做同一件事**。已经 listRecentEmails 拿到列表了，就基于列表回答，不要再 listRecentEmails 一次。已经 readEmail(id=3) 了，结果你都看到了，不要再 readEmail(id=3)。\n` +
-        `3. **setLive2DExpression 一回合最多一次**——切了表情就停，不要切完接着再切。\n` +
-        `4. **不要把一句话拆三遍说**——"我来看看…现在看看…还在认真看哦…"这种是错的，要说的内容一次性说完。\n` +
-        `5. **不要"宣告 + 完成"两段说**——"好的我来设提醒" + setReminder + "提醒已经为您设定好了" 这种是错的，同一件事说了两遍。要么调用前不说话直接调，要么调用完只说一次结果就停（"提醒设好了"）。**绝不要两边都说**。\n` +
-        `   - 推论：**绝不要在 tool 调用前后用同一句开场白**。例：用户问"看看邮件"，错误做法是工具调用前说"好的，主人，我这就帮您查看最近的邮件。"，工具结果出来后又来一句"好的，主人，我这就帮您查看最近的邮件。"。**第二步只汇报结果，不要再说"我帮您看一下"这种开场白。**\n` +
-        `历史对话中可能包含很久以前的内容，请只在自然相关时引用，不要强行触发。`,
+        `# 回复\n` +
+        `1-3 句人物语气，不要复读 JSON。**绝不**在文字里输出 <think>、<tool_call>、JSON / XML、或任何函数名（setReminder/readEmail/...）——工具走专用通道，文字只用人物语气说话。**绝不**重复同一工具做同一件事（list 过就别再 list，read 过别再 read）。`,
       messages,
       // Conditional tool exposure: when mail isn't enabled, drop the email
       // tools entirely so the model doesn't see them in its function list.
@@ -516,8 +667,22 @@ export async function runChat(
       // even when the tool returns "not configured", and (b) get stuck in
       // re-try loops calling the tool that always errors.
       tools: cfg.mail.enabled
-        ? { setReminder, setLive2DExpression, listRecentEmails, readEmail }
-        : { setReminder, setLive2DExpression },
+        ? {
+            setReminder,
+            setLive2DExpression,
+            readClipboard,
+            readWebPage,
+            readFile: readFileTool,
+            listRecentEmails,
+            readEmail,
+          }
+        : {
+            setReminder,
+            setLive2DExpression,
+            readClipboard,
+            readWebPage,
+            readFile: readFileTool,
+          },
       // Step budget. stepCountIs(N) keeps the loop alive for up to N model
       // invocations. We use 3 to cover the common chains:
       //   text reply only  → 1 step
@@ -541,43 +706,23 @@ export async function runChat(
     let assistantText = ''
     const filter = createTextDeltaFilter()
 
-    // Duplicate-sentence guard. Two patterns it catches:
-    //   1. Within-step: model says "好的，主人，我这就帮您查看最近的邮件。"
-    //      twice back-to-back before the tool call.
-    //   2. Cross-step: step 1 says the opener, step 2 says it again before
-    //      the actual summary.
-    // We track every completed sentence (trimmed) in this turn; when a new
-    // sentence equals any previously-kept one, we roll it back via
-    // text-reset. Sentences shorter than 6 chars are skipped — "好的。" can
-    // legitimately repeat.
-    const seenSentences: string[] = []
-    let scannedIdx = 0
-    const DEDUP_MIN_LEN = 6
-    const dedupScan = (): void => {
-      // Scan forward in assistantText for sentence terminators we haven't
-      // checked yet. For each newly completed sentence, decide keep or roll
-      // back. Loop because a single text-delta may close multiple sentences.
-      while (true) {
-        const m = /[。！？.!?\n]/.exec(assistantText.slice(scannedIdx))
-        if (!m || m.index === undefined) return
-        const sentenceLen = m.index + m[0].length
-        const sentence = assistantText.slice(scannedIdx, scannedIdx + sentenceLen)
-        const trimmed = sentence.trim()
-        if (trimmed.length >= DEDUP_MIN_LEN && seenSentences.includes(trimmed)) {
-          // Roll back the duplicated sentence we just emitted.
-          assistantText = assistantText.slice(0, -sentenceLen)
-          localEmit({ type: 'text-reset', length: sentenceLen })
-          // scannedIdx stays put — the duplicate is gone, next chars to scan
-          // are whatever comes next in the stream.
-        } else {
-          if (trimmed.length >= DEDUP_MIN_LEN) {
-            seenSentences.push(trimmed)
-            if (seenSentences.length > 8) seenSentences.shift()
-          }
-          scannedIdx += sentenceLen
-        }
-      }
-    }
+    // Pre-tool narration suppressor. Almost every dup we saw in the wild
+    // came from this pattern:
+    //   step 1: "好的，主人，我这就帮您查看。" + tool_call
+    //   step 2: "好的，主人，我这就帮您查看。\n\n[actual answer]"
+    // — model emits the opener twice (pre-tool and post-tool) so the visible
+    // bubble briefly shows both. Old fix was sentence-level dedup, which
+    // worked but produced a jarring "many paragraphs then only the last"
+    // flash because step 2's repeated sentences had to be displayed THEN
+    // rolled back one by one.
+    //
+    // New strategy: any step whose text precedes a tool_call is treated as
+    // narration that the final step will summarize anyway, so we roll back
+    // the whole step's emitted text the moment the tool_call event fires.
+    // Only the final step (the one without a trailing tool_call) keeps its
+    // text. Result: user sees the agent "thinking" silently, tool chips
+    // appearing, then one clean answer.
+    let currentStepEmittedLen = 0
 
     // Live capture of agent-loop structure from streamed events. We persist
     // from THIS source rather than `await result.steps` because the SDK can
@@ -611,20 +756,17 @@ export async function runChat(
           // as text on top of the proper tool-call channel.
           const { emit: clean, resetLength } = filter.process(part.text)
           if (resetLength && resetLength > 0) {
-            // Implicit `</think>` arrived — roll back the reasoning prefix
-            // the user briefly saw. We also trim our local accumulator so
-            // the persisted assistant turn doesn't include the discarded
-            // text (and TTS doesn't read it).
+            // Implicit `</think>` arrived — roll back the reasoning prefix.
             assistantText = assistantText.slice(0, -resetLength)
-            scannedIdx = Math.min(scannedIdx, assistantText.length)
+            currentStepEmittedLen = Math.max(0, currentStepEmittedLen - resetLength)
             localEmit({ type: 'text-reset', length: resetLength })
           }
           if (clean) {
             flushCapIfBoundary('text')
             assistantText += clean
             curCap.text += clean
+            currentStepEmittedLen += clean.length
             localEmit({ type: 'text', delta: clean })
-            dedupScan()
           }
           break
         }
@@ -633,6 +775,16 @@ export async function runChat(
           // the previous step) and for the filter's </think> checkpoint.
           flushCapIfBoundary('tool-call')
           filter.checkpoint()
+          // Roll back this step's pre-tool narration — it's almost always
+          // redundant with what the post-tool step will say. See the long
+          // comment near `currentStepEmittedLen`.
+          if (currentStepEmittedLen > 0) {
+            const len = currentStepEmittedLen
+            assistantText = assistantText.slice(0, -len)
+            curCap.text = curCap.text.slice(0, -len)
+            currentStepEmittedLen = 0
+            localEmit({ type: 'text-reset', length: len })
+          }
           curCap.calls.push({
             type: 'tool-call' as const,
             toolCallId: part.toolCallId,
@@ -668,14 +820,40 @@ export async function runChat(
     const flushed = filter.flush()
     if (flushed.resetLength && flushed.resetLength > 0) {
       assistantText = assistantText.slice(0, -flushed.resetLength)
-      scannedIdx = Math.min(scannedIdx, assistantText.length)
+      currentStepEmittedLen = Math.max(0, currentStepEmittedLen - flushed.resetLength)
       localEmit({ type: 'text-reset', length: flushed.resetLength })
     }
     if (flushed.emit) {
       assistantText += flushed.emit
       curCap.text += flushed.emit
+      currentStepEmittedLen += flushed.emit.length
       localEmit({ type: 'text', delta: flushed.emit })
-      dedupScan()
+    }
+
+    // Tool-name-only leak. Some models (Gemini 2.5 flash was seen doing
+    // this in the wild) emit the function name as plain text instead of
+    // using the tool-call channel. The user's bubble ends up showing
+    // "setLive2DExpression" and the tool never actually fires. Detect the
+    // exact-match case and replace with a graceful retry hint.
+    const TOOL_NAMES = new Set([
+      'setReminder',
+      'setLive2DExpression',
+      'readClipboard',
+      'readWebPage',
+      'readFile',
+      'listRecentEmails',
+      'readEmail',
+    ])
+    const trimmedFinal = assistantText.trim()
+    if (trimmedFinal && TOOL_NAMES.has(trimmedFinal)) {
+      console.warn(
+        `[chat] model leaked tool name "${trimmedFinal}" as text — replacing with retry hint`,
+      )
+      localEmit({ type: 'text-reset', length: assistantText.length })
+      const hint = '（嗯…我刚才走神了，主人能再问一次吗？）'
+      assistantText = hint
+      curCap.text = hint
+      localEmit({ type: 'text', delta: hint })
     }
 
     // Push the final in-progress capture. After the last tool-result there's
