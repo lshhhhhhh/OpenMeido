@@ -1547,6 +1547,7 @@ function MemoryTab() {
     ready: boolean
     count?: number
     sessionId?: string
+    initError?: string
   }>({ ready: false })
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   /** Which session is being viewed below. Defaults to current. */
@@ -1633,7 +1634,33 @@ function MemoryTab() {
   }
 
   if (!status.ready) {
-    return <div style={{ color: '#999', fontSize: 12 }}>记忆模块未启用或初始化失败。</div>
+    return (
+      <div style={{ fontSize: 12, lineHeight: 1.5 }}>
+        <div style={{ color: '#f88', marginBottom: 6 }}>记忆模块初始化失败 / 未启用。</div>
+        {status.initError && (
+          <pre
+            style={{
+              background: 'rgba(255,255,255,0.06)',
+              border: '1px solid rgba(255,255,255,0.12)',
+              borderRadius: 4,
+              padding: '8px 10px',
+              color: '#ddd',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              fontFamily: 'monospace',
+              fontSize: 11,
+              margin: 0,
+            }}
+          >
+            {status.initError}
+          </pre>
+        )}
+        <div style={{ color: '#888', marginTop: 8 }}>
+          常见原因：better-sqlite3 / sqlite-vec 原生模块在打包时没正确解压，或者
+          embedding 模型（~95MB）首次下载失败。把上面这段错误截图发给开发者帮忙看。
+        </div>
+      </div>
+    )
   }
 
   return (

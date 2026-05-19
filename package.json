@@ -1,6 +1,6 @@
 {
   "name": "openmeido",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Productivity assistant + Live2D companion for non-programmers",
   "author": "lsh <laishaoheng1996@gmail.com>",
   "main": "./out/main/index.js",
@@ -14,6 +14,7 @@
     "test:leak-audit": "node tools/smoke-live2d-leak-audit.mjs",
     "test:reflection-parse": "node --import tsx tools/smoke-reflection-parse.mjs",
     "test:notif-parse": "node --import tsx tools/smoke-notif-parse.mjs",
+    "test:text-filter": "node --import tsx tools/smoke-text-filter.mjs",
     "dist": "electron-vite build && electron-builder --win",
     "dist:dir": "electron-vite build && electron-builder --win --dir",
     "postinstall": "electron-builder install-app-deps"

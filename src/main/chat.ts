@@ -24,6 +24,7 @@ import { getMailService } from './mail-host.js'
 import { getReminderService } from './reminder-host.js'
 import { broadcastLive2D } from './live2d-host.js'
 import { getSidecar as live2dGetSidecar } from './live2d-models-host.js'
+import { createTextDeltaFilter } from './chat-text-filter.js'
 import { EMOTIONS } from '../shared/live2d-models.js'
 import type { Episode } from '../core/memory/types.js'
 
@@ -335,6 +336,8 @@ export async function runChat(
         `\n` +
         `# 风格\n` +
         `工具调用后用人物语气自然回复一两句，不要复读 JSON。\n` +
+        `**不要**在文字回复里粘贴或复述工具调用的 XML / JSON（比如 <tool_call>…</tool_call>、<arg_key>…）——工具调用走专用通道，文字里只用人物语气说一句自然话即可。\n` +
+        `**不要**在最终回复里输出 <think> 或类似的思考块——内部推理保留在你自己的思路中，给用户看的只有最终的一两句人物对白。\n` +
         `历史对话中可能包含很久以前的内容，请只在自然相关时引用，不要强行触发。`,
       messages,
       tools: { setReminder, listRecentEmails, readEmail, setLive2DExpression },
@@ -345,15 +348,22 @@ export async function runChat(
 
     // Accumulate the full assistant text so we can persist it after streaming.
     let assistantText = ''
+    const filter = createTextDeltaFilter()
 
     for await (const part of result.fullStream) {
       // v6 renamed text-delta's payload (textDelta → text) and tool-call /
       // tool-result fields (args → input, result → output).
       switch (part.type) {
-        case 'text-delta':
-          assistantText += part.text
-          localEmit({ type: 'text', delta: part.text })
+        case 'text-delta': {
+          // Strip thinking blocks + tool-call XML the model sometimes leaks
+          // as text on top of the proper tool-call channel.
+          const clean = filter.process(part.text)
+          if (clean) {
+            assistantText += clean
+            localEmit({ type: 'text', delta: clean })
+          }
           break
+        }
         case 'tool-call':
           localEmit({ type: 'tool-call', toolName: part.toolName, args: part.input })
           break
@@ -373,6 +383,13 @@ export async function runChat(
         default:
           break
       }
+    }
+
+    // Flush whatever the filter was holding (trailing text not yet matched).
+    const tail = filter.flush()
+    if (tail) {
+      assistantText += tail
+      localEmit({ type: 'text', delta: tail })
     }
 
     // Persist the assistant reply if there was any visible text. Skip empty

@@ -11,7 +11,7 @@ import type { Demo } from '../shared/demos.js'
 
 type MailTestResult = { ok: true } | { ok: false; error: string }
 type MemoryStatus =
-  | { ready: false }
+  | { ready: false; initError?: string }
   | { ready: true; count: number; sessionId: string }
 
 /**

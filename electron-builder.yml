@@ -30,6 +30,13 @@ asarUnpack:
   # file path. Without this you get "ENOENT" on launch.
   - "**/node_modules/better-sqlite3/**"
   - "**/node_modules/sqlite-vec/**"
+  # sqlite-vec ships its actual .dll / .so / .dylib in a PLATFORM SUBPACKAGE
+  # (sqlite-vec-windows-x64, sqlite-vec-linux-x64, etc.) referenced via
+  # import.meta.resolve. better-sqlite3.loadExtension() does a real dlopen
+  # which cannot read from inside the asar virtual fs — without unpacking
+  # the platform package, prod builds fail with "Cannot find module ...vec0.dll"
+  # and the memory module won't initialize.
+  - "**/node_modules/sqlite-vec-*/**"
   - "**/node_modules/@huggingface/transformers/.cache/**"
 
 # Tell electron-builder which files end up in the .asar. electron-vite has
