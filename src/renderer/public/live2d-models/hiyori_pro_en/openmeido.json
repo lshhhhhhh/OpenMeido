@@ -1,0 +1,16 @@
+{
+  "modelFile": "runtime/hiyori_pro_t11.model3.json",
+  "fitMode": "portrait",
+  "lipSyncParam": "ParamMouthOpenY",
+  "emotionMapping": {},
+  "motionMapping": {
+    "开心":  { "group": "Tap",        "index": 0 },
+    "害羞":  { "group": "Tap@Body",   "index": 0 },
+    "无语":  { "group": "Flick@Body", "index": 0 },
+    "难过":  { "group": "FlickDown",  "index": 0 },
+    "慌张":  { "group": "FlickUp",    "index": 0 },
+    "震惊":  { "group": "Flick",      "index": 0 },
+    "尴尬":  { "group": "Flick@Body", "index": 0 },
+    "得意":  { "group": "FlickUp",    "index": 0 }
+  }
+}

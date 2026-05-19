@@ -82,13 +82,36 @@ export function modelDir(name: string): string {
 }
 
 /**
- * Locate the first *.model3.json in a model directory. Cubism models
- * conventionally have exactly one; if a folder has more than one (very rare),
- * we pick the first sorted alphabetically.
+ * Locate the first *.model3.json under a model directory, recursing into
+ * subdirectories. Many Live2D distributions (the official Cubism samples in
+ * particular) nest the runtime files one level deep under `<modelName>/runtime/`;
+ * a flat top-level scan would miss those. Returns the path relative to `dir`
+ * with forward slashes (so the renderer can use it directly as a URL segment).
+ *
+ * Caps depth at 3 to avoid pathological zip bombs walking the filesystem.
  */
 async function findModel3Json(dir: string): Promise<string | null> {
-  const entries = await fsp.readdir(dir).catch(() => [] as string[])
-  return entries.sort().find((f) => f.endsWith('.model3.json')) ?? null
+  async function walk(rel: string, depth: number): Promise<string | null> {
+    if (depth > 3) return null
+    const here = rel ? join(dir, rel) : dir
+    const entries = await fsp.readdir(here, { withFileTypes: true }).catch(() => [])
+    // Files first, then directories — most models have model3.json at the
+    // same level as moc3/textures, so checking files first short-circuits.
+    const files = entries.filter((e) => e.isFile()).map((e) => e.name).sort()
+    for (const f of files) {
+      if (f.endsWith('.model3.json')) return rel ? `${rel}/${f}` : f
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue
+      // Skip hidden / weird dirs like __MACOSX that some zips ship with.
+      if (e.name.startsWith('.') || e.name.startsWith('_')) continue
+      const nextRel = rel ? `${rel}/${e.name}` : e.name
+      const found = await walk(nextRel, depth + 1)
+      if (found) return found
+    }
+    return null
+  }
+  return walk('', 0)
 }
 
 /**

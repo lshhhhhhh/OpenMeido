@@ -1,0 +1,16 @@
+{
+  "modelFile": "runtime/haru_greeter_t05.model3.json",
+  "fitMode": "portrait",
+  "lipSyncParam": "ParamMouthOpenY",
+  "emotionMapping": {},
+  "motionMapping": {
+    "开心":  { "group": "", "index": 1 },
+    "害羞":  { "group": "", "index": 8 },
+    "无语":  { "group": "", "index": 15 },
+    "难过":  { "group": "", "index": 20 },
+    "慌张":  { "group": "", "index": 23 },
+    "震惊":  { "group": "", "index": 5 },
+    "尴尬":  { "group": "", "index": 18 },
+    "得意":  { "group": "", "index": 10 }
+  }
+}

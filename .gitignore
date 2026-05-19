@@ -15,3 +15,15 @@ build
 # Only models with explicit redistribution rights (e.g. Live2D official
 # samples under the Free Material License v1.6) should be tracked.
 src/renderer/public/live2d-models/haitu_vts/
+
+# Cubism source files — only `runtime/` is needed at runtime, the PSDs
+# (Photoshop layered art) and the .cmo3 / .can3 (Cubism Editor project
+# files) are huge binaries that bloat the repo without helping anyone
+# who only wants to run the app.
+*.psd
+*.cmo3
+*.can3
+
+# Raw model zips — kept locally for re-extraction; the extracted dirs
+# are what we actually ship. Track the zips out-of-band if needed.
+models/

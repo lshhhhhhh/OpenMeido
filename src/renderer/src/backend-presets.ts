@@ -101,6 +101,11 @@ export const MODEL_SUGGESTIONS_BY_HOST: {
     models: ['glm-4.6v-flash', 'glm-4.6v', 'glm-5'],
   },
   {
+    // DeepSeek V4 — chat completions endpoint is TEXT-ONLY despite some
+    // community articles claiming "V4 vision". Sending `image_url` content
+    // returns a JSON-deserialize error from their parser. For screenshots
+    // switch backends (GLM / Gemini / Qwen all work).
+    // Legacy `deepseek-chat` / `deepseek-reasoner` aliases retire 2026-07-24.
     match: (url) => url.includes('deepseek.com'),
     models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
   },

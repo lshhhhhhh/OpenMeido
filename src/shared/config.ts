@@ -122,9 +122,13 @@ export const configSchema = z.object({
        * Active model = directory name under `<userData>/live2d-models/`.
        * The renderer resolves this to a `meido-live2d://<name>/<modelFile>`
        * URL at load time (modelFile comes from each model's sidecar).
-       * Defaults to 'haitu_vts' which the bundled seed installs on first run.
+       *
+       * Default 'hiyori_pro_en' = the canonical Live2D Cubism free-license
+       * sample, shipped with public builds. Private builds may seed
+       * additional models (e.g. `haitu_vts`) which the user can pick from
+       * Settings → Live2D.
        */
-      activeModel: z.string().default('haitu_vts'),
+      activeModel: z.string().default('hiyori_pro_en'),
       /** 1.0 = fit width exactly; 1.6 = upper-body crop. */
       portraitZoom: z.number().min(0.5).max(3).default(1.6),
     })

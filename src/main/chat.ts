@@ -394,7 +394,28 @@ export async function runChat(
   } catch (err) {
     localEmit({
       type: 'error',
-      error: err instanceof Error ? err.message : String(err),
+      error: friendlyError(err),
     })
   }
+}
+
+/**
+ * Translate provider-side error messages into something a user can act on.
+ * The bare deserialize errors from DeepSeek / Volcengine etc. read like
+ * compiler output ("unknown variant `image_url`") — a one-line hint pointing
+ * at the actual cause saves a lot of "wait what?".
+ */
+function friendlyError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  // DeepSeek V4 chat completions doesn't accept image_url content — it
+  // errors with this exact deserialize message. Surface a fix instead.
+  if (raw.includes("unknown variant `image_url`")) {
+    return (
+      'DeepSeek 当前不支持发图。要用截屏请换成 GLM / Gemini / Qwen / Doubao —— ' +
+      'Settings → AI 顶部 chip 切换。（原始错误：' +
+      raw.slice(0, 120) +
+      '…）'
+    )
+  }
+  return raw
 }

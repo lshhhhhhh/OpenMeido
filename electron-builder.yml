@@ -45,10 +45,17 @@ files:
 # Static assets that should ship alongside the asar (NOT compressed into
 # it). The renderer fetches Live2D files via HTTP from the file:// origin,
 # and asar-internal paths can't be fetched that way reliably.
+#
+# `haitu_vts/` is a paid Live2D model with a personal-use license — keep
+# it out of public builds. Local dev builds still pick it up because
+# `src/renderer/public/live2d-models/haitu_vts/` exists on the developer's
+# disk (gitignored), but this filter scrubs it from the redistributable.
 extraResources:
   - from: src/renderer/public
     to: public
-    filter: ["**/*"]
+    filter:
+      - "**/*"
+      - "!live2d-models/haitu_vts/**"
 
 win:
   target:
