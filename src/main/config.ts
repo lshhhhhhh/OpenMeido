@@ -87,6 +87,10 @@ export function resolveBackendKey(backend: Config['backend']): string {
   if (url.includes('googleapis.com')) return process.env.GEMINI_API_KEY ?? ''
   if (url.includes('anthropic.com')) return process.env.ANTHROPIC_API_KEY ?? ''
   if (url.includes('openai.com')) return process.env.OPENAI_API_KEY ?? ''
+  if (url.includes('bigmodel.cn')) return process.env.ZHIPU_API_KEY ?? ''
+  if (url.includes('deepseek.com')) return process.env.DEEPSEEK_API_KEY ?? ''
+  if (url.includes('dashscope.aliyuncs.com')) return process.env.DASHSCOPE_API_KEY ?? ''
+  if (url.includes('volces.com') || url.includes('ark.cn-beijing')) return process.env.ARK_API_KEY ?? ''
   // Local / self-hosted endpoints often don't need a real key.
   return process.env.OPENAI_API_KEY ?? ''
 }

@@ -40,6 +40,7 @@ export const Live2DCanvas = forwardRef<Live2DController | null, Live2DCanvasProp
         setMouthOpen: (v) => stageRef.current?.setMouthOpen(v),
         setFitMode: (m) => stageRef.current?.setFitMode(m),
         resetPosition: () => stageRef.current?.resetPosition(),
+        isOverModel: (cx, cy) => stageRef.current?.isOverModel(cx, cy) ?? 'outside',
         info: () => stageRef.current?.info() ?? null,
       }),
       [],

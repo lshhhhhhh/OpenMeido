@@ -22,7 +22,100 @@ import { getConfig, resolveApiKey } from './config.js'
 import { getMemoryService } from './memory-host.js'
 import { getMailService } from './mail-host.js'
 import { getReminderService } from './reminder-host.js'
+import { broadcastLive2D } from './live2d-host.js'
+import { getSidecar as live2dGetSidecar } from './live2d-models-host.js'
+import { EMOTIONS } from '../shared/live2d-models.js'
 import type { Episode } from '../core/memory/types.js'
+
+// Emotion → expression / motion is no longer hardcoded — each model carries
+// its own sidecar (openmeido.json) and we look up at tool-call time. See
+// `live2d-models-host.ts` and `src/shared/live2d-models.ts`.
+
+/**
+ * Drive reflection every Nth assistant reply. We don't reflect after every
+ * turn because LLM calls aren't free — but waiting too many turns lets
+ * useful facts pile up unindexed. 5 turns is a balance that captures
+ * "user just told me their cat's name" within ~10 messages.
+ *
+ * Counter is module-scoped: persists across runChat calls within the same
+ * Electron session. Resets to 0 on app restart, which is fine — the
+ * reflection prompt looks at the recent episode window, not at the counter.
+ */
+const REFLECTION_EVERY_N_TURNS = 5
+
+/**
+ * Render the current moment as a Chinese wall-clock string the model can
+ * quote without timezone arithmetic. Output example:
+ *   "2026年5月19日 周一 上午9点30分"
+ * Uses zh-CN Intl formatters so day-of-week / am-pm come out localized.
+ */
+function formatLocalNow(): string {
+  const d = new Date()
+  const date = new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    weekday: 'long',
+  }).format(d)
+  const time = new Intl.DateTimeFormat('zh-CN', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).format(d)
+  return `${date} ${time}`
+}
+let turnsSinceReflection = 0
+function maybeTriggerReflection(memory: { reflectOnce(): Promise<number> }): void {
+  turnsSinceReflection += 1
+  if (turnsSinceReflection < REFLECTION_EVERY_N_TURNS) return
+  turnsSinceReflection = 0
+  void memory
+    .reflectOnce()
+    .then((n) => {
+      if (n > 0) console.log(`[memory] reflection upserted ${n} fact(s)`)
+    })
+    .catch((err) => console.warn('[memory] reflection threw:', err))
+}
+
+const setLive2DExpression = tool({
+  description:
+    '让 Live2D 形象切到某个情绪表情。当你的回复有明显情绪时调用 —— ' +
+    '高兴/欣慰 -> 开心；害羞/不好意思 -> 害羞；无奈/翻白眼 -> 无语；' +
+    '失落/委屈 -> 难过；着急/紧张 -> 慌张；惊喜/吃惊 -> 震惊；' +
+    '尴尬/被吐槽 -> 尴尬；得意/嘚瑟 -> 得意。' +
+    '不需要每条回复都调；只在情绪变化时调一次即可。',
+  inputSchema: z.object({
+    emotion: z
+      .enum(EMOTIONS)
+      .describe('情绪标签；具体映射到哪个表情/动作由当前模型的 sidecar 决定。'),
+  }),
+  execute: async ({ emotion }) => {
+    const cfg = getConfig()
+    const sidecar = await live2dGetSidecar(cfg.live2d.activeModel)
+    // No sidecar (model not installed?) — fail soft: just clear and report.
+    if (!sidecar) {
+      broadcastLive2D({ type: 'setExpression', name: null })
+      return { ok: true, emotion, applied: 'none' }
+    }
+    // Prefer expression over motion when both are mapped — expressions
+    // hold a face, motions fire once. Most personas care about state more
+    // than animation, so expression wins ties.
+    const expr = sidecar.emotionMapping?.[emotion]
+    if (expr) {
+      broadcastLive2D({ type: 'setExpression', name: expr })
+      return { ok: true, emotion, applied: `expression:${expr}` }
+    }
+    const motion = sidecar.motionMapping?.[emotion]
+    if (motion) {
+      broadcastLive2D({ type: 'playMotion', group: motion.group, index: motion.index })
+      return { ok: true, emotion, applied: `motion:${motion.group}[${motion.index}]` }
+    }
+    // Emotion present in the enum but the model doesn't have a mapping
+    // for it — clear any held expression so we don't lie with stale state.
+    broadcastLive2D({ type: 'setExpression', name: null })
+    return { ok: true, emotion, applied: 'none' }
+  },
+})
 
 const setReminder = tool({
   description:
@@ -159,6 +252,11 @@ export async function runChat(
 
     const persona = resolvePersona(cfg.persona)
 
+    // L3 facts injection. Empty string when there's nothing to show, so the
+    // system prompt stays compact for new users. Falls back gracefully if
+    // the facts query throws.
+    const factsBlock = memory ? await memory.factsBlock().catch(() => '') : ''
+
     // Provider routing. Gemini's OpenAI-compat shim drops fields
     // (tool_calls[].index) that Vercel AI SDK's strict OpenAI parser
     // requires, so for Gemini we use the native Google provider instead.
@@ -173,9 +271,20 @@ export async function runChat(
         baseURL: cfg.backend.baseUrl,
         apiKey,
       })
-      model = openai(cfg.backend.model)
+      // .chat() forces the classic POST /chat/completions path. The default
+      // openai(...) factory in @ai-sdk/openai v6 hits POST /responses (the
+      // new OpenAI Responses API), which only OpenAI itself supports — every
+      // OpenAI-compat third-party (GLM/bigmodel, OpenRouter, LM Studio,
+      // Anthropic-compat, ...) 404s on /responses. Forcing .chat() costs us
+      // GPT-5's built-in tools on real OpenAI but those aren't needed for
+      // our flow (we BYO tools via `tools:` param either way).
+      model = openai.chat(cfg.backend.model)
     }
-    const now = new Date().toISOString()
+    // Local time in a format the model can quote verbatim. ISO-UTC needs
+    // timezone arithmetic — small/sleepy models skip that and just guess,
+    // producing wrong times even when we hand them the answer. Render the
+    // local wall-clock string ourselves so the model just reads it.
+    const now = formatLocalNow()
 
     // Multimodal user turn: text + N images via Vercel AI SDK's structured
     // content array. When the user attached nothing the content stays as a
@@ -202,8 +311,10 @@ export async function runChat(
       temperature: 1,
       system:
         `${persona.systemPrompt}\n\n` +
+        (factsBlock ? `${factsBlock}\n` : '') +
         `[功能说明 — 不要让用户察觉]\n` +
         `当前时间：${now}\n` +
+        `（用户问几点 / 今天日期 / 周几时，必须直接读上面这一行，不要凭印象编造。）\n` +
         `\n` +
         `# 你能做的全部事情（严格遵守，不要超出这个清单）\n` +
         `1. 文字聊天，记住对话历史。\n` +
@@ -211,6 +322,7 @@ export async function runChat(
         `3. 调用 setReminder：用户希望被提醒时（"提醒我..."、"...时叫我"等）。\n` +
         `4. 调用 listRecentEmails：用户问"有没有新邮件"、"最近邮件"等时。\n` +
         `5. 调用 readEmail：拿到邮件 id 后取正文细节。\n` +
+        `6. 调用 setLive2DExpression：回复带明显情绪时切表情（happy/embarrassed/sinister/angry/neutral）。\n` +
         `\n` +
         `# 你不能做的事（绝对不要主动提议，也不要假装能做）\n` +
         `- 不能点击、关闭、打开任何程序、窗口、文件夹、文件\n` +
@@ -225,7 +337,7 @@ export async function runChat(
         `工具调用后用人物语气自然回复一两句，不要复读 JSON。\n` +
         `历史对话中可能包含很久以前的内容，请只在自然相关时引用，不要强行触发。`,
       messages,
-      tools: { setReminder, listRecentEmails, readEmail },
+      tools: { setReminder, listRecentEmails, readEmail, setLive2DExpression },
       // v6 renamed maxSteps → stopWhen. stepCountIs(N) keeps the loop alive
       // for up to N model invocations (list email → read email → reply = 3).
       stopWhen: stepCountIs(5),
@@ -268,6 +380,14 @@ export async function runChat(
     // and would just clutter recall).
     if (assistantText.trim() && memory) {
       void memory.addEpisode('assistant', assistantText)
+    }
+
+    // L3 reflection: every Nth turn, distill facts from the recent window.
+    // Fire-and-forget — the user's reply has already been streamed, so
+    // making them wait for reflection would add unnecessary latency. If
+    // the LLM call fails, the next trigger will try again.
+    if (memory) {
+      maybeTriggerReflection(memory)
     }
 
     localEmit({ type: 'done' })

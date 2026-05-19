@@ -9,9 +9,12 @@
  */
 
 import { BrowserWindow } from 'electron'
+import { createOpenAI } from '@ai-sdk/openai'
+import { createGoogleGenerativeAI } from '@ai-sdk/google'
+import { generateText, type LanguageModel } from 'ai'
 
 import type { Config } from '../shared/config.js'
-import { resolveBackendKey } from './config.js'
+import { getConfig, resolveApiKey, resolveBackendKey } from './config.js'
 
 export type LlmStatus = 'ok' | 'error' | 'idle'
 
@@ -30,6 +33,34 @@ function broadcastStatus(status: LlmStatus): void {
  *  real chat round-trip succeeds or fails). */
 export function notifyLlmStatus(status: LlmStatus): void {
   broadcastStatus(status)
+}
+
+/**
+ * One-shot text generation against the user's configured chat backend. Used
+ * by the L3 reflection module to ask the LLM for fact extraction without
+ * dragging in tools, streaming, or memory injection.
+ *
+ * Picks the same provider chat.ts picks (Google native for Gemini, OpenAI-
+ * compat for everything else). Throws on failure — the caller handles
+ * retries and parse failures.
+ */
+export async function runExtraction(prompt: string): Promise<string> {
+  const cfg = getConfig()
+  const apiKey = resolveApiKey(cfg)
+  if (!apiKey) throw new Error('no API key')
+  let model: LanguageModel
+  if (cfg.backend.baseUrl.includes('googleapis.com')) {
+    const google = createGoogleGenerativeAI({ apiKey })
+    model = google(cfg.backend.model)
+  } else {
+    const openai = createOpenAI({ baseURL: cfg.backend.baseUrl, apiKey })
+    // .chat() — see chat.ts for why we don't use the default factory.
+    model = openai.chat(cfg.backend.model)
+  }
+  // temperature 0.2: extraction is structured / deterministic-ish work.
+  // Higher temps make the model wander off the schema.
+  const result = await generateText({ model, prompt, temperature: 0.2 })
+  return result.text
 }
 
 export async function testBackend(

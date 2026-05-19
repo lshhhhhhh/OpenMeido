@@ -63,6 +63,14 @@ export interface Live2DStageOptions {
 }
 
 /**
+ * Coverage state at a viewport coordinate. Drives window-level click-through:
+ *   - 'pixel'       → opaque model pixel; capture the click
+ *   - 'transparent' → on the canvas but on transparent space; pass click through to the OS
+ *   - 'outside'     → outside the canvas entirely (or model not loaded yet); defer to whoever owns that region
+ */
+export type Coverage = 'pixel' | 'transparent' | 'outside'
+
+/**
  * Public surface the React/UI side gets through a ref. Matches what
  * imouto-oss exposed on `window.imouto`, but typed.
  */
@@ -76,6 +84,8 @@ export interface Live2DController {
   setMouthOpen(value: number): void
   setFitMode(mode: FitMode): void
   resetPosition(): void
+  /** Coverage probe used by App.tsx to drive window click-through. */
+  isOverModel(clientX: number, clientY: number): Coverage
   /** Inspect available motions/expressions for debugging. */
   info(): {
     width: number
@@ -176,6 +186,16 @@ export class Live2DStage implements Live2DController {
       const loaded = await Live2DModel.from(path, { autoHitTest: false, autoFocus: false })
       const model = loaded as unknown as Live2DDisplayable
       if (this.destroyed) {
+        // Race: stage was destroyed while Live2DModel.from() was in-flight.
+        // Bare destroy() is intentional here — PIXI's BaseTexture.from(url)
+        // returns a globally cached instance, so passing { texture: true,
+        // baseTexture: true } would delete GL handles that the NEXT mounted
+        // stage will pick up by URL. Under React StrictMode (mount → cleanup
+        // → remount in dev), that re-mount then samples a dead BaseTexture
+        // and renders the model as a solid black silhouette. The Container
+        // teardown is enough — the model's own resources are released when
+        // GC reclaims the orphan instance; cached BaseTextures stay alive
+        // for whoever else is using them.
         model.destroy()
         return
       }
@@ -385,6 +405,40 @@ export class Live2DStage implements Live2DController {
     this.fit()
   }
 
+  /**
+   * Decide whether the cursor sits on the rendered model or on empty space.
+   * Used by App.tsx to drive window-level click-through via setIgnoreMouseEvents.
+   *
+   * Implementation: bbox + a small inward pad. Pixel-perfect alpha probing
+   * (gl.readPixels) needs preserveDrawingBuffer:true, which on Electron's
+   * transparent window kicks the compositor off its hardware alpha path —
+   * a bad trade. Bbox + 12% horizontal / 4% vertical inward pad gives a
+   * tight-enough region for click-through without that cost.
+   */
+  isOverModel(clientX: number, clientY: number): Coverage {
+    const rect = this.canvas.getBoundingClientRect()
+    if (
+      clientX < rect.left ||
+      clientX >= rect.right ||
+      clientY < rect.top ||
+      clientY >= rect.bottom
+    ) {
+      return 'outside'
+    }
+    if (!this.model) return 'transparent'
+    const x = clientX - rect.left
+    const y = clientY - rect.top
+    const b = this.model.getBounds()
+    const padX = b.width * 0.12
+    const padY = b.height * 0.04
+    const inside =
+      x >= b.x + padX &&
+      x <= b.x + b.width - padX &&
+      y >= b.y + padY &&
+      y <= b.y + b.height - padY
+    return inside ? 'pixel' : 'transparent'
+  }
+
   info(): ReturnType<Live2DController['info']> {
     if (!this.model) return null
     const s = this.model.internalModel.settings as unknown as CubismSettingsShape
@@ -422,8 +476,18 @@ export class Live2DStage implements Live2DController {
     this.canvas.removeEventListener('mousedown', this.onMouseDown)
     this.canvas.removeEventListener('dblclick', this.onDoubleClick)
     // Pass removeView=true so PIXI also removes the canvas from the DOM,
-    // and the GL context dies with it. Next mount will create a fresh canvas.
-    this.app.destroy(true, { children: true, texture: true, baseTexture: true })
+    // and the GL context dies with it.
+    //
+    // CRITICAL: do NOT pass { texture: true, baseTexture: true }. PIXI's
+    // BaseTexture.from(url) backs a GLOBAL url-keyed cache; calling
+    // destroy(true,{baseTexture:true}) deletes that cached entry's GL
+    // handles, so the next stage that loads the same model URL gets a
+    // cached-but-dead BaseTexture and renders the model as a solid black
+    // silhouette. Since each Live2DStage owns its own GL context (canvas
+    // + Application), letting the context die naturally with removeView
+    // is sufficient — the model's geometry/buffers go with the context,
+    // and the shared BaseTextures stay alive for the next mount.
+    this.app.destroy(true, { children: true })
     this.model = null
   }
 }

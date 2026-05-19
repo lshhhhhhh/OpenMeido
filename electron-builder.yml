@@ -1,0 +1,74 @@
+# electron-builder config for OpenMeido.
+#
+# Output goes to `dist/` (release artifacts) — different from `out/` which
+# is electron-vite's build output (the JS bundles we then package here).
+#
+# Native modules (better-sqlite3, sqlite-vec) need to ship their .node
+# binaries; asar can hold them but Node native loaders need on-disk access,
+# so we asarUnpack them. @huggingface/transformers is pure JS + WASM and
+# loads fine from inside asar.
+#
+# The bge-small-zh-v1.5 model (~95MB) is NOT bundled — it's lazily fetched
+# on first run and cached under userData/hf-cache. Bundling would balloon
+# the installer to ~110MB+; on-demand keeps it ~80MB while online users
+# get it once and offline users can mirror via env vars.
+
+appId: com.openmeido.app
+productName: OpenMeido
+copyright: Copyright © 2026 OpenMeido
+
+# Build artifacts directory. dist/ is gitignored.
+directories:
+  output: dist
+  buildResources: build
+
+# Asar packaging on. Faster startup, simpler distribution, and the bundle
+# gets a basic obfuscation against casual prying.
+asar: true
+asarUnpack:
+  # Native .node modules MUST be unpacked — the Node loader needs a real
+  # file path. Without this you get "ENOENT" on launch.
+  - "**/node_modules/better-sqlite3/**"
+  - "**/node_modules/sqlite-vec/**"
+  - "**/node_modules/@huggingface/transformers/.cache/**"
+
+# Tell electron-builder which files end up in the .asar. electron-vite has
+# already built the main + preload + renderer bundles into out/, so we
+# only ship those plus the package.json (resolves prod deps).
+files:
+  - out/**/*
+  - package.json
+  - "!**/node_modules/**/{CHANGELOG.md,README.md,LICENSE*,readme.md,license,*.d.ts.map,*.js.map}"
+  - "!**/node_modules/*/{test,tests,docs,doc,example,examples,benchmark}"
+  - "!**/{.DS_Store,.git*,.editorconfig,.eslintrc,.prettierrc}"
+
+# Static assets that should ship alongside the asar (NOT compressed into
+# it). The renderer fetches Live2D files via HTTP from the file:// origin,
+# and asar-internal paths can't be fetched that way reliably.
+extraResources:
+  - from: src/renderer/public
+    to: public
+    filter: ["**/*"]
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # If you sign the build, set CSC_LINK + CSC_KEY_PASSWORD env vars; otherwise
+  # unsigned binaries trigger SmartScreen warnings on first launch.
+  artifactName: ${productName}-Setup-${version}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: OpenMeido
+
+# macOS build target — leave commented unless we actually start shipping
+# to Mac. Code signing for macOS requires Apple Developer ID + notarization,
+# which is paid + complicated.
+# mac:
+#   target: dmg
+#   category: public.app-category.productivity

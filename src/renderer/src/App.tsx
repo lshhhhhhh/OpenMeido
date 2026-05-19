@@ -4,8 +4,11 @@ import type { ChatEvent, ChatImageAttachment } from '../../shared/ipc'
 import { resolvePersona } from '../../shared/config'
 import { Live2DCanvas } from './live2d/Live2DCanvas'
 import type { Live2DController } from './live2d/stage'
+import { playMp3Base64, type PlayHandle } from './tts/player'
 import { Settings } from './Settings'
+import { SetupWizard } from './SetupWizard'
 import { useConfig } from './useConfig'
+import { matchHotkey } from '../../shared/demos'
 
 interface ToolCall {
   name: string
@@ -28,6 +31,17 @@ const DEFAULT_CHAT_HEIGHT = 180
 const MIN_CHAT_HEIGHT = 100
 const MIN_LIVE2D_HEIGHT = 120
 
+/**
+ * Strip the `zh-CN-` / `en-US-` locale prefix and the trailing `Neural` /
+ * `MultilingualNeural` suffix from an Edge TTS voice ShortName for status-pill
+ * display. e.g. `zh-CN-XiaoyiNeural` → `Xiaoyi`. Falls back to the full name
+ * if the pattern doesn't match (custom / future voice).
+ */
+function shortVoiceLabel(voice: string): string {
+  const m = /^[a-z]{2}-[A-Z]{2}-(.+?)(Multilingual)?Neural$/.exec(voice)
+  return m?.[1] ?? voice
+}
+
 export default function App() {
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -38,6 +52,15 @@ export default function App() {
   // Pending attachments for the NEXT send. Cleared after send fires.
   const [attachments, setAttachments] = useState<ChatImageAttachment[]>([])
   const [capturing, setCapturing] = useState(false)
+  // First-run setup wizard. Three states:
+  //   'checking'  — running an initial chat.test to decide whether we need it
+  //   'open'      — show the wizard (no working key found)
+  //   'dismissed' — user clicked "稍后再说" OR test succeeded → hide
+  // Initial 'checking' avoids a flash of the wizard for devs whose .env
+  // supplies a key (apiKey empty in config but main resolves via env).
+  const [wizardState, setWizardState] = useState<'checking' | 'open' | 'dismissed'>(
+    'checking',
+  )
   // LLM health — 'idle' (untested), 'ok' (last call succeeded), 'error'
   // (last call failed). Updates on chat events.
   const [llmStatus, setLlmStatus] = useState<'idle' | 'ok' | 'error'>('idle')
@@ -46,7 +69,27 @@ export default function App() {
   const activeIdRef = useRef<string | null>(null)
   const live2dRef = useRef<Live2DController>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
+  // Currently-playing TTS handle. Tapping speaker on another bubble (or
+  // starting a new send) stops this one so audio doesn't overlap.
+  const ttsHandleRef = useRef<PlayHandle | null>(null)
+  // Which message index is currently speaking (for UI highlight).
+  const [speakingIdx, setSpeakingIdx] = useState<number | null>(null)
   const config = useConfig()
+  // Mirror config + speak + messages into refs so the chat-event useEffect
+  // closure (which has [] deps so subscription doesn't churn) always reads
+  // fresh values, AND so we can read state from outside React's setMessages
+  // updater (which StrictMode double-invokes in dev — side-effects there fire
+  // twice, causing audible double-play).
+  const configRef = useRef(config)
+  configRef.current = config
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
+  // Messages whose 'done' event has already been processed — see the
+  // 'done' case in the chat-event handler for why we need this.
+  const doneSeenRef = useRef<Set<string>>(new Set())
+  // Resolved meido-live2d:// URL for the currently-active model. Stays null
+  // until the sidecar fetch returns — we render Live2DCanvas conditionally.
+  const [modelUrl, setModelUrl] = useState<string | null>(null)
 
   // Append a text delta or a tool event to the LAST assistant message. We
   // create that message synchronously in send() so by the time stream events
@@ -88,6 +131,27 @@ export default function App() {
         case 'done':
           setBusy(false)
           setLlmStatus('ok')
+          // Guard against duplicate 'done' events on the same messageId.
+          // Two sources can produce them:
+          //   1. React StrictMode dev double-mount before cleanup runs.
+          //   2. HMR + Fast Refresh leaving a stale chat-event listener
+          //      from a previous edit (Electron-vite + IPC handlers).
+          // Either way we'd auto-play the same reply twice. doneSeenRef
+          // is a Set scoped to this listener; we drop the duplicate here
+          // BEFORE asking speakRef to do anything.
+          if (doneSeenRef.current.has(event.messageId)) break
+          doneSeenRef.current.add(event.messageId)
+          {
+            const list = messagesRef.current
+            const idx = list.length - 1
+            const last = list[idx]
+            if (last && last.role === 'assistant' && last.text.trim()) {
+              const cfg = configRef.current
+              if (cfg?.tts.enabled && cfg.tts.autoPlay) {
+                void speakRef.current(last.text, idx)
+              }
+            }
+          }
           break
         case 'error':
           setError(event.error)
@@ -134,6 +198,266 @@ export default function App() {
       ])
     })
   }, [])
+
+  // Spontaneous proactive remark from main. Drop it into the chat list and,
+  // if TTS auto-play is on, speak it. We don't track it through activeIdRef
+  // because there's no associated stream — it's already complete text.
+  useEffect(() => {
+    return window.api.proactive.onRemark((info) => {
+      // Append outside the setMessages updater — StrictMode double-invokes
+      // updaters in dev and we don't want auto-speak to fire twice.
+      const idx = messagesRef.current.length
+      setMessages((prev) => [...prev, { role: 'assistant' as const, text: info.text }])
+      const cfg = configRef.current
+      if (cfg?.tts.enabled && cfg.tts.autoPlay) {
+        void speakRef.current(info.text, idx)
+      }
+    })
+  }, [])
+
+  // First-run check: hit /models via window.api.chat.test with the current
+  // backend. If it succeeds, we have a working key (either in config or via
+  // .env fallback in dev), so skip the wizard. If it fails AND the user
+  // hasn't dismissed within this session yet, pop the wizard.
+  //
+  // Only runs once per mount — once dismissed, the user can re-trigger by
+  // clearing apiKey + restarting, or just use Settings → AI directly.
+  useEffect(() => {
+    if (!config) return
+    if (wizardState !== 'checking') return
+    let canceled = false
+    void window.api.chat.test(config.backend).then((r) => {
+      if (canceled) return
+      setWizardState(r.ok ? 'dismissed' : 'open')
+    })
+    return () => {
+      canceled = true
+    }
+  }, [config, wizardState])
+
+  // Subscribe to Live2D commands from main (chat tool calls). The main side
+  // already does the emotion → expression/motion lookup via the active model's
+  // sidecar, so here we just translate the broadcast into a controller call.
+  useEffect(() => {
+    return window.api.live2d.onCommand((cmd) => {
+      const ctrl = live2dRef.current
+      if (!ctrl) return
+      if (cmd.type === 'setExpression') {
+        if (cmd.name === null) ctrl.clearExpression()
+        else ctrl.setExpression(cmd.name)
+      } else if (cmd.type === 'playMotion') {
+        ctrl.playMotion(cmd.group, cmd.index)
+      }
+    })
+  }, [])
+
+  // Resolve activeModel → meido-live2d:// URL. We need the sidecar to know
+  // which *.model3.json inside the model dir is the entry point. Re-runs when
+  // the user picks a different model in Settings.
+  useEffect(() => {
+    if (!config) return
+    let canceled = false
+    void window.api.live2d.getSidecar(config.live2d.activeModel).then((side) => {
+      if (canceled) return
+      if (!side) {
+        console.warn('[live2d] model not found:', config.live2d.activeModel)
+        setModelUrl(null)
+        return
+      }
+      // Encode each path segment separately so spaces / Chinese characters
+      // in the filename survive the URL parser.
+      const file = side.modelFile
+        .split('/')
+        .map((seg) => encodeURIComponent(seg))
+        .join('/')
+      setModelUrl(`meido-live2d://${encodeURIComponent(config.live2d.activeModel)}/${file}`)
+    })
+    return () => {
+      canceled = true
+    }
+  }, [config?.live2d.activeModel])
+
+  // Demo mode — each demo has its own hotkey in `<userData>/demos.json`.
+  // Local (window-focused only) since main has no registered global shortcut.
+  // We re-fetch from main on every plausible keydown so user edits to the
+  // file take effect immediately, no restart / no HMR.
+  //
+  // Bare keys like '1' / '2' are valid hotkeys, BUT we suppress matching
+  // when the user is typing in the chat input — otherwise typing '1' in a
+  // sentence would fire demo 1. Modifier-prefixed hotkeys (Ctrl+Shift+D)
+  // pass through input-focus suppression because the modifier signals intent.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent): void => {
+      const hasMod = e.ctrlKey || e.altKey || e.metaKey
+      // While focus is in an editable element AND there's no modifier, this
+      // is regular typing — don't fire any demo.
+      const target = e.target as HTMLElement | null
+      const inEditable =
+        target?.tagName === 'INPUT' ||
+        target?.tagName === 'TEXTAREA' ||
+        target?.isContentEditable
+      if (inEditable && !hasMod) return
+      // Cheap pre-filter to avoid an IPC roundtrip on every keystroke:
+      // anything that could plausibly be a hotkey has either a modifier,
+      // OR is a named key (F1 / Space / Escape — `e.key.length > 1`), OR
+      // is a single printable char (`e.key.length === 1`, which covers
+      // bare-digit hotkeys like '1'). That's literally every keydown but
+      // it's only ~20Hz peak, well under any IPC limit.
+      const couldBeHotkey = hasMod || e.key.length >= 1
+      if (!couldBeHotkey) return
+      void (async () => {
+        const demos = await window.api.demos.list()
+        const item = demos.find((d) => matchHotkey(e, d.hotkey))
+        if (!item) return
+        e.preventDefault()
+
+        const ctrl = live2dRef.current
+        if (item.expression) ctrl?.setExpression(item.expression)
+        else if (item.expression === null) ctrl?.clearExpression()
+        if (item.motion) ctrl?.playMotion(item.motion.group, item.motion.index)
+
+        const idx = messagesRef.current.length
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant' as const, text: item.text },
+        ])
+        // Speak even if autoPlay is off — pressing the demo hotkey IS an
+        // explicit play request. Still respect the master tts.enabled toggle.
+        if (configRef.current?.tts.enabled) {
+          // Defer one tick so React commits the new bubble first; speak's
+          // setSpeakingIdx(idx) needs the bubble to exist for the highlight.
+          setTimeout(() => void speakRef.current(item.text, idx), 0)
+        }
+      })()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  // Window-level click-through over transparent Live2D regions.
+  //
+  // Two event sources feed the same evaluator:
+  //   - DOM mousemove — fast, fires while the window is focused
+  //   - main-side cursor poll (window.api.window.onCursorPoint) — 20Hz, fills
+  //     the unfocused-window gap where Chromium's forwarded mousemove is
+  //     laggy enough that the user can click the status bar before
+  //     click-through has flipped off
+  //
+  // Both routes call evaluate(x, y), which finds the topmost element and:
+  //   - opaque (status bar, chat, buttons, settings) → click-through OFF,
+  //     window captures the click
+  //   - canvas + over model pixel → click-through OFF (drag the maid)
+  //   - canvas + transparent → click-through ON (passes to desktop)
+  // IPC only fires on actual transitions (lastEnabled guard).
+  useEffect(() => {
+    const setClickThrough = window.api.window?.setClickThrough ?? (() => {})
+    let lastEnabled: boolean | null = null
+
+    const evaluate = (clientX: number, clientY: number, inside = true): void => {
+      // Cursor outside our window — don't touch state. Whatever it was when
+      // the cursor left is still the right answer (e.g. user moves to chat
+      // panel coords from outside, we want click-through OFF — and that's
+      // what the next "inside" tick will set).
+      if (!inside) return
+      const el = document.elementFromPoint(clientX, clientY)
+      const ctrl = live2dRef.current
+      let enabled: boolean
+      if (!el) {
+        enabled = false
+      } else if (el.tagName === 'CANVAS' && ctrl) {
+        const cov = ctrl.isOverModel(clientX, clientY)
+        enabled = cov === 'transparent'
+      } else {
+        enabled = false
+      }
+      if (enabled !== lastEnabled) {
+        lastEnabled = enabled
+        setClickThrough(enabled)
+      }
+    }
+
+    const onMove = (e: MouseEvent): void => {
+      evaluate(e.clientX, e.clientY, true)
+    }
+
+    window.addEventListener('mousemove', onMove, { passive: true })
+    const unsubPoll =
+      window.api.window?.onCursorPoint?.((info) => {
+        evaluate(info.clientX, info.clientY, info.inside)
+      }) ?? (() => {})
+
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      unsubPoll()
+      // Restore opaque on unmount so a hot-reload doesn't leave the window
+      // half-ghosted.
+      setClickThrough(false)
+    }
+  }, [])
+
+  /**
+   * Speak a chat message via TTS, driving the Live2D mouth from RMS.
+   *
+   * Token-guarded against concurrent invocations: between auto-play on 'done'
+   * and a manual 🔊 tap (or any duplicate event from HMR-stale listeners),
+   * two speak() calls could arrive almost simultaneously. Without a guard
+   * both would survive the `ttsHandleRef.current?.stop()` no-op (no handle
+   * yet) and both would await synthesize → both would call playMp3Base64 →
+   * two overlapping audio sources. The token ensures only the most-recent
+   * caller actually plays; older ones bail at every await boundary.
+   */
+  const speakTokenRef = useRef(0)
+  const speakRef = useRef<(text: string, idx: number) => Promise<void>>(async () => {})
+  async function speak(text: string, idx: number): Promise<void> {
+    if (!config?.tts.enabled || !text.trim()) return
+    // Tapping the same bubble that's playing → stop it (toggle behavior).
+    if (ttsHandleRef.current && speakingIdx === idx) {
+      ttsHandleRef.current.stop()
+      ttsHandleRef.current = null
+      setSpeakingIdx(null)
+      return
+    }
+    ttsHandleRef.current?.stop()
+    ttsHandleRef.current = null
+    const myToken = ++speakTokenRef.current
+    setSpeakingIdx(idx)
+    try {
+      // No override — let main read whichever backend is configured.
+      const result = await window.api.tts.synthesize(text)
+      // A newer speak() has superseded us while we were awaiting synthesis —
+      // discard this result instead of stacking it on top of the new audio.
+      if (speakTokenRef.current !== myToken) return
+      if ('error' in result) {
+        console.warn('[tts] synth failed:', result.error)
+        setSpeakingIdx(null)
+        return
+      }
+      const ctrl = live2dRef.current
+      const handle = await playMp3Base64(result.base64, {
+        mouthGain: config.tts.mouthGain,
+        onMouth: (v) => ctrl?.setMouthOpen(v),
+        onEnd: () => {
+          // Make sure the mouth closes — onMouth(0) is fired by the player
+          // on stop, but we still want UI state to reset.
+          ctrl?.setMouthOpen(0)
+          if (ttsHandleRef.current === handle) {
+            ttsHandleRef.current = null
+            setSpeakingIdx((cur) => (cur === idx ? null : cur))
+          }
+        },
+      })
+      // Same guard at the second await boundary.
+      if (speakTokenRef.current !== myToken) {
+        handle.stop()
+        return
+      }
+      ttsHandleRef.current = handle
+    } catch (err) {
+      console.warn('[tts] play failed:', err)
+      setSpeakingIdx(null)
+    }
+  }
+  speakRef.current = speak
 
   function send(): void {
     const text = input.trim()
@@ -252,9 +576,22 @@ export default function App() {
             onClick={() => setSettingsOpen(true)}
           />
           <StatusPill
-            dot="#888"
-            label="TTS off"
-            title="语音合成尚未实现"
+            dot={config?.tts.enabled ? '#3fb950' : '#888'}
+            label={
+              config?.tts.enabled
+                ? config.tts.backend === 'sovits'
+                  ? 'TTS · SoVITS'
+                  : `TTS · ${shortVoiceLabel(config.tts.voice)}`
+                : 'TTS off'
+            }
+            title={
+              config?.tts.enabled
+                ? config.tts.backend === 'sovits'
+                  ? `GPT-SoVITS @ ${config.tts.sovits.baseUrl}（点击进设置）`
+                  : `语音：${config.tts.voice}（点击进设置切换）`
+                : 'TTS 未开启（点击进设置开启）'
+            }
+            onClick={() => setSettingsOpen(true)}
           />
         </div>
         <div style={{ ...noDragRegion, display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -301,10 +638,10 @@ export default function App() {
       {/* Live2D stage — fills the bulk of the window, transparent BG so the
           desktop shows through everywhere except where the character renders. */}
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        {config && (
+        {config && modelUrl && (
           <Live2DCanvas
             ref={live2dRef}
-            modelPath={config.live2d.modelPath}
+            modelPath={modelUrl}
             fitMode="portrait"
             portraitZoom={config.live2d.portraitZoom}
           />
@@ -433,7 +770,14 @@ export default function App() {
               <div style={{ color: '#999', fontSize: 12 }}>开始聊天吧 ✨</div>
             )}
             {messages.map((m, i) => (
-              <MessageBubble key={i} message={m} busy={busy && i === messages.length - 1} />
+              <MessageBubble
+                key={i}
+                message={m}
+                busy={busy && i === messages.length - 1}
+                ttsEnabled={config?.tts.enabled ?? false}
+                speaking={speakingIdx === i}
+                onSpeak={() => void speak(m.text, i)}
+              />
             ))}
             {error && (
               <pre style={{ color: '#c00', whiteSpace: 'pre-wrap', margin: 0, fontSize: 12 }}>
@@ -549,6 +893,19 @@ export default function App() {
       {settingsOpen && config && (
         <Settings initial={config} onClose={() => setSettingsOpen(false)} />
       )}
+
+      {/* First-run setup wizard. Sits above everything (z-index 2000),
+          blocking interaction until the user either saves a key or skips. */}
+      {wizardState === 'open' && config && (
+        <SetupWizard
+          initial={config}
+          onSkip={() => setWizardState('dismissed')}
+          onSave={async (next) => {
+            await window.api.config.set(next)
+            setWizardState('dismissed')
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -606,10 +963,31 @@ function StatusPill({
   )
 }
 
-function MessageBubble({ message, busy }: { message: ChatMessage; busy: boolean }) {
+function MessageBubble({
+  message,
+  busy,
+  ttsEnabled,
+  speaking,
+  onSpeak,
+}: {
+  message: ChatMessage
+  busy: boolean
+  ttsEnabled: boolean
+  speaking: boolean
+  onSpeak: () => void
+}) {
   const isUser = message.role === 'user'
+  // Speaker button: only on assistant bubbles, only when TTS is enabled,
+  // and only when the message has text (skip empty placeholder bubbles).
+  const showSpeaker = !isUser && ttsEnabled && message.text.trim().length > 0
   return (
-    <div style={{ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start' }}>
+    <div
+      style={{
+        display: 'flex',
+        justifyContent: isUser ? 'flex-end' : 'flex-start',
+        position: 'relative',
+      }}
+    >
       <div
         style={{
           maxWidth: '85%',
@@ -617,6 +995,10 @@ function MessageBubble({ message, busy }: { message: ChatMessage; busy: boolean 
           borderRadius: 10,
           background: isUser ? 'rgba(120, 160, 255, 0.18)' : 'rgba(0, 0, 0, 0.05)',
           whiteSpace: 'pre-wrap',
+          // Subtle outline pulse while speaking — confirms which bubble
+          // owns the current audio when scrolling.
+          outline: speaking ? '2px solid rgba(120, 200, 120, 0.55)' : 'none',
+          outlineOffset: 1,
         }}
       >
         {message.imageDataUrls && message.imageDataUrls.length > 0 && (
@@ -638,6 +1020,24 @@ function MessageBubble({ message, busy }: { message: ChatMessage; busy: boolean 
           </div>
         )}
         {message.text || (busy ? <span style={{ color: '#aaa' }}>thinking…</span> : '')}
+        {showSpeaker && (
+          <button
+            onClick={onSpeak}
+            title={speaking ? '停止朗读' : '朗读这条'}
+            style={{
+              marginLeft: 6,
+              padding: '0 4px',
+              border: 'none',
+              background: 'transparent',
+              cursor: 'pointer',
+              fontSize: 12,
+              verticalAlign: 'middle',
+              opacity: speaking ? 1 : 0.5,
+            }}
+          >
+            {speaking ? '⏹' : '🔊'}
+          </button>
+        )}
         {message.toolCalls && message.toolCalls.length > 0 && (
           <div style={{ marginTop: 4, fontSize: 10, color: '#888' }}>
             {message.toolCalls.map((tc, i) => (

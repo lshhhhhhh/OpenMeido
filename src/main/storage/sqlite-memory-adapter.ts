@@ -23,7 +23,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { MemoryAdapter } from '../../core/memory/adapter.js'
-import type { Episode, SessionSummary, Speaker } from '../../core/memory/types.js'
+import type { Episode, Fact, NewFact, SessionSummary, Speaker } from '../../core/memory/types.js'
 
 interface EpisodeRow {
   id: number
@@ -54,6 +54,27 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
 
     CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts);
     CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
+
+    -- L3 facts: LLM-distilled stable knowledge. supersededBy points to the
+    -- row that replaced this one (NULL = currently active). We never DELETE
+    -- a fact on contradiction — supersession keeps the history queryable
+    -- so the user (or the model) can audit why a fact changed.
+    CREATE TABLE IF NOT EXISTS facts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      confidence REAL NOT NULL DEFAULT 1.0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      source_episode_ids TEXT NOT NULL DEFAULT '[]',
+      superseded_by INTEGER REFERENCES facts(id)
+    );
+
+    -- Partial index on (key) WHERE active. Active-fact lookups dominate
+    -- (every chat turn injects them into the system prompt) so the index
+    -- size is dominated by the live set, not history.
+    CREATE INDEX IF NOT EXISTS idx_facts_key_active
+      ON facts(key) WHERE superseded_by IS NULL;
   `)
 
   // vec0 locks `dim` at CREATE time. Inspect any pre-existing episodes_vec
@@ -143,6 +164,65 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
      ORDER BY vc.distance`,
   )
   const countEpisodes = db.prepare('SELECT COUNT(*) AS c FROM episodes WHERE archived = 0')
+
+  // ---- L3 facts prepared statements ----
+  const selectActiveByKey = db.prepare<[string]>(
+    `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
+            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy
+     FROM facts
+     WHERE key = ? AND superseded_by IS NULL`,
+  )
+  const insertFact = db.prepare<[string, string, number, string, string, string]>(
+    `INSERT INTO facts (key, value, confidence, created_at, updated_at, source_episode_ids)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  )
+  const bumpFact = db.prepare<[number, string, number]>(
+    `UPDATE facts SET confidence = ?, updated_at = ? WHERE id = ?`,
+  )
+  const supersedeFact = db.prepare<[number, number]>(
+    `UPDATE facts SET superseded_by = ? WHERE id = ?`,
+  )
+  const selectFactById = db.prepare<[number]>(
+    `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
+            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy
+     FROM facts WHERE id = ?`,
+  )
+  const selectActiveFacts = db.prepare<[number]>(
+    `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
+            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy
+     FROM facts
+     WHERE superseded_by IS NULL
+     ORDER BY updated_at DESC
+     LIMIT ?`,
+  )
+  const selectFactHistory = db.prepare<[string]>(
+    `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
+            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy
+     FROM facts
+     WHERE key = ?
+     ORDER BY id ASC`,
+  )
+
+  interface FactRow {
+    id: number
+    key: string
+    value: string
+    confidence: number
+    createdAt: string
+    updatedAt: string
+    sourceEpisodeIdsJson: string
+    supersededBy: number | null
+  }
+  const rowToFact = (r: FactRow): Fact => ({
+    id: r.id,
+    key: r.key,
+    value: r.value,
+    confidence: r.confidence,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+    sourceEpisodeIds: safeParseIntArray(r.sourceEpisodeIdsJson),
+    supersededBy: r.supersededBy,
+  })
 
   const addTxn = db.transaction(
     (speaker: Speaker, text: string, sessionId: string | null, embedding: Float32Array): number => {
@@ -241,10 +321,69 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
       return wipe()
     },
 
+    async upsertFact(input: NewFact) {
+      ensureOpen()
+      const now = new Date().toISOString()
+      const sourceIds = JSON.stringify(input.sourceEpisodeIds ?? [])
+      const inputConf = input.confidence ?? 1.0
+      const existing = selectActiveByKey.get(input.key) as FactRow | undefined
+      const txn = db.transaction((): Fact => {
+        if (existing && existing.value === input.value) {
+          // Same key + same value → reinforce. Confidence drifts toward 1.0
+          // by averaging the incoming confidence with the existing one — a
+          // simple way to make stable facts converge without ever exceeding 1.
+          const newConf = Math.min(1.0, (existing.confidence + inputConf) / 2 + 0.05)
+          bumpFact.run(newConf, now, existing.id)
+          return rowToFact({ ...existing, confidence: newConf, updatedAt: now })
+        }
+        // Either no active row yet, or value differs (contradiction). In
+        // both cases we insert a NEW row, then point the old active row
+        // (if any) at the new one as its supersedor.
+        const ins = insertFact.run(input.key, input.value, inputConf, now, now, sourceIds)
+        const newId = Number(ins.lastInsertRowid)
+        if (existing) supersedeFact.run(newId, existing.id)
+        return rowToFact(selectFactById.get(newId) as FactRow)
+      })
+      return txn()
+    },
+
+    async listActiveFacts(limit = 200) {
+      ensureOpen()
+      return (selectActiveFacts.all(limit) as FactRow[]).map(rowToFact)
+    },
+
+    async listFactHistory(key: string) {
+      ensureOpen()
+      return (selectFactHistory.all(key) as FactRow[]).map(rowToFact)
+    },
+
+    async clearFacts() {
+      ensureOpen()
+      const result = db.prepare('DELETE FROM facts').run()
+      return Number(result.changes)
+    },
+
     close() {
       if (closed) return
       closed = true
       db.close()
     },
   }
+}
+
+/**
+ * Tolerant parser for the source_episode_ids JSON column. Defaults to []
+ * on any shape error — a malformed JSON should never crash a chat turn.
+ */
+function safeParseIntArray(s: string | null): number[] {
+  if (!s) return []
+  try {
+    const parsed = JSON.parse(s)
+    if (Array.isArray(parsed)) {
+      return parsed.filter((n) => typeof n === 'number' && Number.isFinite(n))
+    }
+  } catch {
+    /* fall through */
+  }
+  return []
 }

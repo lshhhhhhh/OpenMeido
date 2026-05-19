@@ -118,7 +118,13 @@ export const configSchema = z.object({
     .default({}),
   live2d: z
     .object({
-      modelPath: z.string().default('/live2d-models/haitu_vts/海兔1.model3.json'),
+      /**
+       * Active model = directory name under `<userData>/live2d-models/`.
+       * The renderer resolves this to a `meido-live2d://<name>/<modelFile>`
+       * URL at load time (modelFile comes from each model's sidecar).
+       * Defaults to 'haitu_vts' which the bundled seed installs on first run.
+       */
+      activeModel: z.string().default('haitu_vts'),
       /** 1.0 = fit width exactly; 1.6 = upper-body crop. */
       portraitZoom: z.number().min(0.5).max(3).default(1.6),
     })
@@ -126,8 +132,8 @@ export const configSchema = z.object({
   window: z
     .object({
       alwaysOnTop: z.boolean().default(true),
-      width: z.number().int().min(260).default(360),
-      height: z.number().int().min(400).default(620),
+      width: z.number().int().min(260).default(480),
+      height: z.number().int().min(400).default(720),
     })
     .default({}),
   embedding: z
@@ -154,6 +160,86 @@ export const configSchema = z.object({
       topK: z.number().int().min(0).max(20).default(5),
       /** How many most-recent episodes to always include (working window). */
       recentN: z.number().int().min(0).max(40).default(10),
+    })
+    .default({}),
+  proactive: z
+    .object({
+      /**
+       * Master switch. Default ON — a desktop companion that NEVER talks
+       * on her own feels broken-by-default; users who hate it can flip it
+       * off in Settings → 主动 within seconds. The default poll/cooldown
+       * are conservative (15 min timer, 10 min idle, 10 min cooldown)
+       * so it's not noisy.
+       */
+      enabled: z.boolean().default(true),
+      /** Seconds between trigger evaluations. 5s is plenty for chat cadence. */
+      pollIntervalSec: z.number().int().min(2).max(60).default(5),
+      /** Timer trigger: spontaneous remark every N seconds (since last reply). */
+      timerSec: z.number().int().min(60).max(7200).default(900),
+      /** Idle trigger: fire once when system has been idle this many seconds. */
+      idleThresholdSec: z.number().int().min(30).max(3600).default(600),
+      /** Don't fire if the user just spoke within this many seconds. */
+      minSilenceSec: z.number().int().min(5).max(600).default(30),
+      /** Hard cooldown between any two proactive remarks, regardless of trigger. */
+      cooldownSec: z.number().int().min(60).max(7200).default(600),
+    })
+    .default({}),
+  tts: z
+    .object({
+      /** Master switch. When false, the speaker button is hidden and auto-play disabled. */
+      enabled: z.boolean().default(true),
+      /**
+       * Which TTS engine to use.
+       *   - 'edge': Microsoft Edge TTS (free, online, no voice training)
+       *   - 'sovits': GPT-SoVITS api_v2.py running locally (zero-shot voice
+       *     cloning — bring your own ref audio + transcript)
+       */
+      backend: z.enum(['edge', 'sovits']).default('edge'),
+      /**
+       * Microsoft Edge TTS voice ShortName. XiaoyiNeural is the lightest /
+       * youngest-sounding Chinese female voice — fits both the maid and
+       * imouto personas without being too theatrical.
+       * Full list: https://learn.microsoft.com/en-us/azure/cognitive-services/speech-service/language-support
+       */
+      voice: z.string().default('zh-CN-XiaoyiNeural'),
+      /** Auto-play every assistant reply instead of requiring a click. */
+      autoPlay: z.boolean().default(true),
+      /**
+       * RMS → mouth-open gain. 3.5 matches imouto-oss; higher = more
+       * exaggerated mouth motion. 2.5–5.0 is the usable range.
+       */
+      mouthGain: z.number().min(0).max(10).default(3.5),
+      /**
+       * GPT-SoVITS api_v2.py settings. Only consulted when backend === 'sovits'.
+       * Defaults assume the server is running locally on the standard port
+       * with the desired voice model already loaded via /set_gpt_weights and
+       * /set_sovits_weights (or pre-set at server launch).
+       */
+      sovits: z
+        .object({
+          /** api_v2.py HTTP endpoint. */
+          baseUrl: z.string().default('http://127.0.0.1:9880'),
+          /**
+           * Absolute path (on the SoVITS server's filesystem) to the 3–10s
+           * reference audio. The server reads this file each call.
+           */
+          refAudio: z.string().default(''),
+          /** Verbatim transcript of refAudio — must match what the audio says. */
+          refText: z.string().default(''),
+          /** Language of the prompt/ref audio. zh/en/ja/ko/etc. */
+          refLang: z.string().default('zh'),
+          /** Language to synthesize (the maid's reply). */
+          textLang: z.string().default('zh'),
+          /** Sampling top-k for the GPT decoder. */
+          topK: z.number().int().min(1).max(50).default(5),
+          /** Sampling top-p for the GPT decoder. */
+          topP: z.number().min(0).max(1).default(1.0),
+          /** Temperature for the GPT decoder. */
+          temperature: z.number().min(0).max(2).default(1.0),
+          /** Playback speed (1.0 = native, >1 faster). */
+          speedFactor: z.number().min(0.5).max(2).default(1.0),
+        })
+        .default({}),
     })
     .default({}),
   mail: z

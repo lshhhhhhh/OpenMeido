@@ -12,7 +12,8 @@
 
 import type { Config } from '../../shared/config.js'
 import type { MemoryAdapter } from './adapter.js'
-import type { Episode, SessionSummary, Speaker } from './types.js'
+import { reflect, renderFactsBlock, type ReflectionExtractor } from './reflection.js'
+import type { Episode, Fact, SessionSummary, Speaker } from './types.js'
 
 /** Pluggable embedding function. Host provides; default impl is local bge. */
 export type EmbedFn = (text: string) => Promise<Float32Array>
@@ -55,6 +56,33 @@ export interface MemoryService {
 
   /** Current session id (what new turns are being tagged with). */
   currentSession(): string
+
+  // ---- L3 facts ----
+
+  /** Active facts (supersededBy IS NULL), newest first. */
+  listFacts(limit?: number): Promise<Fact[]>
+
+  /**
+   * Build the system-prompt fragment that lists known user facts. Returns
+   * empty string when there's nothing worth injecting (no facts above the
+   * confidence threshold). Cached implicitly per-call by the caller —
+   * service doesn't memo because facts can change between turns.
+   */
+  factsBlock(minConfidence?: number): Promise<string>
+
+  /**
+   * Drive one reflection pass: pull the last N episodes, ask the LLM to
+   * distill facts, upsert what comes back. Best-effort — failures don't
+   * throw, just log. Returns the number of facts upserted (0 if no
+   * extractor configured or extraction failed).
+   */
+  reflectOnce(): Promise<number>
+
+  /**
+   * Wipe all L3 facts (history included). Returns rows removed. Use from
+   * the Memory tab "clear all" action.
+   */
+  clearFacts(): Promise<number>
 }
 
 export interface MemoryServiceDeps {
@@ -69,6 +97,18 @@ export interface MemoryServiceDeps {
    * windows so silent storage failures become visible to the user.
    */
   onError?: (operation: string, message: string) => void
+  /**
+   * Optional LLM extractor for L3 fact reflection. When absent, reflectOnce
+   * is a no-op (just returns 0). The host wires this to the same chat
+   * provider it uses for normal turns.
+   */
+  reflectExtractor?: ReflectionExtractor
+  /**
+   * Session id to start with. Host should pass the most-recent session id
+   * (looked up before construction) so chat continues across restarts.
+   * When omitted, a fresh session id is minted.
+   */
+  initialSessionId?: string
 }
 
 /** crypto.randomUUID is on globalThis in Node 20+ and all browsers we support. */
@@ -77,9 +117,17 @@ function makeSessionId(): string {
 }
 
 export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
-  const { adapter, embed, getConfig, onError } = deps
+  const { adapter, embed, getConfig, onError, reflectExtractor, initialSessionId } = deps
 
-  let sessionId = makeSessionId()
+  // Resume the previous session by default — users expect chat continuity
+  // across restarts; they only get a fresh session when they explicitly
+  // pick "新建会话" in the Memory tab. The host resolves the most-recent
+  // session id synchronously before constructing us (see memory-host.ts);
+  // if it didn't find one, we mint a brand new one here.
+  let sessionId = initialSessionId ?? makeSessionId()
+  // In-flight guard for reflectOnce — prevents two reflection cycles
+  // overlapping when called from both a timer and a turn count threshold.
+  let reflecting = false
 
   const reportError = (operation: string, err: unknown): void => {
     const message = err instanceof Error ? err.message : String(err)
@@ -146,6 +194,55 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
     currentSession() {
       return sessionId
+    },
+
+    async listFacts(limit = 200) {
+      return adapter.listActiveFacts(limit)
+    },
+
+    async factsBlock(minConfidence) {
+      try {
+        const facts = await adapter.listActiveFacts(200)
+        return renderFactsBlock(facts, minConfidence)
+      } catch (err) {
+        reportError('factsBlock', err)
+        return ''
+      }
+    },
+
+    async reflectOnce() {
+      if (!reflectExtractor) return 0
+      if (reflecting) return 0
+      reflecting = true
+      try {
+        const cfg = getConfig()
+        // Use the same window size as recent-context retrieval — keeps
+        // the cost predictable and ensures we don't replay episodes the
+        // model has already seen as L1 context.
+        const window = Math.max(cfg.memory.recentN, 12)
+        const recent = await adapter.recent(window)
+        const facts = await reflect(recent, reflectExtractor)
+        if (!facts || facts.length === 0) return 0
+        let upserted = 0
+        for (const f of facts) {
+          try {
+            await adapter.upsertFact(f)
+            upserted += 1
+          } catch (err) {
+            reportError('upsertFact', err)
+          }
+        }
+        return upserted
+      } catch (err) {
+        reportError('reflectOnce', err)
+        return 0
+      } finally {
+        reflecting = false
+      }
+    },
+
+    async clearFacts() {
+      return adapter.clearFacts()
     },
   }
 }

@@ -8,7 +8,7 @@
  * IndexedDB / Capacitor SQLite cases where async is unavoidable.
  */
 
-import type { Episode, SessionSummary, Speaker } from './types.js'
+import type { Episode, Fact, NewFact, SessionSummary, Speaker } from './types.js'
 
 export interface MemoryAdapter {
   /** Persist a turn together with its embedding. Returns the new row id. */
@@ -47,6 +47,26 @@ export interface MemoryAdapter {
 
   /** Delete just one session's episodes. Returns rows removed. */
   deleteSession(sessionId: string): Promise<number>
+
+  // ---- L3 facts ----
+
+  /**
+   * Upsert a fact for `key`. If an active fact (supersededBy IS NULL) with the
+   * same key + same value already exists, just bumps `confidence` (toward 1.0)
+   * and `updatedAt`. If the value differs, a NEW row is inserted and the
+   * previous active row gets `supersededBy = newId` — old facts stay queryable
+   * for audit but only the active one is injected into the system prompt.
+   */
+  upsertFact(input: NewFact): Promise<Fact>
+
+  /** All facts currently active (supersededBy IS NULL), newest first. */
+  listActiveFacts(limit?: number): Promise<Fact[]>
+
+  /** Full history of facts for a key, oldest first. Used by the Memory inspector. */
+  listFactHistory(key: string): Promise<Fact[]>
+
+  /** Wipe all facts. Returns rows removed. */
+  clearFacts(): Promise<number>
 
   /** Release resources. After close, all other methods reject. */
   close(): void
