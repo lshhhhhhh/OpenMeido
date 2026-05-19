@@ -677,11 +677,32 @@ export async function runChat(
     // requires, so for Gemini we use the native Google provider instead.
     // Other endpoints (OpenAI, LM Studio, Anthropic-compat) stay on the
     // OpenAI-compatible path with relaxed validation.
+    // Google Search Grounding (`googleSearch` provider tool). When enabled
+    // for the Gemini backend, Gemini autonomously decides when to call
+    // search and grounds its reply with sources. Per @ai-sdk/google v3+,
+    // this is a tool you add to the `tools` map (NOT a model factory
+    // option). Other backends don't have a corresponding mechanism here
+    // yet — GLM's web_search uses a provider-specific request shape that
+    // needs more invasive wiring.
     let model: LanguageModel
+    // Provider-tool result type (opaque to us). We just need to splat it
+    // into the `tools` map when set; the SDK validates the shape internally.
+    let googleSearchTool: unknown = null
     if (cfg.backend.baseUrl.includes('googleapis.com')) {
       const google = createGoogleGenerativeAI({ apiKey })
       model = google(cfg.backend.model)
+      if (cfg.backend.searchEnabled) {
+        googleSearchTool = google.tools.googleSearch({})
+      }
     } else {
+      if (cfg.backend.searchEnabled) {
+        console.warn(
+          '[chat] searchEnabled is set but the current backend (' +
+            cfg.backend.baseUrl +
+            ') does not yet support search. ' +
+            'GLM web_search wiring is a planned follow-up; Gemini works today.',
+        )
+      }
       const openai = createOpenAI({
         baseURL: cfg.backend.baseUrl,
         apiKey,
@@ -759,27 +780,22 @@ export async function runChat(
       // Otherwise some models will (a) hallucinate that they can read mail
       // even when the tool returns "not configured", and (b) get stuck in
       // re-try loops calling the tool that always errors.
-      tools: cfg.mail.enabled
-        ? {
-            addTask,
-            listTasks,
-            markTaskDone,
-            setLive2DExpression,
-            readClipboard,
-            readWebPage,
-            readFile: readFileTool,
-            listRecentEmails,
-            readEmail,
-          }
-        : {
-            addTask,
-            listTasks,
-            markTaskDone,
-            setLive2DExpression,
-            readClipboard,
-            readWebPage,
-            readFile: readFileTool,
-          },
+      // Tool map. Provider-side tools (e.g. Gemini's googleSearch) get
+      // splatted in via the conditional below; the SDK type-checks them
+      // against the provider when streamText runs. Splat-cast through
+      // any so the unified shape passes TS — the runtime contract is
+      // what matters.
+      tools: {
+        addTask,
+        listTasks,
+        markTaskDone,
+        setLive2DExpression,
+        readClipboard,
+        readWebPage,
+        readFile: readFileTool,
+        ...(cfg.mail.enabled ? { listRecentEmails, readEmail } : {}),
+        ...(googleSearchTool ? { google_search: googleSearchTool } : {}),
+      } as unknown as Parameters<typeof streamText>[0]['tools'],
       // Step budget. stepCountIs(N) keeps the loop alive for up to N model
       // invocations. We use 3 to cover the common chains:
       //   text reply only  → 1 step

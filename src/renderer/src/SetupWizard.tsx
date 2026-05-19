@@ -50,6 +50,9 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
           baseUrl: preset.url,
           model: defaultModel,
           apiKey: apiKey.trim(),
+          // Preserve whatever toggle the user had before; this wizard is
+          // about provider/key, not search settings.
+          searchEnabled: initial.backend.searchEnabled,
         },
       })
     } catch (err) {

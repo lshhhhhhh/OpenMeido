@@ -352,6 +352,49 @@ export function Settings({ initial, onClose }: SettingsProps) {
               </span>
             )}
           </div>
+
+          {/* Search-grounding toggle. Currently wired for Gemini only; for
+              other backends we still show the checkbox but with a hint
+              that it's a no-op until provider-specific support lands. */}
+          {(() => {
+            const isGemini = draft.backend.baseUrl.includes('googleapis.com')
+            return (
+              <div style={{ marginTop: 12 }}>
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    fontSize: 13,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={draft.backend.searchEnabled}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        backend: { ...draft.backend, searchEnabled: e.target.checked },
+                      })
+                    }
+                  />
+                  允许 AI 联网搜索
+                </label>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: '#999',
+                    marginTop: 4,
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {isGemini
+                    ? '✓ Gemini 支持：开启后，模型会自动决定何时谷歌搜索来获取最新信息，回答会标注引用。'
+                    : '⚠️ 当前 backend 暂未接入搜索（GLM / Qwen 等需要 provider 特定的工具协议，开发中）。打勾不会生效。'}
+                </div>
+              </div>
+            )
+          })()}
         </Section>
         )}
 

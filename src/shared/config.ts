@@ -89,6 +89,17 @@ export const configSchema = z.object({
       // Note: there is no gpt-5.5-mini — the 5.5 generation didn't ship a
       // mini tier, so 5.4-mini stays the budget pick after 5.5 launched.
       model: z.string().default('gpt-5.4-mini'),
+      /**
+       * Let the LLM browse the web for current information. When true:
+       *   - Gemini backend: passes useSearchGrounding to the model factory.
+       *     Model autonomously decides when to search; results grounded.
+       *   - GLM / Qwen / OpenAI: not yet wired up (provider-specific tool
+       *     shapes are more invasive than the Gemini case). Setting this
+       *     true on those backends is currently a no-op with a console
+       *     warning. Tracked as a follow-up.
+       *   - DeepSeek / local: no native search; flag stays effectively off.
+       */
+      searchEnabled: z.boolean().default(false),
     })
     .default({}),
   persona: z
