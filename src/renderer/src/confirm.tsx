@@ -84,8 +84,15 @@
 
 import { useEffect, useState } from 'react'
 
-type PendingConfirm = { message: string; resolve: (ok: boolean) => void }
-let setPending: ((p: PendingConfirm | null) => void) | null = null
+type PendingDialog =
+  | { kind: 'confirm'; message: string; resolve: (ok: boolean) => void }
+  | {
+      kind: 'prompt'
+      message: string
+      defaultValue: string
+      resolve: (value: string | null) => void
+    }
+let setPending: ((p: PendingDialog | null) => void) | null = null
 
 /**
  * Show a confirm dialog, await the user's choice. Returns true if OK
@@ -102,22 +109,49 @@ export function confirm(message: string): Promise<boolean> {
       resolve(window.confirm(message))
       return
     }
-    setPending({ message, resolve })
+    setPending({ kind: 'confirm', message, resolve })
+  })
+}
+
+/**
+ * Async equivalent of `window.prompt`. Returns the entered string, or null
+ * if the user cancelled / dismissed. Same focus-storm-on-transparent-window
+ * problem applies to `window.prompt` so this is the only safe entry point.
+ */
+export function prompt(message: string, defaultValue = ''): Promise<string | null> {
+  return new Promise((resolve) => {
+    if (!setPending) {
+      console.warn('[prompt] host not mounted, falling back to native prompt')
+      resolve(window.prompt(message, defaultValue))
+      return
+    }
+    setPending({ kind: 'prompt', message, defaultValue, resolve })
   })
 }
 
 export function ConfirmHost() {
-  const [pending, setPendingState] = useState<PendingConfirm | null>(null)
+  const [pending, setPendingState] = useState<PendingDialog | null>(null)
+  const [promptValue, setPromptValue] = useState('')
   useEffect(() => {
     setPending = setPendingState
     return () => {
       setPending = null
     }
   }, [])
+  // Reset the prompt input value whenever a new prompt opens.
+  useEffect(() => {
+    if (pending?.kind === 'prompt') setPromptValue(pending.defaultValue)
+  }, [pending])
   if (!pending) return null
 
-  const decide = (ok: boolean): void => {
-    pending.resolve(ok)
+  const cancel = (): void => {
+    if (pending.kind === 'confirm') pending.resolve(false)
+    else pending.resolve(null)
+    setPendingState(null)
+  }
+  const accept = (): void => {
+    if (pending.kind === 'confirm') pending.resolve(true)
+    else pending.resolve(promptValue)
     setPendingState(null)
   }
 
@@ -135,13 +169,12 @@ export function ConfirmHost() {
         fontFamily: 'system-ui, sans-serif',
       }}
       onClick={(e) => {
-        // Backdrop click = cancel. The dialog body stops propagation below.
-        if (e.target === e.currentTarget) decide(false)
+        if (e.target === e.currentTarget) cancel()
       }}
     >
       <div
         style={{
-          minWidth: 280,
+          minWidth: 320,
           maxWidth: '85%',
           background: '#1f2128',
           color: '#eee',
@@ -153,10 +186,38 @@ export function ConfirmHost() {
         <div style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 14, whiteSpace: 'pre-wrap' }}>
           {pending.message}
         </div>
+        {pending.kind === 'prompt' && (
+          <input
+            autoFocus
+            value={promptValue}
+            onChange={(e) => setPromptValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                accept()
+              } else if (e.key === 'Escape') {
+                e.preventDefault()
+                cancel()
+              }
+            }}
+            style={{
+              width: '100%',
+              padding: '6px 10px',
+              marginBottom: 14,
+              background: '#2a2d36',
+              border: '1px solid #3a3e48',
+              color: '#eee',
+              borderRadius: 5,
+              fontSize: 13,
+              fontFamily: 'monospace',
+              boxSizing: 'border-box',
+            }}
+          />
+        )}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button
-            onClick={() => decide(false)}
-            autoFocus
+            onClick={cancel}
+            autoFocus={pending.kind === 'confirm'}
             style={{
               padding: '6px 14px',
               background: 'transparent',
@@ -170,12 +231,19 @@ export function ConfirmHost() {
             取消
           </button>
           <button
-            onClick={() => decide(true)}
+            onClick={accept}
             style={{
               padding: '6px 14px',
-              background: 'rgba(200, 80, 80, 0.2)',
-              border: '1px solid rgba(200, 80, 80, 0.5)',
-              color: '#f99',
+              background:
+                pending.kind === 'confirm'
+                  ? 'rgba(200, 80, 80, 0.2)'
+                  : 'rgba(120, 160, 255, 0.2)',
+              border:
+                '1px solid ' +
+                (pending.kind === 'confirm'
+                  ? 'rgba(200, 80, 80, 0.5)'
+                  : 'rgba(120, 160, 255, 0.5)'),
+              color: pending.kind === 'confirm' ? '#f99' : '#aad4ff',
               borderRadius: 5,
               cursor: 'pointer',
               fontSize: 13,

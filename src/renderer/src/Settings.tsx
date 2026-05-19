@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from 'react'
 
-import { confirm } from './confirm'
+import { confirm, prompt } from './confirm'
 import { CUSTOM_PERSONA_TEMPLATE, personaPresets, type Config } from '../../shared/config'
 import type { Episode, Fact, SessionSummary } from '../../core/memory/types'
 import {
@@ -317,14 +317,14 @@ export function Settings({ initial, onClose }: SettingsProps) {
               </button>
             ))}
             {/* Escape hatch — fine-tunes, new versions, local model names.
-                Uses native window.prompt instead of a separate input field,
-                which the user found visually redundant with the chips. */}
+                Uses the in-app prompt() (NOT window.prompt) — native dialogs
+                break input focus on transparent windows, see ./confirm.tsx. */}
             <button
               style={chipStyle(
                 !suggestedModels(draft.backend.baseUrl).includes(draft.backend.model),
               )}
-              onClick={() => {
-                const v = window.prompt(
+              onClick={async () => {
+                const v = await prompt(
                   '输入 model id（fine-tune / 新版本 / 本地模型）',
                   draft.backend.model,
                 )
