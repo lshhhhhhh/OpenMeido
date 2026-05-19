@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, protocol, screen, dialog, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, protocol, dialog, shell } from 'electron'
 import { join, extname } from 'node:path'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
@@ -125,9 +125,6 @@ function createWindow(): void {
     if (mainWindow === win) mainWindow = null
   })
 
-  // Cursor polling — see startCursorPolling for why this is needed in
-  // addition to the renderer's mousemove handler.
-  startCursorPolling(win)
 }
 
 // Apply live config changes to the running window where possible. width/height
@@ -152,48 +149,11 @@ ipcMain.on(IPC.ChatSend, (event, payload: ChatSendPayload) => {
   })
 })
 
-// ---- Window click-through ----
-// Two paths feed into setIgnoreMouseEvents:
-//
-//   1) Renderer mousemove → ipc 'window:setClickThrough'. Works when the
-//      window is focused and the cursor is moving over it.
-//
-//   2) Main polls `screen.getCursorScreenPoint()` 20Hz, computes client
-//      coords, pushes 'cursor:point' to the renderer. The renderer runs the
-//      SAME evaluator on this synthetic event. Why we need this: when the
-//      window is unfocused and the user moves the cursor in from outside,
-//      Chromium's `setIgnoreMouseEvents(true, {forward: true})` mousemove
-//      forwarding is laggy / unreliable enough that the user can click the
-//      status bar before the renderer has flipped click-through off, and
-//      the click passes through to whatever's behind. Polling sidesteps
-//      Chromium and gets OS-level cursor position directly.
-//
-// `forward: true` stays on so renderer mousemove keeps flowing in the
-// common (focused) case without an extra IPC roundtrip per move.
-ipcMain.on('window:setClickThrough', (event, enabled: boolean) => {
-  const win = BrowserWindow.fromWebContents(event.sender)
-  if (win && !win.isDestroyed()) {
-    win.setIgnoreMouseEvents(Boolean(enabled), { forward: true })
-  }
-})
-
-function startCursorPolling(win: BrowserWindow): void {
-  const POLL_MS = 50
-  const timer = setInterval(() => {
-    if (win.isDestroyed()) {
-      clearInterval(timer)
-      return
-    }
-    const pt = screen.getCursorScreenPoint()
-    const bounds = win.getContentBounds()
-    const clientX = pt.x - bounds.x
-    const clientY = pt.y - bounds.y
-    const inside =
-      clientX >= 0 && clientX < bounds.width && clientY >= 0 && clientY < bounds.height
-    win.webContents.send('cursor:point', { clientX, clientY, inside })
-  }, POLL_MS)
-  win.on('closed', () => clearInterval(timer))
-}
+// Window click-through (setIgnoreMouseEvents) was removed in a hotfix —
+// it kept getting stuck in the ON state after modals closed, eating user
+// clicks and silently breaking input focus. The window stays opaque to
+// clicks now; visual transparency comes from `transparent: true` on the
+// BrowserWindow alone.
 
 // ---- TTS ----
 ipcMain.handle('tts:listVoices', async () => {

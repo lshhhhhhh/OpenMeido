@@ -307,6 +307,7 @@ export async function runChat(
       { role: 'user', content: userContent },
     ]
 
+    const mailEnabled = cfg.mail.enabled
     const result = streamText({
       model,
       temperature: 1,
@@ -321,9 +322,12 @@ export async function runChat(
         `1. 文字聊天，记住对话历史。\n` +
         `2. 看用户发给你的图片（截屏/图片）并描述、分析、回答关于图中内容的问题。\n` +
         `3. 调用 setReminder：用户希望被提醒时（"提醒我..."、"...时叫我"等）。\n` +
-        `4. 调用 listRecentEmails：用户问"有没有新邮件"、"最近邮件"等时。\n` +
-        `5. 调用 readEmail：拿到邮件 id 后取正文细节。\n` +
-        `6. 调用 setLive2DExpression：回复带明显情绪时切表情（happy/embarrassed/sinister/angry/neutral）。\n` +
+        (mailEnabled
+          ? `4. 调用 listRecentEmails：用户问"有没有新邮件"、"最近邮件"等时。\n` +
+            `5. 调用 readEmail：拿到邮件 id 后取正文细节。\n`
+          : `（邮箱功能用户没开启——别说"我帮你查邮箱"，也别凭空捏造一封邮件。\n` +
+            `如果用户问邮件，直接告诉他"邮箱还没接上，去 Settings → 邮箱 启用一下"。）\n`) +
+        `${mailEnabled ? '6' : '4'}. 调用 setLive2DExpression：回复带明显情绪时切表情（开心/害羞/无语/难过/慌张/震惊/尴尬/得意）。\n` +
         `\n` +
         `# 你不能做的事（绝对不要主动提议，也不要假装能做）\n` +
         `- 不能点击、关闭、打开任何程序、窗口、文件夹、文件\n` +
@@ -338,12 +342,38 @@ export async function runChat(
         `工具调用后用人物语气自然回复一两句，不要复读 JSON。\n` +
         `**不要**在文字回复里粘贴或复述工具调用的 XML / JSON（比如 <tool_call>…</tool_call>、<arg_key>…）——工具调用走专用通道，文字里只用人物语气说一句自然话即可。\n` +
         `**不要**在最终回复里输出 <think> 或类似的思考块——内部推理保留在你自己的思路中，给用户看的只有最终的一两句人物对白。\n` +
+        `\n` +
+        `# 一回合一次（极其重要）\n` +
+        `每条用户消息你**最多回复一次**。不要"我来看看…现在我看看…我还在看哦…"这种把同一句话拆三遍说。\n` +
+        `**setLive2DExpression 一回合最多调用一次**——切了表情就停，不要切完接着再切。\n` +
+        `如果已经调用过工具（看完邮件 / 设了提醒 / 切了表情），下一步只说一句结束语就停，不要再调任何工具。\n` +
         `历史对话中可能包含很久以前的内容，请只在自然相关时引用，不要强行触发。`,
       messages,
-      tools: { setReminder, listRecentEmails, readEmail, setLive2DExpression },
-      // v6 renamed maxSteps → stopWhen. stepCountIs(N) keeps the loop alive
-      // for up to N model invocations (list email → read email → reply = 3).
-      stopWhen: stepCountIs(5),
+      // Conditional tool exposure: when mail isn't enabled, drop the email
+      // tools entirely so the model doesn't see them in its function list.
+      // Otherwise some models will (a) hallucinate that they can read mail
+      // even when the tool returns "not configured", and (b) get stuck in
+      // re-try loops calling the tool that always errors.
+      tools: cfg.mail.enabled
+        ? { setReminder, setLive2DExpression, listRecentEmails, readEmail }
+        : { setReminder, setLive2DExpression },
+      // Step budget. stepCountIs(N) keeps the loop alive for up to N model
+      // invocations. We use 3 to cover the common chains:
+      //   text reply only  → 1 step
+      //   one tool + reply → 2 steps
+      //   list-email → read-email → reply → 3 steps
+      // We deliberately do NOT go higher: at 5+ models tend to fall into a
+      // chatter loop, repeating "yes I'm still looking" + setLive2DExpression
+      // on every step until the budget runs out. User then sees 3-5 near-
+      // identical replies stacked in one bubble.
+      stopWhen: stepCountIs(3),
+      // Disable SDK-level retries. Default is `maxRetries: 2` (3 attempts).
+      // When a provider rate-limits AFTER the model has already streamed
+      // some text + tool calls, each retry starts from scratch and the
+      // partial output from earlier attempts has already been delivered to
+      // the renderer — the user sees the response repeated 2-3 times.
+      // Better to surface the error once than to duplicate output.
+      maxRetries: 0,
     })
 
     // Accumulate the full assistant text so we can persist it after streaming.

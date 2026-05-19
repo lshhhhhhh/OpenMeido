@@ -96,38 +96,11 @@ const api = {
     },
   },
 
-  window: {
-    /**
-     * Toggle OS-level click-through on the BrowserWindow. The renderer
-     * decides per-mousemove whether the cursor sits on opaque UI or
-     * transparent canvas space, and only flips this on actual state
-     * transitions to avoid setIgnoreMouseEvents churn. `forward: true`
-     * is set in main so mousemove keeps flowing even while the window
-     * is ignoring clicks — needed to detect when the cursor re-enters
-     * an opaque region.
-     */
-    setClickThrough(enabled: boolean): void {
-      ipcRenderer.send('window:setClickThrough', enabled)
-    },
-    /**
-     * 20Hz OS-level cursor position stream from main. Fills the gap when
-     * the window is unfocused and Chromium's forward-mousemove is too
-     * laggy to drive click-through state changes off real DOM events.
-     * Returns an unsubscribe function.
-     */
-    onCursorPoint(
-      cb: (info: { clientX: number; clientY: number; inside: boolean }) => void,
-    ): () => void {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        info: { clientX: number; clientY: number; inside: boolean },
-      ): void => cb(info)
-      ipcRenderer.on('cursor:point', handler)
-      return () => {
-        ipcRenderer.off('cursor:point', handler)
-      }
-    },
-  },
+  // window: previously exposed setClickThrough + onCursorPoint for the
+  // transparent-window click-through feature. Removed in a hotfix — kept
+  // getting stuck ON and eating user input. Visual transparency alone is
+  // enough; clicks land on the renderer instead of falling through to the
+  // desktop.
 
   proactive: {
     /** Maid spoke up on her own (timer / idle trigger). Subscribe to render the bubble. */

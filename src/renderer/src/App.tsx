@@ -8,6 +8,7 @@ import { playMp3Base64, type PlayHandle } from './tts/player'
 import { Settings } from './Settings'
 import { SetupWizard } from './SetupWizard'
 import { useConfig } from './useConfig'
+import { ConfirmHost } from './confirm'
 import { matchHotkey } from '../../shared/demos'
 
 interface ToolCall {
@@ -90,6 +91,7 @@ export default function App() {
   // Resolved meido-live2d:// URL for the currently-active model. Stays null
   // until the sidecar fetch returns — we render Live2DCanvas conditionally.
   const [modelUrl, setModelUrl] = useState<string | null>(null)
+
 
   // Append a text delta or a tool event to the LAST assistant message. We
   // create that message synchronously in send() so by the time stream events
@@ -334,66 +336,38 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
-  // Window-level click-through over transparent Live2D regions.
-  //
-  // Two event sources feed the same evaluator:
-  //   - DOM mousemove — fast, fires while the window is focused
-  //   - main-side cursor poll (window.api.window.onCursorPoint) — 20Hz, fills
-  //     the unfocused-window gap where Chromium's forwarded mousemove is
-  //     laggy enough that the user can click the status bar before
-  //     click-through has flipped off
-  //
-  // Both routes call evaluate(x, y), which finds the topmost element and:
-  //   - opaque (status bar, chat, buttons, settings) → click-through OFF,
-  //     window captures the click
-  //   - canvas + over model pixel → click-through OFF (drag the maid)
-  //   - canvas + transparent → click-through ON (passes to desktop)
-  // IPC only fires on actual transitions (lastEnabled guard).
+  // Diagnose: log window focus/blur + active element. If Windows is taking
+  // focus away from OpenMeido during memory-clear interactions, we'd see
+  // a blur on the window itself (NOT just the input).
   useEffect(() => {
-    const setClickThrough = window.api.window?.setClickThrough ?? (() => {})
-    let lastEnabled: boolean | null = null
-
-    const evaluate = (clientX: number, clientY: number, inside = true): void => {
-      // Cursor outside our window — don't touch state. Whatever it was when
-      // the cursor left is still the right answer (e.g. user moves to chat
-      // panel coords from outside, we want click-through OFF — and that's
-      // what the next "inside" tick will set).
-      if (!inside) return
-      const el = document.elementFromPoint(clientX, clientY)
-      const ctrl = live2dRef.current
-      let enabled: boolean
-      if (!el) {
-        enabled = false
-      } else if (el.tagName === 'CANVAS' && ctrl) {
-        const cov = ctrl.isOverModel(clientX, clientY)
-        enabled = cov === 'transparent'
-      } else {
-        enabled = false
-      }
-      if (enabled !== lastEnabled) {
-        lastEnabled = enabled
-        setClickThrough(enabled)
-      }
+    const onFocus = () => console.log('[diag] WINDOW focus', new Date().toISOString())
+    const onBlur = () => {
+      const a = document.activeElement
+      console.log(
+        '[diag] WINDOW blur, activeElement was:',
+        a ? `${a.tagName}.${(a as HTMLElement).className || '(no class)'}` : 'null',
+        new Date().toISOString(),
+      )
     }
-
-    const onMove = (e: MouseEvent): void => {
-      evaluate(e.clientX, e.clientY, true)
-    }
-
-    window.addEventListener('mousemove', onMove, { passive: true })
-    const unsubPoll =
-      window.api.window?.onCursorPoint?.((info) => {
-        evaluate(info.clientX, info.clientY, info.inside)
-      }) ?? (() => {})
-
+    window.addEventListener('focus', onFocus)
+    window.addEventListener('blur', onBlur)
     return () => {
-      window.removeEventListener('mousemove', onMove)
-      unsubPoll()
-      // Restore opaque on unmount so a hot-reload doesn't leave the window
-      // half-ghosted.
-      setClickThrough(false)
+      window.removeEventListener('focus', onFocus)
+      window.removeEventListener('blur', onBlur)
     }
   }, [])
+
+  // Window-level click-through was removed in favor of a simpler model:
+  // the window is visually transparent (frame:false + transparent:true) but
+  // remains opaque to clicks. Clicks on transparent canvas areas land on
+  // the renderer (no-op) instead of passing to the desktop. Trade-off: you
+  // can't click "through" the maid to grab a desktop icon, but you also
+  // never hit the race conditions where setIgnoreMouseEvents got stuck ON
+  // and ate keystrokes / focus. The canvas itself still toggles its OWN
+  // pointer-events (auto over model pixels, none over transparent), so
+  // clicks on transparent canvas patches pass through TO THE CHAT PANEL
+  // beneath them within the same window — which is what users actually
+  // wanted ("don't block my view of the chat").
 
   /**
    * Speak a chat message via TTS, driving the Live2D mouth from RMS.
@@ -478,6 +452,7 @@ export default function App() {
     setInput('')
     setAttachments([])
   }
+
 
   /** Capture every connected screen at once — let the model decide which is relevant. */
   async function captureScreen(): Promise<void> {
@@ -869,6 +844,17 @@ export default function App() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onFocus={() => console.log('[diag] input FOCUS', new Date().toISOString())}
+              onBlur={(e) => {
+                const next = e.relatedTarget as HTMLElement | null
+                console.log(
+                  '[diag] input BLUR → next focus =',
+                  next ? `${next.tagName}.${next.className || ''}` : '(none)',
+                  'doc.activeElement now =',
+                  document.activeElement?.tagName ?? 'null',
+                  new Date().toISOString(),
+                )
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
@@ -906,6 +892,11 @@ export default function App() {
           }}
         />
       )}
+
+      {/* In-app confirm dialog — replaces window.confirm() to avoid the
+          OS-level focus storm Chromium's native dialog triggers on
+          transparent+frameless windows. See ./confirm.tsx for why. */}
+      <ConfirmHost />
     </div>
   )
 }

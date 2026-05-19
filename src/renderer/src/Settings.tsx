@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from 'react'
 
+import { confirm } from './confirm'
 import { CUSTOM_PERSONA_TEMPLATE, personaPresets, type Config } from '../../shared/config'
 import type { Episode, Fact, SessionSummary } from '../../core/memory/types'
 import {
@@ -463,10 +464,10 @@ export function Settings({ initial, onClose }: SettingsProps) {
                   >
                     <Label>System prompt（括号是填空提示）</Label>
                     <button
-                      onClick={() => {
+                      onClick={async () => {
                         if (
                           active.systemPrompt === CUSTOM_PERSONA_TEMPLATE ||
-                          window.confirm('重置为默认模板？当前编辑内容会丢失。')
+                          (await confirm('重置为默认模板？当前编辑内容会丢失。'))
                         ) {
                           updateActive({ systemPrompt: CUSTOM_PERSONA_TEMPLATE })
                         }
@@ -497,8 +498,8 @@ export function Settings({ initial, onClose }: SettingsProps) {
                   </div>
 
                   <button
-                    onClick={() => {
-                      if (!window.confirm(`删除人设「${active.name}」？此操作无法撤销。`)) return
+                    onClick={async () => {
+                      if (!(await confirm(`删除人设「${active.name}」？此操作无法撤销。`))) return
                       setDraft({
                         ...draft,
                         persona: {
@@ -994,12 +995,12 @@ function Live2DTab({
     // sidecar. Confirm so an accidental click doesn't burn token + delete
     // hand-tuned mappings.
     if (
-      !window.confirm(
+      !(await confirm(
         `用 AI 重新绑定「${name}」的情绪映射？\n\n` +
           '• 会覆盖你现有的所有手动 / 上次 AI 绑定结果\n' +
           '• 消耗当前 chat backend 的 token（一次调用）\n' +
           '• AI 可能挑到不太合适的表情（命名抽象的模型尤其容易踩坑）',
-      )
+      ))
     ) {
       return
     }
@@ -1018,7 +1019,7 @@ function Live2DTab({
   }
 
   async function onDelete(name: string): Promise<void> {
-    if (!window.confirm(`删除模型「${name}」？磁盘上的所有文件都会被清掉，无法撤销。`)) return
+    if (!(await confirm(`删除模型「${name}」？磁盘上的所有文件都会被清掉，无法撤销。`))) return
     setError(null)
     await window.api.live2d.deleteModel(name)
     // If we just deleted the active one, fall back to the first remaining.
@@ -1607,7 +1608,7 @@ function MemoryTab() {
   }
 
   async function onClearAll(): Promise<void> {
-    if (!window.confirm('清空全部记忆？此操作无法撤销，妹妹会忘记之前所有对话。')) return
+    if (!(await confirm('清空全部记忆？此操作无法撤销，妹妹会忘记之前所有对话。'))) return
     setBusy(true)
     try {
       await window.api.memory.clear()
@@ -1622,7 +1623,7 @@ function MemoryTab() {
     if (!viewSessionId) return
     const sess = sessions.find((s) => s.id === viewSessionId)
     const label = sess ? sessionLabel(sess, sess.id === status.sessionId) : viewSessionId
-    if (!window.confirm(`删除会话「${label}」的全部记录？无法撤销。`)) return
+    if (!(await confirm(`删除会话「${label}」的全部记录？无法撤销。`))) return
     setBusy(true)
     try {
       await window.api.memory.deleteSession(viewSessionId)
@@ -1819,7 +1820,7 @@ function FactsPanel() {
   }
 
   async function onClearFacts(): Promise<void> {
-    if (!window.confirm('清空所有事实？妹妹会忘记关于你的所有"已知"，下次对话时会重新攒。')) return
+    if (!(await confirm('清空所有事实？妹妹会忘记关于你的所有"已知"，下次对话时会重新攒。'))) return
     setBusy(true)
     try {
       await window.api.memory.clearFacts()
