@@ -16,6 +16,8 @@
     "test:reflection-parse": "node --import tsx tools/smoke-reflection-parse.mjs",
     "test:notif-parse": "node --import tsx tools/smoke-notif-parse.mjs",
     "test:text-filter": "node --import tsx tools/smoke-text-filter.mjs",
+    "test:task-adapter": "electron tools/smoke-task-adapter.mjs",
+    "test:task-agent": "node --env-file=.env --import tsx tools/smoke-task-agent.mjs",
     "test:mail-parent": "node --import tsx tools/smoke-mail-parent.mjs",
     "test:fake-mail": "node --import tsx tools/smoke-fake-mail.mjs",
     "test:fake-mail-agent": "node --env-file=.env --import tsx tools/smoke-fake-mail-agent.mjs",

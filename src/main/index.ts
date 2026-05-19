@@ -9,6 +9,7 @@ import { runChat } from './chat.js'
 import { getConfig, setConfig, onConfigChange } from './config.js'
 import { initMemory, getMemoryService, getMemoryInitError } from './memory-host.js'
 import { initReminders, getReminderService } from './reminder-host.js'
+import { initTasks, getTaskService } from './tasks-host.js'
 import { testMailConfig } from './mail-host.js'
 import { testBackend, runExtraction } from './chat-host.js'
 import { readDemos, getDemosPath } from './demos-host.js'
@@ -128,11 +129,15 @@ function createWindow(): void {
   })
 
   // Persist the user's manual resize so next launch opens at the same size.
+  // We subtract the sidebar's contribution (when open) so the "natural" width
+  // is what gets saved — otherwise opening the sidebar and then quitting
+  // would lock in a permanently-wider window on next launch.
   win.on('resize', () => {
     if (win.isDestroyed()) return
     const size = win.getSize()
-    const w = size[0] ?? cfg.window.width
+    const rawW = size[0] ?? cfg.window.width
     const h = size[1] ?? cfg.window.height
+    const w = rawW - (sidebarOpenInMain ? SIDEBAR_WIDTH : 0)
     const current = getConfig()
     if (current.window.width !== w || current.window.height !== h) {
       setConfig({ ...current, window: { ...current.window, width: w, height: h } })
@@ -306,6 +311,57 @@ ipcMain.handle('reminders:cancel', async (_event, id: number) => {
   await svc.cancel(id)
   return true
 })
+
+// ---- Task IPC (unified reminders + TODOs) ----
+
+ipcMain.handle('tasks:listAll', async (_event, recentDoneLimit: number = 5) => {
+  const svc = getTaskService()
+  if (!svc) return []
+  return svc.listAll(recentDoneLimit)
+})
+ipcMain.handle(
+  'tasks:add',
+  async (
+    _event,
+    text: string,
+    fireAt: string | null = null,
+    dueAt: string | null = null,
+  ) => {
+    const svc = getTaskService()
+    if (!svc) return null
+    return svc.add({ text, fireAt, dueAt })
+  },
+)
+ipcMain.handle('tasks:markDone', async (_event, id: number) => {
+  const svc = getTaskService()
+  if (!svc) return false
+  return svc.markDone(id)
+})
+ipcMain.handle('tasks:markActive', async (_event, id: number) => {
+  const svc = getTaskService()
+  if (!svc) return false
+  return svc.markActive(id)
+})
+ipcMain.handle('tasks:remove', async (_event, id: number) => {
+  const svc = getTaskService()
+  if (!svc) return false
+  return svc.remove(id)
+})
+
+// ---- Sidebar window-resize ----
+
+const SIDEBAR_WIDTH = 260
+let sidebarOpenInMain = false
+
+ipcMain.handle('sidebar:setOpen', async (_event, open: boolean) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (open === sidebarOpenInMain) return // idempotent
+  const size = mainWindow.getSize()
+  const w = size[0] ?? 800
+  const h = size[1] ?? 600
+  sidebarOpenInMain = open
+  mainWindow.setSize(w + (open ? SIDEBAR_WIDTH : -SIDEBAR_WIDTH), h)
+})
 ipcMain.handle('memory:newSession', () => {
   const svc = getMemoryService()
   if (!svc) return null
@@ -335,6 +391,10 @@ void app.whenReady().then(async () => {
   // never sees a half-initialized backend.
   await initMemory()
   await initReminders()
+  // Tasks (unified reminders + TODOs, v0.0.14) — depends on memory for
+  // session-id injection in add(). Migrates legacy reminders.sqlite on
+  // first run if found.
+  await initTasks()
   initProactive(onConfigChange)
   initNotifListener()
   createWindow()

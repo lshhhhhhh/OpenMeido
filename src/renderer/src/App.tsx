@@ -7,6 +7,7 @@ import type { Live2DController } from './live2d/stage'
 import { playMp3Base64, type PlayHandle } from './tts/player'
 import { Settings } from './Settings'
 import { SetupWizard } from './SetupWizard'
+import { Sidebar } from './Sidebar'
 import { useConfig } from './useConfig'
 import { ConfirmHost } from './confirm'
 import { matchHotkey } from '../../shared/demos'
@@ -53,6 +54,11 @@ export default function App() {
   // to false. Refs because the auto-send happens inside the chat-event
   // useEffect's stale closure.
   const pendingSendRef = useRef(false)
+  // Sidebar visibility (reminders / TODOs / recent activity).
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  // Bumped on every chat 'done' event so the Sidebar's recent-activity
+  // section refetches. Activity is derived from episodes, no broadcast.
+  const [activityRefreshToken, setActivityRefreshToken] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [chatHeight, setChatHeight] = useState(DEFAULT_CHAT_HEIGHT)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -177,6 +183,9 @@ export default function App() {
             pendingSendRef.current = false
             setTimeout(() => sendRef.current(), 0)
           }
+          // Tell the sidebar's recent-activity section to refetch — the
+          // turn just persisted new tool_calls/tool_results.
+          setActivityRefreshToken((v) => v + 1)
           break
         case 'error':
           setError(event.error)
@@ -210,8 +219,9 @@ export default function App() {
     })
   }, [])
 
-  // Reminder fired in main → show it inline in chat as an assistant message
-  // so the user gets visual confirmation in addition to the OS notification.
+  // Reminder fired in main → show it inline in chat as an assistant message.
+  // Kept on the legacy `reminders` channel for back-compat with any old
+  // pending reminders (pre-task-migration) that fire while we're running.
   useEffect(() => {
     return window.api.reminders.onFired((reminder) => {
       setMessages((prev) => [
@@ -219,6 +229,19 @@ export default function App() {
         {
           role: 'assistant',
           text: `⏰ 提醒：${reminder.message}`,
+        },
+      ])
+    })
+  }, [])
+
+  // Task notification fired (the new unified channel) → same UX.
+  useEffect(() => {
+    return window.api.tasks.onFired((task) => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          text: `⏰ 提醒：${task.text}`,
         },
       ])
     })
@@ -916,6 +939,20 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* Sidebar — live view of tasks (reminders + TODOs) + recent activity.
+          Toggle hits main via `sidebar.setOpen` so the window grows/shrinks
+          by 260px on the right; sidebar then fills the new space rather
+          than overlapping existing chat content. */}
+      <Sidebar
+        open={sidebarOpen}
+        onToggle={() => {
+          const next = !sidebarOpen
+          setSidebarOpen(next)
+          void window.api.sidebar.setOpen(next)
+        }}
+        refreshActivityToken={activityRefreshToken}
+      />
 
       {settingsOpen && config && (
         <Settings initial={config} onClose={() => setSettingsOpen(false)} />

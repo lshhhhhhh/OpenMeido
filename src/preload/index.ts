@@ -6,6 +6,7 @@ import { ConfigIPC } from '../shared/config-ipc.js'
 import type { Config } from '../shared/config.js'
 import type { Episode, Fact, SessionSummary } from '../core/memory/types.js'
 import type { Reminder } from '../core/reminders/types.js'
+import type { Task } from '../core/tasks/types.js'
 import type { ModelListEntry, ModelSidecar } from '../shared/live2d-models.js'
 import type { Demo } from '../shared/demos.js'
 
@@ -187,6 +188,26 @@ const api = {
     reflectNow(): Promise<number> {
       return ipcRenderer.invoke('memory:reflectNow') as Promise<number>
     },
+    /** Sidebar feed: recent tool calls + results, derived from episodes. */
+    recentToolActivity(limit: number = 20): Promise<
+      Array<{
+        episodeId: number
+        ts: string
+        kind: 'call' | 'result'
+        toolName: string
+        summary: string
+      }>
+    > {
+      return ipcRenderer.invoke('memory:recentToolActivity', limit) as Promise<
+        Array<{
+          episodeId: number
+          ts: string
+          kind: 'call' | 'result'
+          toolName: string
+          summary: string
+        }>
+      >
+    },
     newSession(): Promise<string | null> {
       return ipcRenderer.invoke('memory:newSession') as Promise<string | null>
     },
@@ -293,6 +314,55 @@ const api = {
       return () => {
         ipcRenderer.off('reminder:fired', handler)
       }
+    },
+  },
+
+  // Unified tasks (v0.0.14): supersedes the old reminders/todos split.
+  // A task may carry a fireAt (becomes a time-triggered reminder) and/or
+  // sit on the list forever (becomes a TODO). Both share this API.
+  tasks: {
+    listAll(recentDoneLimit: number = 5): Promise<Task[]> {
+      return ipcRenderer.invoke('tasks:listAll', recentDoneLimit) as Promise<Task[]>
+    },
+    add(
+      text: string,
+      fireAt: string | null = null,
+      dueAt: string | null = null,
+    ): Promise<number | null> {
+      return ipcRenderer.invoke('tasks:add', text, fireAt, dueAt) as Promise<number | null>
+    },
+    markDone(id: number): Promise<boolean> {
+      return ipcRenderer.invoke('tasks:markDone', id) as Promise<boolean>
+    },
+    markActive(id: number): Promise<boolean> {
+      return ipcRenderer.invoke('tasks:markActive', id) as Promise<boolean>
+    },
+    remove(id: number): Promise<boolean> {
+      return ipcRenderer.invoke('tasks:remove', id) as Promise<boolean>
+    },
+    onFired(cb: (task: Task) => void): () => void {
+      const handler = (_: Electron.IpcRendererEvent, t: Task): void => cb(t)
+      ipcRenderer.on('task:fired', handler)
+      return () => {
+        ipcRenderer.off('task:fired', handler)
+      }
+    },
+    onChanged(cb: () => void): () => void {
+      const handler = (): void => cb()
+      ipcRenderer.on('tasks:changed', handler)
+      return () => {
+        ipcRenderer.off('tasks:changed', handler)
+      }
+    },
+  },
+
+  // Sidebar window-resize control. Renderer calls this when the user
+  // toggles the sidebar so main can grow/shrink the BrowserWindow by
+  // ~260px to the right. The sidebar then occupies the new space rather
+  // than overlapping existing chat content.
+  sidebar: {
+    setOpen(open: boolean): Promise<void> {
+      return ipcRenderer.invoke('sidebar:setOpen', open) as Promise<void>
     },
   },
 }
