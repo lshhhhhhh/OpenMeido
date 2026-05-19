@@ -186,6 +186,26 @@ export const configSchema = z.object({
       minSilenceSec: z.number().int().min(5).max(600).default(30),
       /** Hard cooldown between any two proactive remarks, regardless of trigger. */
       cooldownSec: z.number().int().min(60).max(7200).default(600),
+      /**
+       * Windows toast-notification listener — when ON, OpenMeido subscribes
+       * to the OS notification feed (QQ / WeChat / Outlook etc.) and the LLM
+       * decides whether to mention each one to the user. First-time activation
+       * triggers a Windows system permission dialog.
+       */
+      notifListener: z
+        .object({
+          /** Master switch. Default OFF (privacy + permission prompt). */
+          enabled: z.boolean().default(false),
+          /**
+           * Apps to surface, matched case-insensitively as substrings against
+           * the OS-reported app name. Empty array = surface everything (very
+           * noisy — use only if you want full pass-through).
+           */
+          allowlist: z
+            .array(z.string())
+            .default(['QQ', 'WeChat', '微信', 'Outlook', 'Mail', 'Telegram', 'Discord']),
+        })
+        .default({}),
     })
     .default({}),
   tts: z

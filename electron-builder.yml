@@ -42,15 +42,19 @@ files:
   - "!**/node_modules/*/{test,tests,docs,doc,example,examples,benchmark}"
   - "!**/{.DS_Store,.git*,.editorconfig,.eslintrc,.prettierrc}"
 
-# Static assets that should ship alongside the asar (NOT compressed into
-# it). The renderer fetches Live2D files via HTTP from the file:// origin,
-# and asar-internal paths can't be fetched that way reliably.
+# Files shipped alongside the asar (NOT compressed into it). PowerShell
+# can't read files inside app.asar — the .ps1 listener lives next to the
+# asar as <resourcesPath>/notif-listener.ps1. Live2D files have the same
+# constraint: the renderer fetches them via the custom meido-live2d://
+# protocol which resolves to disk paths.
 #
 # `haitu_vts/` is a paid Live2D model with a personal-use license — keep
 # it out of public builds. Local dev builds still pick it up because
 # `src/renderer/public/live2d-models/haitu_vts/` exists on the developer's
 # disk (gitignored), but this filter scrubs it from the redistributable.
 extraResources:
+  - from: src/main/notif-listener.ps1
+    to: notif-listener.ps1
   - from: src/renderer/public
     to: public
     filter:

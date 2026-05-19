@@ -19,6 +19,7 @@ import {
   noteAssistantActivity,
   noteUserActivity,
 } from './proactive-host.js'
+import { initNotifListener } from './notif-host.js'
 import {
   initLive2DModels,
   listModels as live2dListModels,
@@ -353,6 +354,7 @@ void app.whenReady().then(async () => {
   await initMemory()
   await initReminders()
   initProactive(onConfigChange)
+  initNotifListener()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

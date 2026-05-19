@@ -35,6 +35,7 @@
 - **Live2D 形象** — 自带两个免费模型（Hiyori / Haru），可导入更多 zip。情绪绑表情可手动调，也可点 **✨ AI 绑定表情** 让大模型自动猜
 - **语音合成** — 默认 Microsoft Edge TTS（免费、联网、声线 Xiaoyi），可切到本地 GPT-SoVITS 做零样本声音克隆。每条回复带 🔊 按钮 + 嘴型同步
 - **主动模式** — 你长时间没动 / 距上次回复太久时，LLM 会评估"现在该不该说一句"，决定主动来一句关心
+- **系统通知监听**（Windows）— 订阅 Windows 通知中心，LLM 决定哪些值得提示（QQ 私聊、邮件等），过滤广告和系统消息。首次开启会触发 Windows 系统授权弹窗
 - **邮箱集成** — IMAP 只读，能问"有新邮件吗"、"读一下第三封"等
 - **提醒** — 「提醒我五分钟后喝水」一句话设定，SQLite 持久化，重启不丢，到点系统通知
 - **透明窗口 + 点穿** — 形象边缘的透明像素可以点到桌面，形象本体 + 聊天框正常响应
@@ -95,6 +96,7 @@ A setup window asks you to pick an AI backend, register, and paste an API key. *
 - **Live2D character** — two free-license models bundled (Hiyori / Haru); import more via zip. Emotion-to-expression mapping is editable, or hit **✨ AI auto-bind** to let the model guess for you
 - **Text-to-speech** — Microsoft Edge TTS by default (free, online, Xiaoyi voice), or switch to local GPT-SoVITS for zero-shot voice cloning. Per-message 🔊 button + RMS-driven mouth-sync
 - **Proactive mode** — when you've been idle or quiet for a while, the LLM decides whether it's a good moment to speak up and, if so, says one thing
+- **System notification listener** (Windows) — subscribes to the Windows Action Center; the LLM decides which notifications (QQ messages, important email) are worth surfacing and filters out ads / system noise. First activation triggers the Windows permission dialog
 - **Email** — IMAP read-only; ask "any new email?", "read the third one"
 - **Reminders** — "remind me to drink water in 5 minutes" sets an OS notification; persists across restarts
 - **Transparent window + click-through** — empty pixels around the character pass clicks to your desktop; the character body + chat panel intercept normally

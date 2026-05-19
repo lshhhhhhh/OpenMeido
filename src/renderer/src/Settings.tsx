@@ -860,11 +860,67 @@ function ProactiveTab({
             style={{ width: '100%', marginBottom: 12 }}
           />
 
-          <div style={{ fontSize: 11, color: '#888' }}>
+          <div style={{ fontSize: 11, color: '#888', marginBottom: 12 }}>
             模型可能仍然选择沉默（觉得不该打扰）。即使触发了也不一定开口。
           </div>
         </>
       )}
+
+      <div
+        style={{
+          borderTop: '1px solid rgba(255,255,255,0.1)',
+          paddingTop: 12,
+          marginTop: 8,
+        }}
+      >
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          <input
+            type="checkbox"
+            checked={draft.notifListener.enabled}
+            onChange={(e) =>
+              onChange({
+                ...draft,
+                notifListener: { ...draft.notifListener, enabled: e.target.checked },
+              })
+            }
+          />
+          <span>监听系统通知（Windows）</span>
+        </label>
+        <div style={{ fontSize: 11, color: '#888', marginBottom: 8, lineHeight: 1.5 }}>
+          开启后，OpenMeido 会订阅 Windows 通知中心，LLM 判断哪些值得提示给你（比如 QQ
+          私聊、邮件），过滤掉广告和系统消息。
+          <br />
+          <b>首次开启 Windows 会弹出系统授权框</b>——同意一次就行，以后不再问。
+        </div>
+        {draft.notifListener.enabled && (
+          <>
+            <Label>应用白名单（每行一个，子串匹配，空=接受所有，很吵慎用）</Label>
+            <textarea
+              value={draft.notifListener.allowlist.join('\n')}
+              onChange={(e) =>
+                onChange({
+                  ...draft,
+                  notifListener: {
+                    ...draft.notifListener,
+                    // Trim + drop empties so trailing newlines don't insert a blank entry
+                    // that matches every app (substring match against "" hits everything).
+                    allowlist: e.target.value
+                      .split('\n')
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  },
+                })
+              }
+              rows={5}
+              placeholder={'QQ\nWeChat\n微信\nOutlook'}
+              style={{ ...inputStyle, fontFamily: 'monospace', resize: 'vertical' }}
+            />
+            <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>
+              仅 Windows 10 1607+ 支持。Mac / Linux 上这个开关无效。
+            </div>
+          </>
+        )}
+      </div>
     </Section>
   )
 }
