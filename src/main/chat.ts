@@ -29,6 +29,11 @@ import { parseHTML } from 'linkedom'
 import type { ChatEvent, ChatEventBody, ChatImageAttachment } from '../shared/ipc.js'
 import { resolvePersona } from '../shared/config.js'
 import { formatLocalNow } from '../shared/time-format.js'
+import {
+  performanceModel,
+  visionModel,
+  resolveTemperature,
+} from '../shared/lightweight-models.js'
 import { getConfig, resolveApiKey } from './config.js'
 import { getMemoryService } from './memory-host.js'
 import { getMailService } from './mail-host.js'
@@ -789,9 +794,20 @@ export async function runChat(
     // Provider-tool result type (opaque to us). We just need to splat it
     // into the `tools` map when set; the SDK validates the shape internally.
     let googleSearchTool: unknown = null
+    // Three-tier model policy: fast for side tasks (greeting / classifier
+    // / etc., handled inside chat-host.runExtraction), perf for normal
+    // chat, vision when the user attached images this turn. We pick perf
+    // or vision automatically; cfg.backend.model is the manual-override
+    // escape hatch — when set, it wins (custom fine-tunes, local LM
+    // Studio model names, etc).
+    const visionRequired = images !== undefined && images.length > 0
+    const autoModelId = visionRequired
+      ? visionModel(cfg.backend.baseUrl) ?? performanceModel(cfg.backend.baseUrl)
+      : performanceModel(cfg.backend.baseUrl)
+    const modelId = cfg.backend.model || autoModelId || cfg.backend.model
     if (cfg.backend.baseUrl.includes('googleapis.com')) {
       const google = createGoogleGenerativeAI({ apiKey })
-      model = google(cfg.backend.model)
+      model = google(modelId)
       if (cfg.backend.searchEnabled) {
         googleSearchTool = google.tools.googleSearch({})
       }
@@ -871,7 +887,7 @@ export async function runChat(
       // Anthropic-compat, ...) 404s on /responses. Forcing .chat() costs us
       // GPT-5's built-in tools on real OpenAI but those aren't needed for
       // our flow (we BYO tools via `tools:` param either way).
-      model = openai.chat(cfg.backend.model)
+      model = openai.chat(modelId)
     }
     // Local time in a format the model can quote verbatim. ISO-UTC needs
     // timezone arithmetic — small/sleepy models skip that and just guess,
@@ -904,14 +920,13 @@ export async function runChat(
     // unreachable. mail-host.ts also reads OPENMEIDO_FAKE_MAIL; the two must
     // agree, hence the same env-var check here.
     const mailEnabled = cfg.mail.enabled || process.env.OPENMEIDO_FAKE_MAIL === '1'
+    // 0.6 is our desired temperature for chat (persona variety without
+    // wrecking tool-calling reliability). resolveTemperature applies any
+    // model-specific override: OpenAI gpt-5 reasoning → omit; Kimi → pin
+    // to 0.6 either way; everyone else → use 0.6 as desired.
     const result = streamText({
       model,
-      // 0.6 across all backends: enough persona variety for natural-feeling
-      // chat, but low enough that tool-calling stays reliable (high temps
-      // were causing wrong-tool-args and tool-name-as-text leaks). Kimi
-      // also requires exactly 0.6 — going higher would error on kimi-k2.6
-      // with "invalid temperature: only 0.6 is allowed for this model".
-      temperature: 0.6,
+      temperature: resolveTemperature(modelId, 0.6),
       // System prompt is intentionally short. Tool-specific guidance (when to
       // call, what to pass, what NOT to call) lives in each tool's
       // `description` field — the model sees that next to the schema, which

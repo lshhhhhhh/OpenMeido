@@ -15,7 +15,7 @@ import { generateText, type LanguageModel } from 'ai'
 
 import type { Config } from '../shared/config.js'
 import { getConfig, resolveApiKey, resolveBackendKey } from './config.js'
-import { lightweightModel } from '../shared/lightweight-models.js'
+import { lightweightModel, resolveTemperature } from '../shared/lightweight-models.js'
 
 export type LlmStatus = 'ok' | 'error' | 'idle'
 
@@ -110,9 +110,11 @@ export async function runExtraction(
     // .chat() — see chat.ts for why we don't use the default factory.
     model = openai.chat(modelId)
   }
-  // Kimi clamps to exactly 0.6 (HTTP 400 otherwise). For other providers,
-  // honor the caller's temperature or default to 0.2.
-  const temperature = isKimi ? 0.6 : (opts.temperature ?? 0.2)
+  // resolveTemperature handles per-model constraints (OpenAI gpt-5 omit,
+  // Kimi pin to 0.6, everyone else free). Caller's opts.temperature
+  // becomes the "desired" — used when the model has no constraint.
+  // Default 0.2 (structured / deterministic).
+  const temperature = resolveTemperature(modelId, opts.temperature ?? 0.2)
   const result = await generateText({ model, prompt, temperature })
   return result.text
 }
@@ -172,9 +174,10 @@ export async function runExtractionWithImages(
     })
     model = openai.chat(modelId)
   }
+  const temperature = resolveTemperature(modelId, opts.temperature ?? 0.2)
   const result = await generateText({
     model,
-    temperature: isKimi ? 0.6 : (opts.temperature ?? 0.2),
+    temperature,
     messages: [
       {
         role: 'user',

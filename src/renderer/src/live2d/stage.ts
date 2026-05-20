@@ -120,6 +120,15 @@ export class Live2DStage implements Live2DController {
   private pendingFocus: { x: number; y: number } | null = null
   private focusRafPending = false
 
+  // Pixel-perfect hit-test plumbing. We keep a tiny offscreen 2D canvas
+  // that mirrors the WebGL canvas; sampleAlpha() reads from it to decide
+  // whether the cursor is on an actually-rendered model pixel vs empty
+  // space inside the bounding rect. Refreshed on a PIXI render tick (the
+  // ticker callback below). Lazy-init on first sample to avoid paying the
+  // cost on stages that never get a click-through query.
+  private alphaMirror: HTMLCanvasElement | null = null
+  private alphaMirrorCtx: CanvasRenderingContext2D | null = null
+
   // Bound listener refs so removeEventListener can find them.
   private readonly onMouseMove = (e: MouseEvent): void => this.handleMouseMove(e)
   private readonly onMouseDown = (e: MouseEvent): void => this.handleMouseDown(e)
@@ -164,6 +173,36 @@ export class Live2DStage implements Live2DController {
     // integration becomes unstable and hair / accessories visibly oscillate
     // even when the head is still.
     this.app.ticker.maxFPS = 60
+    // Blit the GL canvas to the alpha mirror right after each PIXI render.
+    // UTILITY priority (-50) is lower than the LOW (-25) at which PIXI
+    // schedules its own render callback, so this fires AFTER render — at
+    // which point the GL drawing buffer is fresh and drawImage captures
+    // the just-rendered frame. Doing it lazily inside sampleAlpha would
+    // race the buffer's swap: without preserveDrawingBuffer:true, the
+    // backbuffer can be cleared between frames and drawImage would copy
+    // blank pixels.
+    //
+    // Cost: one drawImage per frame when alphaMirror exists. It's only
+    // created on the first sampleAlpha call, so stages that nobody ever
+    // hit-tests don't pay anything.
+    this.app.ticker.add(
+      () => {
+        if (!this.alphaMirrorCtx || !this.alphaMirror) return
+        const w = this.canvas.width
+        const h = this.canvas.height
+        if (w === 0 || h === 0) return
+        if (this.alphaMirror.width !== w) this.alphaMirror.width = w
+        if (this.alphaMirror.height !== h) this.alphaMirror.height = h
+        try {
+          this.alphaMirrorCtx.clearRect(0, 0, w, h)
+          this.alphaMirrorCtx.drawImage(this.canvas, 0, 0)
+        } catch {
+          /* canvas may be temporarily zero-sized during resize */
+        }
+      },
+      undefined,
+      PIXI.UPDATE_PRIORITY.UTILITY,
+    )
 
     this.resizeObserver = new ResizeObserver(() => this.fit())
     this.resizeObserver.observe(opts.host)
@@ -409,12 +448,57 @@ export class Live2DStage implements Live2DController {
    * Decide whether the cursor sits on the rendered model or on empty space.
    * Used by App.tsx to drive window-level click-through via setIgnoreMouseEvents.
    *
-   * Implementation: bbox + a small inward pad. Pixel-perfect alpha probing
-   * (gl.readPixels) needs preserveDrawingBuffer:true, which on Electron's
-   * transparent window kicks the compositor off its hardware alpha path —
-   * a bad trade. Bbox + 12% horizontal / 4% vertical inward pad gives a
-   * tight-enough region for click-through without that cost.
+   * Pixel-perfect via an offscreen 2D canvas that mirrors the GL canvas
+   * once per render tick. We can't use `gl.readPixels` directly because
+   * the WebGL context isn't created with preserveDrawingBuffer:true (and
+   * enabling that costs us the hardware alpha path on Electron's
+   * transparent window). Blitting GL → 2D canvas every tick is cheap
+   * (drawImage is a GPU copy on most drivers) and lets us sample the
+   * alpha at any cursor position via getImageData.
+   *
+   * Fallback when the offscreen buffer is empty (e.g. very early after
+   * mount): use a tight bbox so we don't spuriously report 'pixel' over
+   * empty hair / arms space.
    */
+  /**
+   * Read the alpha channel at (x, y) in the GL canvas's pixel space.
+   * Returns null when the mirror buffer isn't ready or the coordinate is
+   * out of range — callers fall back to a bbox heuristic in that case.
+   *
+   * Re-blits from the GL canvas only when the dirty flag is set (after
+   * each PIXI render tick), so consecutive samples within the same
+   * animation frame are essentially free.
+   */
+  private sampleAlpha(x: number, y: number): number | null {
+    if (this.destroyed) return null
+    if (this.canvas.width === 0 || this.canvas.height === 0) return null
+    if (x < 0 || x >= this.canvas.width || y < 0 || y >= this.canvas.height) {
+      return null
+    }
+    // Lazy-init the mirror canvas + 2D context the first time a sample
+    // is requested. The ticker callback above checks for this and starts
+    // blitting once it exists.
+    if (!this.alphaMirror) {
+      this.alphaMirror = document.createElement('canvas')
+      this.alphaMirror.width = this.canvas.width
+      this.alphaMirror.height = this.canvas.height
+      const ctx = this.alphaMirror.getContext('2d', { willReadFrequently: true })
+      if (!ctx) return null
+      this.alphaMirrorCtx = ctx
+      // First sample comes before any tick has populated the mirror —
+      // return null so the caller falls back to the bbox heuristic. Next
+      // sample (after next render tick) will have real data.
+      return null
+    }
+    if (!this.alphaMirrorCtx) return null
+    try {
+      const data = this.alphaMirrorCtx.getImageData(x, y, 1, 1).data
+      return data[3] ?? 0
+    } catch {
+      return null
+    }
+  }
+
   isOverModel(clientX: number, clientY: number): Coverage {
     const rect = this.canvas.getBoundingClientRect()
     if (
@@ -426,17 +510,32 @@ export class Live2DStage implements Live2DController {
       return 'outside'
     }
     if (!this.model) return 'transparent'
-    const x = clientX - rect.left
-    const y = clientY - rect.top
-    const b = this.model.getBounds()
-    const padX = b.width * 0.12
-    const padY = b.height * 0.04
-    const inside =
-      x >= b.x + padX &&
-      x <= b.x + b.width - padX &&
-      y >= b.y + padY &&
-      y <= b.y + b.height - padY
-    return inside ? 'pixel' : 'transparent'
+
+    // Sample alpha at the cursor from our offscreen mirror. Coordinates
+    // need to be in the canvas's RENDERED pixel space (which factors in
+    // devicePixelRatio because the canvas is autoDensity).
+    const x = (clientX - rect.left) * (this.canvas.width / rect.width)
+    const y = (clientY - rect.top) * (this.canvas.height / rect.height)
+    const alpha = this.sampleAlpha(Math.round(x), Math.round(y))
+    if (alpha === null) {
+      // Mirror not ready — fall back to a tight bbox so we don't
+      // accidentally report 'pixel' across the whole bounding rect.
+      const b = this.model.getBounds()
+      const px = clientX - rect.left
+      const py = clientY - rect.top
+      const padX = b.width * 0.22
+      const padY = b.height * 0.08
+      const inside =
+        px >= b.x + padX &&
+        px <= b.x + b.width - padX &&
+        py >= b.y + padY &&
+        py <= b.y + b.height - padY
+      return inside ? 'pixel' : 'transparent'
+    }
+    // Alpha threshold: 24/255 ≈ 9% opacity. Below that the model pixel is
+    // effectively invisible and clicks should pass through. Above, the
+    // user can plausibly see it and probably meant to click it.
+    return alpha > 24 ? 'pixel' : 'transparent'
   }
 
   info(): ReturnType<Live2DController['info']> {

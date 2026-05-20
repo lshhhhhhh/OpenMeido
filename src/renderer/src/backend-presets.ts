@@ -104,7 +104,7 @@ export const MODEL_SUGGESTIONS_BY_HOST: {
   },
   {
     match: (url) => url.includes('googleapis.com'),
-    models: ['gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview'],
+    models: ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview'],
   },
   {
     match: (url) => url.includes('anthropic.com'),
@@ -112,7 +112,10 @@ export const MODEL_SUGGESTIONS_BY_HOST: {
   },
   {
     match: (url) => url.includes('bigmodel.cn'),
-    models: ['glm-4.6v-flash', 'glm-4.6v', 'glm-5'],
+    // glm-4.6v-flash (free, fast, vision) → glm-4.6v (vision flagship) →
+    // glm-5.1 (text-only newest flagship; only safe when no images in
+    // the turn).
+    models: ['glm-4.6v-flash', 'glm-4.6v', 'glm-5.1'],
   },
   {
     // DeepSeek V4 — chat completions endpoint is TEXT-ONLY despite some

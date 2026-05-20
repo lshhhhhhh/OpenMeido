@@ -16,6 +16,7 @@ import {
   type ModelSidecar,
 } from '../../shared/live2d-models'
 import { BASE_URL_PRESETS, findPreset, suggestedModels } from './backend-presets'
+import { performanceModel } from '../../shared/lightweight-models'
 
 interface SettingsProps {
   initial: Config
@@ -62,6 +63,10 @@ export function Settings({ initial, onClose }: SettingsProps) {
   const [backendTestResult, setBackendTestResult] = useState<
     null | 'testing' | { ok: boolean; error?: string }
   >(null)
+  // Model picker hides by default — OpenMeido auto-picks the recommended
+  // model when the user clicks a backend preset chip. Power users (custom
+  // fine-tunes, beta versions, LM Studio local models) open this to switch.
+  const [showModelPicker, setShowModelPicker] = useState(false)
 
   // Esc closes.
   useEffect(() => {
@@ -221,6 +226,13 @@ export function Settings({ initial, onClose }: SettingsProps) {
                   //     NEW baseUrl's saved key (or empty) into the live field.
                   const newSuggestions = suggestedModels(p.url)
                   const stillValid = newSuggestions.includes(draft.backend.model)
+                  // Pick the perf-tier model as the new default (our
+                  // recommended choice for regular chat). Falls back to
+                  // the first suggestion if no perf tier is mapped.
+                  const newDefault =
+                    performanceModel(p.url) ??
+                    newSuggestions[0] ??
+                    draft.backend.model
                   const updatedMap = { ...draft.backend.apiKeys }
                   if (draft.backend.apiKey) {
                     updatedMap[draft.backend.baseUrl] = draft.backend.apiKey
@@ -230,7 +242,7 @@ export function Settings({ initial, onClose }: SettingsProps) {
                     backend: {
                       ...draft.backend,
                       baseUrl: p.url,
-                      model: stillValid ? draft.backend.model : newSuggestions[0] ?? draft.backend.model,
+                      model: stillValid ? draft.backend.model : newDefault,
                       apiKey: updatedMap[p.url] ?? '',
                       apiKeys: updatedMap,
                     },
@@ -320,39 +332,73 @@ export function Settings({ initial, onClose }: SettingsProps) {
             )
           })()}
 
-          <Label>Model</Label>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
-            {suggestedModels(draft.backend.baseUrl).map((m) => (
-              <button
-                key={m}
-                style={chipStyle(draft.backend.model === m)}
-                onClick={() => setDraft({ ...draft, backend: { ...draft.backend, model: m } })}
-              >
-                {m}
-              </button>
-            ))}
-            {/* Escape hatch — fine-tunes, new versions, local model names.
-                Uses the in-app prompt() (NOT window.prompt) — native dialogs
-                break input focus on transparent windows, see ./confirm.tsx. */}
+          {/* Model picker — collapsed by default. The recommended model is
+              auto-picked when the user clicks a backend preset (above), so
+              this section is for power users (fine-tunes, beta versions,
+              local LM Studio names). Header shows the current model + a
+              "换一个" link that toggles the picker chips below. */}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              marginTop: 8,
+              marginBottom: showModelPicker ? 6 : 0,
+            }}
+          >
+            <div style={{ fontSize: 12, color: '#bbb' }}>
+              当前模型：<code style={{ color: '#ddd' }}>{draft.backend.model}</code>
+            </div>
             <button
-              style={chipStyle(
-                !suggestedModels(draft.backend.baseUrl).includes(draft.backend.model),
-              )}
-              onClick={async () => {
-                const v = await prompt(
-                  '输入 model id（fine-tune / 新版本 / 本地模型）',
-                  draft.backend.model,
-                )
-                if (v !== null && v.trim()) {
-                  setDraft({ ...draft, backend: { ...draft.backend, model: v.trim() } })
-                }
+              onClick={() => setShowModelPicker((v) => !v)}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: '#7ab8ff',
+                cursor: 'pointer',
+                fontSize: 12,
+                padding: 0,
               }}
             >
-              {suggestedModels(draft.backend.baseUrl).includes(draft.backend.model)
-                ? '✏️ 其它'
-                : `✏️ ${draft.backend.model}`}
+              {showModelPicker ? '收起 ▴' : '换一个 ▾'}
             </button>
           </div>
+          {showModelPicker && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
+              {suggestedModels(draft.backend.baseUrl).map((m) => (
+                <button
+                  key={m}
+                  style={chipStyle(draft.backend.model === m)}
+                  onClick={() =>
+                    setDraft({ ...draft, backend: { ...draft.backend, model: m } })
+                  }
+                >
+                  {m}
+                </button>
+              ))}
+              {/* Escape hatch — fine-tunes, new versions, local model names.
+                  Uses the in-app prompt() (NOT window.prompt) — native dialogs
+                  break input focus on transparent windows, see ./confirm.tsx. */}
+              <button
+                style={chipStyle(
+                  !suggestedModels(draft.backend.baseUrl).includes(draft.backend.model),
+                )}
+                onClick={async () => {
+                  const v = await prompt(
+                    '输入 model id（fine-tune / 新版本 / 本地模型）',
+                    draft.backend.model,
+                  )
+                  if (v !== null && v.trim()) {
+                    setDraft({ ...draft, backend: { ...draft.backend, model: v.trim() } })
+                  }
+                }}
+              >
+                {suggestedModels(draft.backend.baseUrl).includes(draft.backend.model)
+                  ? '✏️ 其它'
+                  : `✏️ ${draft.backend.model}`}
+              </button>
+            </div>
+          )}
 
           {/* Connectivity test — hits /models, no tokens spent. On success
               the main process pushes 'chat:status: ok' which the title-bar

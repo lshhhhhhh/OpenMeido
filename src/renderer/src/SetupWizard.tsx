@@ -2,6 +2,7 @@ import { useState } from 'react'
 
 import type { Config } from '../../shared/config'
 import { BASE_URL_PRESETS, type BackendPreset, suggestedModels } from './backend-presets'
+import { performanceModel } from '../../shared/lightweight-models'
 
 interface Props {
   initial: Config
@@ -30,10 +31,14 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
   const [error, setError] = useState<string | null>(null)
 
   // Auto-derive a sensible default model for the picked provider. We always
-  // use the first entry — that's "cheap / free" by convention (e.g. glm-4.6v-
-  // flash, gpt-5.4-mini, deepseek-v4-flash). Power users tweak this later
-  // in Settings → AI.
-  const defaultModel = suggestedModels(preset.url)[0] ?? initial.backend.model
+  // Prefer the perf-tier default (the recommended chat model for that
+  // provider — gpt-5.5, glm-5.1, kimi-k2.6, etc). Falls back to the
+  // first suggestion (cheap/free tier) if no perf mapping exists for
+  // the host. Power users tweak later in Settings → AI.
+  const defaultModel =
+    performanceModel(preset.url) ??
+    suggestedModels(preset.url)[0] ??
+    initial.backend.model
 
   // Local-endpoint presets don't need a key. For those, we let Save fire even
   // with apiKey empty; for everything else we require non-empty.

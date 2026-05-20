@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 
-import { Live2DStage, type FitMode, type Live2DController } from './stage'
+import { Live2DStage, type FitMode, type Live2DController, type Coverage } from './stage'
 
 interface Live2DCanvasProps {
   modelPath: string
@@ -8,6 +8,15 @@ interface Live2DCanvasProps {
   portraitZoom?: number
   className?: string
   style?: React.CSSProperties
+  /**
+   * Called as the pointer moves over the canvas with the coverage state
+   * at the current position ('pixel' / 'transparent'). Drives window
+   * click-through in App.tsx. React's synthetic pointer events fire
+   * reliably here even when document-level mousemove doesn't (PIXI's
+   * own pointer system can swallow window-level handlers on transparent
+   * BrowserWindows).
+   */
+  onCoverageChange?: (cov: Coverage) => void
 }
 
 /**
@@ -22,7 +31,10 @@ interface Live2DCanvasProps {
  * canvas means each mount gets a brand-new GL context.
  */
 export const Live2DCanvas = forwardRef<Live2DController | null, Live2DCanvasProps>(
-  function Live2DCanvas({ modelPath, fitMode, portraitZoom, className, style }, ref) {
+  function Live2DCanvas(
+    { modelPath, fitMode, portraitZoom, className, style, onCoverageChange },
+    ref,
+  ) {
     const hostRef = useRef<HTMLDivElement>(null)
     const stageRef = useRef<Live2DStage | null>(null)
 
@@ -74,6 +86,16 @@ export const Live2DCanvas = forwardRef<Live2DController | null, Live2DCanvasProp
         ref={hostRef}
         className={className}
         style={{ width: '100%', height: '100%', overflow: 'hidden', ...style }}
+        onPointerMove={
+          onCoverageChange
+            ? (e) => {
+                const cov =
+                  stageRef.current?.isOverModel(e.clientX, e.clientY) ?? 'outside'
+                onCoverageChange(cov)
+              }
+            : undefined
+        }
+        onPointerLeave={onCoverageChange ? () => onCoverageChange('outside') : undefined}
       />
     )
   },

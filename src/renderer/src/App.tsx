@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ChatEvent, ChatImageAttachment } from '../../shared/ipc'
 import { resolvePersona } from '../../shared/config'
 import { Live2DCanvas } from './live2d/Live2DCanvas'
-import type { Live2DController } from './live2d/stage'
+import type { Live2DController, Coverage } from './live2d/stage'
 import { playMp3Base64, type PlayHandle } from './tts/player'
 import { Settings } from './Settings'
 import { SetupWizard } from './SetupWizard'
@@ -513,102 +513,43 @@ export default function App() {
   // Window-level click-through. Off by default; opt-in via
   // `cfg.window.clickThroughTransparent` in Settings → 窗口.
   //
-  // The earlier always-on version got stuck ON because the OS stopped
-  // delivering mousemove events to the window once setIgnoreMouseEvents
-  // was true, so we never knew when to flip it back off. The fix is two
-  // parts:
-  //   1. main process uses `forward: true` (mousemove still fires)
-  //   2. renderer re-evaluates on every mousemove + has safety nets:
-  //      - window 'mouseleave' force-OFF (mouse left entirely)
-  //      - feature toggled off in Settings force-OFF
-  //      - component unmount force-OFF
+  // Driven by Live2DCanvas's `onCoverageChange` (a React synthetic
+  // pointer handler on the canvas wrapper). We don't use document-level
+  // mousemove because PIXI's interactive system and transparent
+  // BrowserWindow quirks can swallow those before they reach a global
+  // listener. React's synthetic events on the canvas DOM element always
+  // fire reliably.
   //
-  // The decision per mousemove: ask the Live2D stage `isOverModel(x, y)`
-  //   → 'pixel'       → click-through OFF (clicks hit the maid)
-  //   → 'transparent' → click-through ON  (pass to desktop)
-  //   → 'outside'     → click-through OFF (cursor in a UI panel)
+  // States from the Live2D stage's coverage probe:
+  //   'pixel'       → cursor on the maid model → click-through OFF
+  //   'transparent' → cursor on empty canvas area → click-through ON
+  //   'outside'     → cursor past the canvas (or pointerLeave) → OFF
+  //                   (chat / sidebar / outside-window all map here)
   const ignoreMouseRef = useRef(false)
+  const setIgnore = (next: boolean): void => {
+    if (next === ignoreMouseRef.current) return
+    ignoreMouseRef.current = next
+    void window.api.window.setIgnoreMouseEvents(next)
+  }
+  // When the feature is disabled (or unmounting), force OFF so no stuck
+  // state can survive a toggle / restart.
   useEffect(() => {
-    const enabled = config?.window.clickThroughTransparent ?? false
-    if (!enabled) {
-      // Feature off → make sure click-through is OFF (in case it was ON
-      // from a prior session before the user disabled it).
-      if (ignoreMouseRef.current) {
-        ignoreMouseRef.current = false
-        void window.api.window.setIgnoreMouseEvents(false)
-      }
+    if (!config?.window.clickThroughTransparent) {
+      setIgnore(false)
+    }
+    return () => setIgnore(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config?.window.clickThroughTransparent])
+  // Hook used by the Live2DCanvas prop below. Wraps setIgnore so the
+  // toggle is respected even when Live2DCanvas keeps emitting coverage
+  // events after the user disables the feature.
+  const handleLive2DCoverage = (cov: Coverage): void => {
+    if (!config?.window.clickThroughTransparent) {
+      setIgnore(false)
       return
     }
-    console.log('[click-through] effect attached — listening for mousemove')
-    let raf = 0
-    let pendingX = 0
-    let pendingY = 0
-    let pending = false
-    let moveCount = 0
-    let lastLoggedCov = ''
-    const evaluate = (): void => {
-      pending = false
-      const ctrl = live2dRef.current
-      if (!ctrl) {
-        if (lastLoggedCov !== 'no-ctrl') {
-          console.log('[click-through] live2dRef is null — feature inactive')
-          lastLoggedCov = 'no-ctrl'
-        }
-        return
-      }
-      const cov = ctrl.isOverModel(pendingX, pendingY)
-      if (cov !== lastLoggedCov) {
-        console.log(
-          `[click-through] cursor (${pendingX},${pendingY}) → coverage=${cov}`,
-        )
-        lastLoggedCov = cov
-      }
-      const shouldIgnore = cov === 'transparent'
-      if (shouldIgnore !== ignoreMouseRef.current) {
-        ignoreMouseRef.current = shouldIgnore
-        console.log(`[click-through] setIgnoreMouseEvents(${shouldIgnore})`)
-        void window.api.window.setIgnoreMouseEvents(shouldIgnore)
-      }
-    }
-    const onMove = (ev: MouseEvent): void => {
-      moveCount++
-      // Log the first few raw events so we can confirm the listener is
-      // actually firing. After that we silence per-event logging (the
-      // throttled evaluate() still logs coverage transitions).
-      if (moveCount <= 3) {
-        console.log(`[click-through] mousemove #${moveCount} at (${ev.clientX},${ev.clientY})`)
-      }
-      pendingX = ev.clientX
-      pendingY = ev.clientY
-      if (!pending) {
-        pending = true
-        raf = requestAnimationFrame(evaluate)
-      }
-    }
-    const forceOff = (): void => {
-      if (ignoreMouseRef.current) {
-        ignoreMouseRef.current = false
-        void window.api.window.setIgnoreMouseEvents(false)
-      }
-    }
-    // Critical: use the capture phase. The Live2D PIXI canvas intercepts
-    // pointer events at the bubble phase, so a bubble-phase listener on
-    // window never fires while the cursor is over the canvas — which is
-    // exactly where click-through needs to make decisions. Attaching to
-    // document with capture:true gets us the event before any child
-    // handler can stop it.
-    document.addEventListener('mousemove', onMove, true)
-    document.addEventListener('mouseleave', forceOff, true)
-    return () => {
-      console.log('[click-through] effect detached')
-      document.removeEventListener('mousemove', onMove, true)
-      document.removeEventListener('mouseleave', forceOff, true)
-      if (raf) cancelAnimationFrame(raf)
-      // Always force-OFF on cleanup so a remount / config-toggle never
-      // leaves the window in a stuck-ignore state.
-      forceOff()
-    }
-  }, [config?.window.clickThroughTransparent])
+    setIgnore(cov === 'transparent')
+  }
 
   /**
    * Speak a chat message via TTS, driving the Live2D mouth from RMS.
@@ -896,6 +837,7 @@ export default function App() {
             modelPath={modelUrl}
             fitMode="portrait"
             portraitZoom={config.live2d.portraitZoom}
+            onCoverageChange={handleLive2DCoverage}
           />
         )}
         {/* Slice 2 test controls — floating top-left, no-drag so they're clickable. */}

@@ -99,6 +99,29 @@ export function buildEmotionPrompt(args: {
 }
 
 /**
+ * Pre-defined "angles" for the greeting prompt — a randomly-picked one
+ * gets injected each launch so the model sees a different stylistic
+ * instruction every time. Temperature alone doesn't produce variety
+ * because some providers (Kimi) PIN temperature to a fixed value and
+ * reject any override; this variation comes from the prompt instead,
+ * so it works regardless of temperature constraints.
+ *
+ * Angles deliberately push the model in different directions —
+ * observational, mood-driven, action-implying, etc. — so the resulting
+ * greetings don't collapse to the same template.
+ */
+const GREETING_ANGLES = [
+  '直接、一两句话就够，不要拖',
+  '从此刻你自己的心情切入（按角色合适的内在状态来——并不能看见外面或屏幕）',
+  '从时间段的氛围切入（你知道时间，但不知道天气）',
+  '像刚回过神来、刚醒过来、刚做完一件事过来一样的招呼',
+  '带一点撒娇 / 感叹 / 疑问的语气（按角色合适的方式）',
+  '问一句简单的，不是客服的"需要什么帮助"，而是真在意的（"今天还好吗"、"睡得怎么样"之类——按角色调）',
+  '语气比平时更安静 / 更慵懒一点',
+  '语气比平时更精神 / 更主动一点',
+]
+
+/**
  * Greeting fired once when the app boots. Goal: feel like the character
  * noticed the user arrived, not like a startup banner. Persona-neutral
  * about addressing — the persona's own system prompt owns 主人 / 哥哥 /
@@ -106,6 +129,11 @@ export function buildEmotionPrompt(args: {
  */
 export function buildGreetingPrompt(ctx: DailyPromptContext): string {
   const mood = timeOfDayMood()
+  // Random angle — picked fresh each call. Injects per-launch entropy
+  // through the PROMPT (not temperature) so we still get variety even on
+  // providers that clamp temperature (Kimi).
+  const angle =
+    GREETING_ANGLES[Math.floor(Math.random() * GREETING_ANGLES.length)]!
   const nameLine = ctx.userName
     ? `已知用户的名字是「${ctx.userName}」。可以自然地用名字称呼，让对话更亲切；当然，是否使用、怎么用，按你这个角色的习惯来。\n`
     : ''
@@ -138,12 +166,17 @@ export function buildGreetingPrompt(ctx: DailyPromptContext): string {
     nameLine +
     recentBlock +
     `\n` +
+    `# 这次开场的角度（随机选的，每次不一样——按这个角度发挥）\n` +
+    `${angle}\n` +
+    `\n` +
     `# 要求\n` +
     `- 1-2 句中文，自然、口语化，像跟熟人打招呼\n` +
     `- 用你这个角色一贯对用户的称呼（在系统提示里已经说明），不要换\n` +
     `- 不要 emoji、markdown、引号、括号注释\n` +
     `- 不要客服腔（"请问需要什么帮助"），不要承诺动作\n` +
     `- 不要提任何工具、功能、设置\n` +
+    `- 不要把"角度"这个提示词复述出来——按它的感觉去写就好\n` +
+    `- **绝对不要凭空编造外部事实**：你看不到屏幕、看不到主人长相、不知道天气、不知道用户身上发生的具体事。能说的只有：时间段（已经告诉你了）、你自己的心情和角色状态、过往对话里真实出现过的内容（如果上面有"上一次对话"区块）。\n` +
     `- 文字只输出招呼那句，前后不要解释`
   )
 }

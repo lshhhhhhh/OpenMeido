@@ -45,14 +45,24 @@ async function getRecentExchange(
 ): Promise<{ speaker: 'user' | 'assistant'; text: string }[]> {
   try {
     const episodes = await memory.listRecent(20)
-    // Filter to natural-text turns and pick the trailing 4 — enough for
-    // ~2 user-assistant pairs without bloating prompt context.
     const natural = episodes.filter(
       (e) =>
         (e.speaker === 'user' || e.speaker === 'assistant') &&
         e.text &&
         e.text.trim().length > 0,
     )
+    // Strip trailing assistant-only utterances — past greetings, goodbyes,
+    // and proactive remarks all persist as assistant episodes with no
+    // following user message, and they form the most-recent slice that
+    // dominates "recent exchange". Worse: showing the model its own
+    // previous greeting "你：主人，下午好" + persona prompt at temperature
+    // 0.7 produces near-verbatim repetition every launch. Drop those
+    // trailing one-sided utterances so what we hand the prompt is real
+    // back-and-forth context — or empty if there isn't any.
+    while (natural.length > 0 && natural[natural.length - 1]!.speaker === 'assistant') {
+      natural.pop()
+    }
+    // Then take the last few real turns. 4 = ~2 user-assistant pairs.
     const tail = natural.slice(-4)
     return tail.map((e) => ({
       speaker: e.speaker as 'user' | 'assistant',
@@ -123,9 +133,13 @@ export async function greetOnLaunch(): Promise<void> {
   try {
     const raw = await runExtraction(
       buildGreetingPrompt({ persona, now, userName, recentExchange }),
-      // Creative temperature — at 0.2 the maid would greet identically
-      // every launch given the same time-of-day + persona.
-      { temperature: 0.7 },
+      // High creative temperature — with the same persona + same userName
+      // + same time-of-day window, anything < 0.9 still produces a near-
+      // verbatim greeting from launch to launch. The other lever was the
+      // trailing-assistant strip in getRecentExchange (without that the
+      // model just copies its previous greeting verbatim regardless of
+      // temperature).
+      { temperature: 0.9 },
     )
     line = raw.trim()
   } catch (err) {

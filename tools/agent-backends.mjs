@@ -48,7 +48,9 @@ export function getAgentBackends() {
     // Use a non-thinking variant where available; the thinking variant
     // adds significant latency and hits our test stepCountIs budget more
     // often. glm-4.6-flash is the free tier and what most users hit.
-    const name = process.env.GLM_TEST_MODEL || 'glm-4.6'
+    // glm-5.1 is the current perf-tier default (text-only flagship) and
+    // passes the fake-mail-agent suite reliably; glm-4.6 was flaky.
+    const name = process.env.GLM_TEST_MODEL || 'glm-5.1'
     const openai = createOpenAI({
       baseURL: 'https://open.bigmodel.cn/api/paas/v4',
       apiKey: process.env.ZHIPU_API_KEY,
