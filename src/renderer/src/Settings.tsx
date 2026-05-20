@@ -807,11 +807,13 @@ export function Settings({ initial, onClose }: SettingsProps) {
         </Section>
         )}
 
-        {/* ---- Voice / TTS ---- */}
+        {/* ---- Voice (TTS + STT) ---- */}
         {activeTab === 'voice' && (
           <VoiceTab
             draft={draft.tts}
             onChange={(next) => setDraft({ ...draft, tts: next })}
+            stt={draft.stt}
+            onChangeStt={(next) => setDraft({ ...draft, stt: next })}
           />
         )}
 
@@ -1454,9 +1456,13 @@ function Live2DTab({
 function VoiceTab({
   draft,
   onChange,
+  stt,
+  onChangeStt,
 }: {
   draft: Config['tts']
   onChange: (next: Config['tts']) => void
+  stt: Config['stt']
+  onChangeStt: (next: Config['stt']) => void
 }) {
   const [voices, setVoices] = useState<
     { shortName: string; locale: string; gender: string; friendlyName: string }[]
@@ -1616,6 +1622,14 @@ function VoiceTab({
           </button>
         </>
       )}
+
+      {/* ===== Speech-to-text (STT) ===== */}
+      <div style={{ marginTop: 20, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: '#ddd', marginBottom: 8 }}>
+          🎤 语音输入
+        </div>
+        <SttPanel stt={stt} onChangeStt={onChangeStt} />
+      </div>
     </Section>
   )
 }
@@ -1769,6 +1783,204 @@ function SovitsFields({
  *      tap "下载模型" here to fetch it from hf-mirror.com (no GitHub-blocked
  *      hosts) and switch into full mode without restarting.
  */
+/**
+ * STT panel for the Voice tab. Mirrors EmbedModelPanel — Whisper model
+ * (~74-130 MB depending on Whisper's actual file count) is downloaded on
+ * first use OR via the button here. Plus an enabled toggle (hide mic
+ * button entirely) and a cleanup toggle (LLM post-processes raw Whisper
+ * output to fix homophone errors + missing punctuation).
+ */
+function SttPanel({
+  stt,
+  onChangeStt,
+}: {
+  stt: Config['stt']
+  onChangeStt: (next: Config['stt']) => void
+}): React.ReactElement {
+  const [s, setS] = useState<{
+    modelPresent: boolean
+    inProgress: boolean
+    totalBytes: number
+    receivedBytes: number
+    currentFile: string | null
+  } | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [mics, setMics] = useState<MediaDeviceInfo[]>([])
+
+  async function refresh(): Promise<void> {
+    setS(await window.api.stt.status())
+  }
+  /**
+   * Enumerate mic devices. Device labels are only populated after the
+   * user has granted mic permission at least once — before that we'd
+   * get a list of devices with empty labels. We trigger a permission
+   * request via getUserMedia (immediately released) so the second
+   * enumerateDevices() call has labels we can show.
+   */
+  async function refreshMics(): Promise<void> {
+    try {
+      const probe = await navigator.mediaDevices.getUserMedia({ audio: true })
+      probe.getTracks().forEach((t) => t.stop())
+    } catch {
+      // Permission denied. We can still enumerate, but labels will be
+      // generic ("Default", "Communications", etc.).
+    }
+    const devices = await navigator.mediaDevices.enumerateDevices()
+    setMics(devices.filter((d) => d.kind === 'audioinput'))
+  }
+  useEffect(() => {
+    void refresh()
+    void refreshMics()
+    const offP = window.api.stt.onProgress((p) => {
+      setS((prev) => (prev ? { ...prev, ...p } : prev))
+    })
+    const offC = window.api.stt.onComplete((r) => {
+      if (!r.ok) setErr(r.error)
+      else setErr(null)
+      void refresh()
+    })
+    return () => {
+      offP()
+      offC()
+    }
+  }, [])
+
+  if (!s) return <></>
+  const pct =
+    s.totalBytes > 0 ? Math.min(100, Math.round((s.receivedBytes / s.totalBytes) * 100)) : 0
+  const mb = (n: number): string => (n / 1024 / 1024).toFixed(1)
+
+  return (
+    <>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <input
+          type="checkbox"
+          checked={stt.enabled}
+          onChange={(e) => onChangeStt({ ...stt, enabled: e.target.checked })}
+        />
+        <span>启用语音输入（聊天框旁显示麦克风按钮）</span>
+      </label>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <input
+          type="checkbox"
+          checked={stt.cleanup}
+          onChange={(e) => onChangeStt({ ...stt, cleanup: e.target.checked })}
+          disabled={!stt.enabled}
+        />
+        <span>LLM 后处理（修正同音字 / 错字 / 标点；增加约 0.5 秒延迟）</span>
+      </label>
+
+      {/* Mic device picker. Empty value = OS default (the safest choice
+          for most users). Browser only populates device labels AFTER
+          the user has granted mic permission once; pressing 刷新 re-
+          enumerates if they plugged something in. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, marginBottom: 6 }}>
+        <span style={{ fontSize: 12, color: '#bbb', minWidth: 64 }}>麦克风：</span>
+        <select
+          value={stt.deviceId}
+          onChange={(e) => onChangeStt({ ...stt, deviceId: e.target.value })}
+          disabled={!stt.enabled}
+          style={{
+            flex: 1,
+            padding: '3px 6px',
+            background: '#2a2d36',
+            color: '#eee',
+            border: '1px solid #3a3e48',
+            borderRadius: 4,
+            fontSize: 12,
+          }}
+        >
+          <option value="">系统默认</option>
+          {mics.map((m, i) => (
+            <option key={m.deviceId || i} value={m.deviceId}>
+              {m.label || `输入设备 ${i + 1}`}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={() => void refreshMics()}
+          disabled={!stt.enabled}
+          style={btnStyle('subtle')}
+          title="重新枚举（插入新设备后用）"
+        >
+          刷新
+        </button>
+      </div>
+
+      <div
+        style={{
+          marginTop: 8,
+          padding: '8px 10px',
+          background: 'rgba(255,255,255,0.04)',
+          border: '1px solid rgba(255,255,255,0.08)',
+          borderRadius: 4,
+          fontSize: 12,
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ color: '#ddd', fontWeight: 500 }}>
+            Whisper 模型 ·{' '}
+            {s.modelPresent ? (
+              <span style={{ color: '#8c8' }}>已就绪</span>
+            ) : (
+              <span style={{ color: '#fc8' }}>未下载</span>
+            )}
+          </span>
+          {!s.inProgress && !s.modelPresent && (
+            <button
+              onClick={() => {
+                setErr(null)
+                void window.api.stt.download()
+              }}
+              style={btnStyle('secondary')}
+            >
+              下载语音模型 (~120MB)
+            </button>
+          )}
+        </div>
+        {s.inProgress && (
+          <div style={{ marginTop: 6 }}>
+            <div
+              style={{
+                width: '100%',
+                height: 6,
+                background: 'rgba(255,255,255,0.08)',
+                borderRadius: 3,
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  width: `${pct}%`,
+                  height: '100%',
+                  background: '#5b8def',
+                  transition: 'width 100ms linear',
+                }}
+              />
+            </div>
+            <div style={{ marginTop: 4, color: '#aaa', fontSize: 11 }}>
+              {pct}% · {mb(s.receivedBytes)} / {mb(s.totalBytes)} MB
+              {s.currentFile && ` · ${s.currentFile}`}
+            </div>
+          </div>
+        )}
+        {!s.inProgress && !s.modelPresent && (
+          <div style={{ marginTop: 6, color: '#999', fontSize: 11, lineHeight: 1.5 }}>
+            点麦克风录音前需要下载 Whisper-base 模型。模型从{' '}
+            <span style={{ color: '#aac' }}>hf-mirror.com</span>{' '}
+            获取（国内可直连），完成后即时生效。
+          </div>
+        )}
+        {err && (
+          <div style={{ marginTop: 6, color: '#f88', fontSize: 11 }}>
+            下载失败：{err}
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
 function EmbedModelPanel(): React.ReactElement {
   const [s, setS] = useState<{
     naive: boolean

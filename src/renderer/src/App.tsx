@@ -45,6 +45,42 @@ function shortVoiceLabel(voice: string): string {
   return m?.[1] ?? voice
 }
 
+/**
+ * Decode an audio blob (MediaRecorder output — typically webm/opus) to
+ * 16 kHz mono Float32 PCM, which is what our STT pipeline expects.
+ *
+ * Step 1: decodeAudioData → AudioBuffer at file's native rate (usually
+ * 48 kHz for mic capture).
+ * Step 2: OfflineAudioContext renders that buffer at the target 16 kHz,
+ * with the destination configured as 1 channel so we get mono out
+ * automatically (stereo gets averaged by the OfflineAudioContext).
+ */
+async function decodeBlobTo16kMono(blob: Blob): Promise<Float32Array> {
+  const TARGET_RATE = 16_000
+  const arrayBuffer = await blob.arrayBuffer()
+  // Use a one-shot AudioContext at default rate to decode the file.
+  // We close it immediately to free the audio device.
+  const tempCtx = new AudioContext()
+  let buffer: AudioBuffer
+  try {
+    buffer = await tempCtx.decodeAudioData(arrayBuffer)
+  } finally {
+    await tempCtx.close()
+  }
+  // Resample + downmix via OfflineAudioContext at the target rate. The
+  // constructor's first arg = output channel count (1 = mono).
+  const targetLen = Math.max(1, Math.ceil(buffer.duration * TARGET_RATE))
+  const offline = new OfflineAudioContext(1, targetLen, TARGET_RATE)
+  const src = offline.createBufferSource()
+  src.buffer = buffer
+  src.connect(offline.destination)
+  src.start(0)
+  const rendered = await offline.startRendering()
+  // Copy out of the audio buffer into a fresh Float32Array so callers
+  // can keep it past the rendering context's lifetime.
+  return new Float32Array(rendered.getChannelData(0))
+}
+
 export default function App() {
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -66,6 +102,16 @@ export default function App() {
   // Pending attachments for the NEXT send. Cleared after send fires.
   const [attachments, setAttachments] = useState<ChatImageAttachment[]>([])
   const [capturing, setCapturing] = useState(false)
+  // Voice-input state machine. idle → recording → transcribing → idle.
+  // recording uses MediaRecorder + AudioContext to capture the user's mic;
+  // transcribing decodes the blob, resamples to 16 kHz mono Float32, and
+  // ships to main where Whisper produces the transcript.
+  const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>(
+    'idle',
+  )
+  const voiceRecorderRef = useRef<MediaRecorder | null>(null)
+  const voiceChunksRef = useRef<Blob[]>([])
+  const voiceStreamRef = useRef<MediaStream | null>(null)
   // First-run setup wizard. Three states:
   //   'checking'  — running an initial chat.test to decide whether we need it
   //   'open'      — show the wizard (no working key found)
@@ -672,6 +718,78 @@ export default function App() {
   }
 
 
+  /**
+   * Voice input: toggle between idle / recording. When stopping, we
+   * decode the MediaRecorder blob via AudioContext, resample to 16 kHz
+   * mono Float32, ship to main for Whisper transcription, and put the
+   * result into the chat input box (user can edit before Send).
+   */
+  async function toggleVoiceInput(): Promise<void> {
+    if (voiceState === 'transcribing') return // ignore mid-transcribe clicks
+    if (voiceState === 'recording') {
+      // Stop. The dataavailable handler set up at start time will fire
+      // ondataavailable, then the onstop handler kicks off transcription.
+      voiceRecorderRef.current?.stop()
+      return
+    }
+    // Start.
+    try {
+      // Honor the user's mic preference if set. Empty string = OS default,
+      // so we send `audio: true` rather than a deviceId constraint with
+      // an empty value (which getUserMedia treats as "match nothing").
+      const deviceId = config?.stt.deviceId
+      const audioConstraint: MediaTrackConstraints | true = deviceId
+        ? { deviceId: { exact: deviceId } }
+        : true
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint })
+      voiceStreamRef.current = stream
+      voiceChunksRef.current = []
+      const rec = new MediaRecorder(stream)
+      voiceRecorderRef.current = rec
+      rec.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) voiceChunksRef.current.push(ev.data)
+      }
+      rec.onstop = async () => {
+        // Release the mic immediately — keeping it open after stop shows
+        // the OS recording indicator longer than necessary.
+        voiceStreamRef.current?.getTracks().forEach((t) => t.stop())
+        voiceStreamRef.current = null
+        const blob = new Blob(voiceChunksRef.current, { type: rec.mimeType })
+        voiceChunksRef.current = []
+        if (blob.size === 0) {
+          setVoiceState('idle')
+          return
+        }
+        setVoiceState('transcribing')
+        try {
+          const samples = await decodeBlobTo16kMono(blob)
+          if (samples.length < 800) {
+            // <50ms of audio — almost certainly a misfire, not a real
+            // utterance. Skip without flashing an error.
+            setVoiceState('idle')
+            return
+          }
+          const result = await window.api.stt.transcribe(samples)
+          if (result.ok) {
+            const text = result.text.trim()
+            if (text) setInput((prev) => (prev ? prev + ' ' + text : text))
+          } else {
+            console.warn('[stt] transcribe failed:', result.error)
+          }
+        } catch (err) {
+          console.warn('[stt] decode/transcribe error:', err)
+        } finally {
+          setVoiceState('idle')
+        }
+      }
+      rec.start()
+      setVoiceState('recording')
+    } catch (err) {
+      console.warn('[stt] mic permission denied or capture failed:', err)
+      setVoiceState('idle')
+    }
+  }
+
   /** Capture every connected screen at once — let the model decide which is relevant. */
   async function captureScreen(): Promise<void> {
     if (capturing || busy) return
@@ -1133,6 +1251,61 @@ export default function App() {
                 </svg>
               )}
             </button>
+            {config?.stt.enabled !== false && (
+            <button
+              onClick={toggleVoiceInput}
+              disabled={voiceState === 'transcribing'}
+              title={
+                voiceState === 'recording'
+                  ? '停止录音并转成文字'
+                  : voiceState === 'transcribing'
+                    ? '转写中…'
+                    : '按住说话（再点一次停止）'
+              }
+              style={{
+                ...noDragRegion,
+                padding: '4px 8px',
+                width: 32,
+                background:
+                  voiceState === 'recording'
+                    ? 'rgba(255, 80, 80, 0.25)'
+                    : voiceState === 'transcribing'
+                      ? 'rgba(120, 160, 255, 0.25)'
+                      : undefined,
+                color: voiceState === 'recording' ? '#c00' : '#555',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              {voiceState === 'transcribing' ? (
+                '…'
+              ) : voiceState === 'recording' ? (
+                /* solid red dot */
+                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
+                  <circle cx="7" cy="7" r="6" fill="currentColor" />
+                </svg>
+              ) : (
+                /* mic outline */
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                >
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </svg>
+              )}
+            </button>
+            )}
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -1154,11 +1327,15 @@ export default function App() {
                 }
               }}
               placeholder={
-                busy
-                  ? '女仆思考中…可以先写下一句'
-                  : attachments.length
-                  ? '可以加一句问她（也可以直接 Send）'
-                  : '试试：提醒我五分钟后喝水'
+                voiceState === 'recording'
+                  ? '🎤 录音中…再点麦克风结束'
+                  : voiceState === 'transcribing'
+                    ? '正在转成文字…'
+                    : busy
+                      ? '女仆思考中…可以先写下一句'
+                      : attachments.length
+                      ? '可以加一句问她（也可以直接 Send）'
+                      : ''
               }
               style={{ flex: 1, padding: '6px 10px', fontSize: 13 }}
             />

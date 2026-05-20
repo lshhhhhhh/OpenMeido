@@ -1,6 +1,6 @@
 {
   "name": "openmeido",
-  "version": "0.0.20",
+  "version": "0.0.21",
   "description": "Productivity assistant + Live2D companion for non-programmers",
   "author": "lsh <laishaoheng1996@gmail.com>",
   "main": "./out/main/index.js",
@@ -24,6 +24,7 @@
     "experiment:glm-id": "node --env-file=.env --import tsx tools/experiment-glm-id.mjs",
     "test:search-agent": "node --env-file=.env --import tsx tools/smoke-search-agent.mjs",
     "test:emotion-classifier": "node --env-file=.env --import tsx tools/smoke-emotion-classifier.mjs",
+    "test:stt-sovits": "electron tools/smoke-stt-sovits.mjs",
     "test:mail-parent": "node --import tsx tools/smoke-mail-parent.mjs",
     "test:fake-mail": "node --import tsx tools/smoke-fake-mail.mjs",
     "test:fake-mail-agent": "node --env-file=.env --import tsx tools/smoke-fake-mail-agent.mjs",

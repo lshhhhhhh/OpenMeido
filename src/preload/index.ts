@@ -162,6 +162,83 @@ const api = {
     },
   },
 
+  stt: {
+    /**
+     * Transcribe pre-decoded audio samples to text via local Whisper.
+     * Caller must supply Float32 PCM at 16 kHz mono (the renderer
+     * captures via MediaRecorder → AudioContext.decodeAudioData →
+     * resamples to 16 kHz before sending). First call lazy-loads the
+     * Whisper model (~74 MB, cached in userData/hf-cache thereafter).
+     */
+    transcribe(samples: Float32Array): Promise<
+      | { ok: true; text: string; rawText: string }
+      | { ok: false; error: string }
+    > {
+      return ipcRenderer.invoke('stt:transcribe', { samples }) as Promise<
+        | { ok: true; text: string; rawText: string }
+        | { ok: false; error: string }
+      >
+    },
+    /** Whether the whisper model files are on disk + whether a download
+     *  is currently in flight. Mirrors the embed model panel's shape. */
+    status(): Promise<{
+      modelPresent: boolean
+      inProgress: boolean
+      totalBytes: number
+      receivedBytes: number
+      currentFile: string | null
+    }> {
+      return ipcRenderer.invoke('stt:status') as Promise<{
+        modelPresent: boolean
+        inProgress: boolean
+        totalBytes: number
+        receivedBytes: number
+        currentFile: string | null
+      }>
+    },
+    /** Kick off the model download. Resolves when finished (success or
+     *  failure). The progress events fire while it runs. */
+    download(): Promise<{ ok: true } | { ok: false; error: string }> {
+      return ipcRenderer.invoke('stt:downloadModel') as Promise<
+        { ok: true } | { ok: false; error: string }
+      >
+    },
+    /** Fires on each chunk during download. */
+    onProgress(
+      cb: (p: {
+        inProgress: boolean
+        totalBytes: number
+        receivedBytes: number
+        currentFile: string | null
+      }) => void,
+    ): () => void {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        p: {
+          inProgress: boolean
+          totalBytes: number
+          receivedBytes: number
+          currentFile: string | null
+        },
+      ): void => cb(p)
+      ipcRenderer.on('stt:downloadProgress', handler)
+      return () => {
+        ipcRenderer.off('stt:downloadProgress', handler)
+      }
+    },
+    /** Fires once when the download finishes (ok=true) or errors out. */
+    onComplete(cb: (r: { ok: true } | { ok: false; error: string }) => void): () => void {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        r: { ok: true } | { ok: false; error: string },
+      ): void => cb(r)
+      ipcRenderer.on('stt:downloadComplete', handler)
+      return () => {
+        ipcRenderer.off('stt:downloadComplete', handler)
+      }
+    },
+  },
+
   screen: {
     /**
      * Capture EVERY connected screen as a list of base64 PNGs. Single-monitor

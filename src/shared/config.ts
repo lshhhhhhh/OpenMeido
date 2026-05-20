@@ -331,6 +331,41 @@ export const configSchema = z.object({
         .default({}),
     })
     .default({}),
+  /**
+   * Speech-to-text settings. Local Whisper via transformers.js — model
+   * lazy-downloads on first use, cached in userData/hf-cache like the
+   * embedding model. ~74 MB for whisper-base.
+   */
+  stt: z
+    .object({
+      /** Master switch. When false, the mic button is hidden. */
+      enabled: z.boolean().default(true),
+      /**
+       * After Whisper transcribes, optionally pipe the raw transcript
+       * through the lightweight LLM to fix homophone errors, missing
+       * punctuation, and traditional/simplified mixups (Whisper-base on
+       * Chinese makes ~10% character-level errors out of distribution).
+       * Adds ~300-800ms latency per voice input.
+       */
+      cleanup: z.boolean().default(true),
+      /**
+       * Whisper language hint. "chinese" / "english" / "japanese" etc.
+       * Whisper recognizes these by full English name (its tokenizer
+       * convention). Setting wrong hurts accuracy; leaving as "chinese"
+       * is fine for the typical zh-CN user.
+       */
+      language: z.string().default('chinese'),
+      /**
+       * Specific microphone device to record from. Empty string = OS
+       * default input. When set, the renderer passes
+       * { deviceId: { exact: ... } } to getUserMedia so the user's
+       * choice is locked in across launches. Device ids are stable per
+       * browser profile but change across machines, so this is
+       * intentionally not synced between installs.
+       */
+      deviceId: z.string().default(''),
+    })
+    .default({}),
   mail: z
     .object({
       enabled: z.boolean().default(false),

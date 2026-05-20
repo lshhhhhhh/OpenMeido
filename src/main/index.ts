@@ -25,6 +25,11 @@ import { readDemos, getDemosPath } from './demos-host.js'
 import { captureAllScreensPng } from './screen-host.js'
 import { listVoices as ttsListVoices, synthesize as ttsSynthesize } from './tts-host.js'
 import {
+  transcribeSamples as sttTranscribe,
+  getSttStatus,
+  startSttDownload,
+} from './stt-host.js'
+import {
   initProactive,
   noteAssistantActivity,
   noteUserActivity,
@@ -245,6 +250,75 @@ ipcMain.handle(
   },
 )
 
+// Speech-to-text. Renderer sends a Float32Array of 16-kHz mono samples
+// (it captures via MediaRecorder + decodes via AudioContext, resamples
+// to 16 kHz). Main returns the Whisper transcript. Lazy-loads + caches
+// the model on first call.
+//
+// When cfg.stt.cleanup is on (default), the raw Whisper output is
+// piped through the lightweight LLM tier to fix homophone errors,
+// missing punctuation, and traditional/simplified mixups. Adds
+// 300-800ms; users who want faster STT can disable in Settings.
+ipcMain.handle('stt:transcribe', async (_event, payload: { samples: unknown }) => {
+  try {
+    const cfg = getConfig()
+    // IPC may deliver typed arrays as Buffer / plain object depending on
+    // contextBridge serialization. Normalize so transformers.js gets a
+    // real Float32Array.
+    let samples: Float32Array
+    const raw = payload.samples
+    if (raw instanceof Float32Array) {
+      samples = raw
+    } else if (ArrayBuffer.isView(raw)) {
+      const v = raw as ArrayBufferView
+      samples = new Float32Array(v.buffer, v.byteOffset, v.byteLength / 4)
+    } else if (raw instanceof ArrayBuffer) {
+      samples = new Float32Array(raw)
+    } else {
+      // Last-ditch: maybe it came across as a plain object with numeric
+      // keys (rare under structured clone, but possible with older
+      // electron / contextBridge configs).
+      samples = Float32Array.from(raw as ArrayLike<number>)
+    }
+    const rawTranscript = await sttTranscribe(samples, undefined, cfg.stt.language)
+    if (!cfg.stt.cleanup || rawTranscript.length < 3) {
+      return { ok: true as const, text: rawTranscript, rawText: rawTranscript }
+    }
+    // Cleanup prompt — strict: don't paraphrase, just fix obvious STT
+    // mistakes. Falls back to raw on any LLM failure.
+    const prompt =
+      `[STT 修正模式] 用户语音被识别成了下面这句话：\n\n` +
+      `「${rawTranscript}」\n\n` +
+      `请修正其中可能的同音字、错字、缺失或多余的标点。` +
+      `**保持原意，不要增改任何信息**——如果原文已经是对的，原样输出。` +
+      `**只输出修正后的文本本身**，不要加引号、解释、前缀。`
+    let cleaned = rawTranscript
+    try {
+      // Low temperature for fidelity. 0.0–0.2 range; 0.1 to allow a
+      // little freedom on ambiguous spans (homophone choices).
+      cleaned = (await runExtraction(prompt, { temperature: 0.1 })).trim()
+      // Sanity guards: if the cleanup mangled length wildly, distrust
+      // it. STT cleanup should never balloon or shrink the text by
+      // more than ~50% — that's the model "improving" instead of
+      // fixing. Fall back to raw.
+      if (
+        cleaned.length < rawTranscript.length * 0.5 ||
+        cleaned.length > rawTranscript.length * 1.8
+      ) {
+        console.warn(
+          `[stt] cleanup length swing rejected: raw=${rawTranscript.length} cleaned=${cleaned.length}; using raw`,
+        )
+        cleaned = rawTranscript
+      }
+    } catch (err) {
+      console.warn('[stt] cleanup LLM call failed, using raw:', err)
+    }
+    return { ok: true as const, text: cleaned, rawText: rawTranscript }
+  } catch (err) {
+    return { ok: false as const, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
 ipcMain.handle('screen:capture', async () => {
   const all = await captureAllScreensPng()
   // Each entry is a base64 PNG — JSON-serialisable + small enough for IPC.
@@ -449,6 +523,12 @@ ipcMain.handle('embed:status', () => ({
   ...getDownloadState(),
 }))
 ipcMain.handle('embed:download', () => startEmbedDownload())
+
+// STT model status + download — same shape as embed:* so the Settings
+// UI can share a panel pattern. Status reports whether the whisper
+// model files are on disk + whether a download is currently in flight.
+ipcMain.handle('stt:status', () => getSttStatus())
+ipcMain.handle('stt:downloadModel', () => startSttDownload())
 
 // ---- Sidebar window-resize ----
 
