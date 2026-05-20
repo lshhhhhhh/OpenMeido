@@ -9,11 +9,12 @@
  */
 
 import type { MailAdapter } from './adapter.js'
-import type { MailMessage, MailSummary, ListInboxOptions } from './types.js'
+import type { MailMessage, MailSummary, ListInboxOptions, MailFolder } from './types.js'
 
 export interface MailService {
   listInbox(opts: ListInboxOptions): Promise<MailSummary[]>
   readMessage(id: string): Promise<MailMessage | null>
+  listFolders(): Promise<MailFolder[]>
   testConnection(): Promise<{ ok: true } | { ok: false; error: string }>
 }
 
@@ -28,6 +29,10 @@ export function createMailService(adapter: MailAdapter): MailService {
 
     readMessage(id) {
       return adapter.readMessage(id)
+    },
+
+    listFolders() {
+      return adapter.listFolders()
     },
 
     testConnection() {

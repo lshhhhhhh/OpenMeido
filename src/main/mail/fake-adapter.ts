@@ -389,6 +389,19 @@ export function createFakeMailAdapter(): MailAdapter {
       return fullMessageOf(m, true)
     },
 
+    async listFolders() {
+      // Synthetic folder set — mirrors what a 163 / Outlook user might
+      // see. Enough variety for the model to practice picking the right
+      // one when the user says "看看工作文件夹的邮件".
+      return [
+        { path: 'INBOX', name: 'INBOX', isInbox: true, isSpecialUse: false },
+        { path: 'Sent', name: 'Sent', isInbox: false, isSpecialUse: true },
+        { path: '工作', name: '工作', isInbox: false, isSpecialUse: false },
+        { path: '重要', name: '重要', isInbox: false, isSpecialUse: false },
+        { path: '账单', name: '账单', isInbox: false, isSpecialUse: false },
+      ]
+    },
+
     async testConnection() {
       return { ok: true }
     },

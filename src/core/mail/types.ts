@@ -80,4 +80,28 @@ export interface ListInboxOptions {
    * lookup is an extra IMAP search + envelope fetch. Set false to skip.
    */
   includeParents?: boolean
+  /**
+   * IMAP folder to read from. Empty / undefined → INBOX. Must be a real
+   * path returned by listFolders() — adapters validate and reject
+   * unknown names rather than silently falling back, because user-facing
+   * folder names (e.g. "工作") need an explicit lookup step.
+   */
+  folder?: string
+}
+
+/** Result of listFolders() — minimal info the model needs to pick one. */
+export interface MailFolder {
+  /** IMAP path the server uses, exactly as it must be passed to listInbox. */
+  path: string
+  /** Human-readable display name (last path segment, decoded from
+   *  modified-UTF7 when relevant). For Gmail this matches `path` minus
+   *  the `[Gmail]/` prefix; for 163 / Outlook / etc. it's the leaf. */
+  name: string
+  /** True for INBOX. Helps the model decide when it's looking at the
+   *  default vs a user-created folder. */
+  isInbox: boolean
+  /** True when the IMAP server flags this as a special-use folder
+   *  (\Sent, \Drafts, \Junk, \Trash, \Archive, \All). Most user-created
+   *  folders are false. */
+  isSpecialUse: boolean
 }

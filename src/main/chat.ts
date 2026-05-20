@@ -241,9 +241,32 @@ const markTaskDone = tool({
   },
 })
 
+const listMailFolders = tool({
+  description:
+    '列出用户邮箱里所有的文件夹（IMAP folders）。当用户提到"工作文件夹"、' +
+    '"账单文件夹"、"看看 X 那个文件夹里的邮件"这种引用了一个非默认文件夹的请求时，' +
+    '先调用本工具拿到全部文件夹的 path，再把匹配的 path 传给 listRecentEmails(folder=...)。\n' +
+    '返回 items[]，每项 { path, name, isInbox, isSpecialUse }。' +
+    '`path` 是要传给 listRecentEmails 的精确字符串；`name` 是中文/英文显示名，' +
+    '用来匹配用户的口语化称呼。',
+  inputSchema: z.object({}),
+  execute: async () => {
+    const mail = getMailService()
+    if (!mail) return { error: '邮箱未配置或未启用，请在设置里开启邮箱并填写 IMAP 信息。' }
+    try {
+      const items = await mail.listFolders()
+      return { items }
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
+  },
+})
+
 const listRecentEmails = tool({
   description:
     '查看用户邮箱里最近的邮件。用户提到"我有没有新邮件"、"最近邮件"、"某某发邮件了吗"时调用。\n' +
+    '默认读 INBOX。**如果用户指定了文件夹**（"看看工作文件夹里的"、"账单那个文件夹有什么新东西"等），' +
+    '先调 listMailFolders 拿到 path，再把匹配的 path 作为 folder 参数传进来。\n' +
     '返回 items[] 的每一项是邮件摘要（id、from、subject、snippet、ts、unread）；' +
     '**如果某条邮件是回复某封信，items[i].parent 会包含用户当初发出的那封原信的摘要**' +
     '（同样的字段），用来生成"对方说了什么 + 你之前说了什么"的成对总结。' +
@@ -252,7 +275,7 @@ const listRecentEmails = tool({
   // OpenAI's strict tool schema requires every property in `properties` to
   // also appear in `required`. Zod .default() / .optional() produce
   // properties that are NOT required, and the API rejects the whole tool.
-  // So both fields are mandatory here; the description tells the model
+  // So all fields are mandatory here; the description tells the model
   // sensible values to use when the user didn't specify.
   inputSchema: z.object({
     limit: z
@@ -268,13 +291,24 @@ const listRecentEmails = tool({
     onlyUnread: z
       .boolean()
       .describe('If true, only return unread messages. Use false unless the user asks for unread only.'),
+    folder: z
+      .string()
+      .describe(
+        'IMAP folder path from listMailFolders. Empty string "" = read INBOX (default). ' +
+          'If the user named a folder, ALWAYS call listMailFolders first and pass the exact ' +
+          'matched path here — do not guess strings like "工作" without listing first.',
+      ),
   }),
-  execute: async ({ limit, onlyUnread }) => {
+  execute: async ({ limit, onlyUnread, folder }) => {
     const mail = getMailService()
     if (!mail) return { error: '邮箱未配置或未启用，请在设置里开启邮箱并填写 IMAP 信息。' }
     try {
-      const items = await mail.listInbox({ limit, onlyUnread })
-      return { items }
+      const items = await mail.listInbox({
+        limit,
+        onlyUnread,
+        folder: folder && folder.trim() ? folder : undefined,
+      })
+      return { items, folder: folder || 'INBOX' }
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) }
     }
@@ -995,7 +1029,9 @@ export async function runChat(
         readClipboard,
         readWebPage,
         readFile: readFileTool,
-        ...(cfg.mail.enabled ? { listRecentEmails, readEmail } : {}),
+        ...(cfg.mail.enabled
+          ? { listMailFolders, listRecentEmails, readEmail }
+          : {}),
         ...(googleSearchTool ? { google_search: googleSearchTool } : {}),
       } as unknown as Parameters<typeof streamText>[0]['tools'],
       // Step budget. stepCountIs(N) keeps the loop alive for up to N model
@@ -1163,6 +1199,7 @@ export async function runChat(
       'readClipboard',
       'readWebPage',
       'readFile',
+      'listMailFolders',
       'listRecentEmails',
       'readEmail',
     ]

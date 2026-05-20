@@ -19,6 +19,7 @@ import type {
   MailMessage,
   MailSummary,
   ListInboxOptions,
+  MailFolder,
 } from '../../core/mail/types.js'
 
 export interface ImapAdapterOptions {
@@ -70,8 +71,17 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
   }
 
   async function withInbox<T>(fn: (c: ImapFlow) => Promise<T>): Promise<T> {
+    return withFolder('INBOX', fn)
+  }
+
+  /** Same as withInbox but for any folder path the user has. Lock + run
+   *  + release. Throws cleanly if the folder doesn't exist on the server. */
+  async function withFolder<T>(
+    folderPath: string,
+    fn: (c: ImapFlow) => Promise<T>,
+  ): Promise<T> {
     const c = await getClient()
-    const lock = await c.getMailboxLock('INBOX')
+    const lock = await c.getMailboxLock(folderPath)
     try {
       return await fn(c)
     } finally {
@@ -271,15 +281,15 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
 
   return {
     async listInbox(o: ListInboxOptions) {
-      // Phase 1: read INBOX, collect summaries + the In-Reply-To header on
-      // each so we know which ones are replies.
-      const results = await withInbox(async (c) => {
-        // On Gmail, INBOX includes everything from all category tabs
-        // (Primary, Promotions, Updates, Social, Forums). The user
-        // complained promos were being read out; restrict to Primary
-        // via Gmail's X-GM-RAW search extension. For other providers
-        // we keep the existing behavior — INBOX is just INBOX there.
-        const gmail = isGmail(c)
+      // Phase 1: read messages from the requested folder (default INBOX),
+      // collect summaries + the In-Reply-To header on each so we know
+      // which ones are replies.
+      const folderPath = o.folder && o.folder.trim() ? o.folder : 'INBOX'
+      const results = await withFolder(folderPath, async (c) => {
+        // Gmail's category:primary filter only makes sense on the INBOX
+        // virtual folder, not on user-labeled folders. Skip the filter
+        // when reading anything other than INBOX.
+        const gmail = isGmail(c) && folderPath === 'INBOX'
         const searchCriteria = gmail
           ? o.onlyUnread
             ? { seen: false, gmailRaw: 'category:primary' }
@@ -406,6 +416,30 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
 
     async readMessage(id: string) {
       return readMessageWithDepth(id, 1)
+    },
+
+    async listFolders() {
+      const c = await getClient()
+      // imapflow's c.list() walks LIST/LSUB and returns an array of
+      // { path, name, delimiter, flags, specialUse } per mailbox. The
+      // `name` field is the leaf segment (decoded from modified-UTF7 by
+      // imapflow); `path` is the full hierarchy path we need for
+      // getMailboxLock. specialUse is one of '\\Inbox' / '\\Sent' /
+      // '\\Drafts' / '\\Junk' / '\\Trash' / '\\Archive' / '\\All' when
+      // the server tags it (RFC 6154); undefined otherwise.
+      const raw = await c.list()
+      const out: MailFolder[] = []
+      for (const f of raw) {
+        const path = f.path
+        const su = (f as { specialUse?: string }).specialUse
+        out.push({
+          path,
+          name: f.name || path,
+          isInbox: path === 'INBOX' || su === '\\Inbox',
+          isSpecialUse: typeof su === 'string' && su.length > 0,
+        })
+      }
+      return out
     },
 
     async testConnection() {
