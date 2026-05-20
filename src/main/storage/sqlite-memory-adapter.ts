@@ -22,7 +22,14 @@ import { mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { MemoryAdapter } from '../../core/memory/adapter.js'
-import type { Episode, Fact, NewFact, SessionSummary, Speaker } from '../../core/memory/types.js'
+import type {
+  Episode,
+  EpisodeImage,
+  Fact,
+  NewFact,
+  SessionSummary,
+  Speaker,
+} from '../../core/memory/types.js'
 
 interface EpisodeRow {
   id: number
@@ -32,6 +39,8 @@ interface EpisodeRow {
   sessionId: string | null
   /** Raw JSON text from the tool_data column; null when absent. */
   toolDataRaw?: string | null
+  /** Raw JSON text from the images_data column; null when absent. */
+  imagesDataRaw?: string | null
 }
 
 /**
@@ -50,6 +59,18 @@ function parseToolData(raw: string | null | undefined): Episode['toolParts'] {
   }
 }
 
+/** Same idea as parseToolData but for the images_data column. */
+function parseImagesData(raw: string | null | undefined): EpisodeImage[] | undefined {
+  if (!raw) return undefined
+  try {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed) || parsed.length === 0) return undefined
+    return parsed as EpisodeImage[]
+  } catch {
+    return undefined
+  }
+}
+
 function rowToEpisode(r: EpisodeRow): Episode {
   return {
     id: r.id,
@@ -58,6 +79,7 @@ function rowToEpisode(r: EpisodeRow): Episode {
     text: r.text,
     sessionId: r.sessionId,
     toolParts: parseToolData(r.toolDataRaw),
+    images: parseImagesData(r.imagesDataRaw),
   }
 }
 
@@ -158,6 +180,12 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
     db.exec('ALTER TABLE episodes ADD COLUMN tool_data TEXT')
     console.log('[memory] migrated: added episodes.tool_data column')
   }
+  // Same pattern for the images_data column (added 2026-05 for the
+  // multi-turn image-recall feature). JSON array of {mimeType, base64}.
+  if (!cols.some((c) => c.name === 'images_data')) {
+    db.exec('ALTER TABLE episodes ADD COLUMN images_data TEXT')
+    console.log('[memory] migrated: added episodes.images_data column')
+  }
 
   // Older DBs were created with `speaker IN ('user', 'assistant')` — that
   // CHECK constraint rejects the 'tool' speaker we now write. SQLite has no
@@ -220,14 +248,17 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
   `)
 
   // Prepared statements — better-sqlite3 caches them after first compile.
-  const insertEpisode = db.prepare<[string, Speaker, string, string | null, string | null]>(
-    'INSERT INTO episodes (ts, speaker, text, session_id, tool_data) VALUES (?, ?, ?, ?, ?)',
+  const insertEpisode = db.prepare<
+    [string, Speaker, string, string | null, string | null, string | null]
+  >(
+    'INSERT INTO episodes (ts, speaker, text, session_id, tool_data, images_data) VALUES (?, ?, ?, ?, ?, ?)',
   )
   const insertVec = db.prepare<[bigint, Buffer]>(
     'INSERT INTO episodes_vec (episode_id, embedding) VALUES (?, ?)',
   )
   const selectRecent = db.prepare<[number]>(
-    `SELECT id, ts, speaker, text, session_id AS sessionId, tool_data AS toolDataRaw
+    `SELECT id, ts, speaker, text, session_id AS sessionId,
+            tool_data AS toolDataRaw, images_data AS imagesDataRaw
      FROM episodes
      WHERE archived = 0
      ORDER BY id DESC
@@ -235,7 +266,8 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
   )
   // COALESCE so the 'legacy' bucket id matches rows with session_id IS NULL.
   const selectRecentInSession = db.prepare<[string, number]>(
-    `SELECT id, ts, speaker, text, session_id AS sessionId, tool_data AS toolDataRaw
+    `SELECT id, ts, speaker, text, session_id AS sessionId,
+            tool_data AS toolDataRaw, images_data AS imagesDataRaw
      FROM episodes
      WHERE archived = 0 AND COALESCE(session_id, 'legacy') = ?
      ORDER BY id DESC
@@ -267,7 +299,8 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
   )
   const selectByKnn = db.prepare<[Buffer, number]>(
     `SELECT e.id, e.ts, e.speaker, e.text, e.session_id AS sessionId,
-            e.tool_data AS toolDataRaw, vc.distance
+            e.tool_data AS toolDataRaw, e.images_data AS imagesDataRaw,
+            vc.distance
      FROM (
        SELECT episode_id, distance
        FROM episodes_vec
@@ -347,9 +380,10 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
       sessionId: string | null,
       embedding: Float32Array,
       toolData: string | null,
+      imagesData: string | null,
     ): number => {
       const ts = new Date().toISOString()
-      const row = insertEpisode.run(ts, speaker, text, sessionId, toolData)
+      const row = insertEpisode.run(ts, speaker, text, sessionId, toolData, imagesData)
       const episodeId = Number(row.lastInsertRowid)
       // Naive mode passes an empty Float32Array — we still persist the
       // episode (so chat history survives), but skip the vec0 insert.
@@ -371,10 +405,11 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
   }
 
   return {
-    async addEpisode(speaker, text, embedding, sessionId = null, toolParts) {
+    async addEpisode(speaker, text, embedding, sessionId = null, toolParts, images) {
       ensureOpen()
       const toolData = toolParts && toolParts.length > 0 ? JSON.stringify(toolParts) : null
-      return addTxn(speaker, text, sessionId, embedding, toolData)
+      const imagesData = images && images.length > 0 ? JSON.stringify(images) : null
+      return addTxn(speaker, text, sessionId, embedding, toolData, imagesData)
     },
 
     async recent(n, sessionId) {

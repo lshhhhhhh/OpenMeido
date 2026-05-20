@@ -193,7 +193,7 @@ async function runScenario({ label, prompt, model, tools }) {
 
   const result = streamText({
     model,
-    temperature: 1,
+    temperature: 0.6,
     system:
       '你是邮箱小助手。看到"看看邮件"先调用 listRecentEmails；' +
       '"打开 X 那封"用 readEmail。回复用一两句人物语气说完即可。',

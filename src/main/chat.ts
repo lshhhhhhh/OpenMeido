@@ -28,14 +28,13 @@ import { parseHTML } from 'linkedom'
 
 import type { ChatEvent, ChatEventBody, ChatImageAttachment } from '../shared/ipc.js'
 import { resolvePersona } from '../shared/config.js'
+import { formatLocalNow } from '../shared/time-format.js'
 import { getConfig, resolveApiKey } from './config.js'
 import { getMemoryService } from './memory-host.js'
 import { getMailService } from './mail-host.js'
 import { getTaskService } from './tasks-host.js'
-import { broadcastLive2D } from './live2d-host.js'
-import { getSidecar as live2dGetSidecar } from './live2d-models-host.js'
 import { createTextDeltaFilter } from './chat-text-filter.js'
-import { EMOTIONS } from '../shared/live2d-models.js'
+import { classifyAndApplyEmotion } from './emotion-classifier.js'
 import type { Episode } from '../core/memory/types.js'
 
 // Emotion → expression / motion is no longer hardcoded — each model carries
@@ -75,21 +74,8 @@ function cleanInlineText(s: string): string {
  *   "2026年5月19日 周一 上午9点30分"
  * Uses zh-CN Intl formatters so day-of-week / am-pm come out localized.
  */
-function formatLocalNow(): string {
-  const d = new Date()
-  const date = new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    weekday: 'long',
-  }).format(d)
-  const time = new Intl.DateTimeFormat('zh-CN', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  }).format(d)
-  return `${date} ${time}`
-}
+// formatLocalNow lives in shared/time-format.ts so greeting-host etc. can
+// import it without taking a dependency on the chat module.
 let turnsSinceReflection = 0
 function maybeTriggerReflection(memory: { reflectOnce(): Promise<number> }): void {
   turnsSinceReflection += 1
@@ -103,46 +89,19 @@ function maybeTriggerReflection(memory: { reflectOnce(): Promise<number> }): voi
     .catch((err) => console.warn('[memory] reflection threw:', err))
 }
 
-const setLive2DExpression = tool({
-  description:
-    '让 Live2D 形象切到某个情绪表情。当你的回复有明显情绪时调用 —— ' +
-    '高兴/欣慰 -> 开心；害羞/不好意思 -> 害羞；无奈/翻白眼 -> 无语；' +
-    '失落/委屈 -> 难过；着急/紧张 -> 慌张；惊喜/吃惊 -> 震惊；' +
-    '尴尬/被吐槽 -> 尴尬；得意/嘚瑟 -> 得意。' +
-    '**一回合最多调用一次**——切了就停，不要切完再切第二个表情。' +
-    '不需要每条回复都调；只在情绪明确变化时调一次即可。',
-  inputSchema: z.object({
-    emotion: z
-      .enum(EMOTIONS)
-      .describe('情绪标签；具体映射到哪个表情/动作由当前模型的 sidecar 决定。'),
-  }),
-  execute: async ({ emotion }) => {
-    const cfg = getConfig()
-    const sidecar = await live2dGetSidecar(cfg.live2d.activeModel)
-    // No sidecar (model not installed?) — fail soft: just clear and report.
-    if (!sidecar) {
-      broadcastLive2D({ type: 'setExpression', name: null })
-      return { ok: true, emotion, applied: 'none' }
-    }
-    // Prefer expression over motion when both are mapped — expressions
-    // hold a face, motions fire once. Most personas care about state more
-    // than animation, so expression wins ties.
-    const expr = sidecar.emotionMapping?.[emotion]
-    if (expr) {
-      broadcastLive2D({ type: 'setExpression', name: expr })
-      return { ok: true, emotion, applied: `expression:${expr}` }
-    }
-    const motion = sidecar.motionMapping?.[emotion]
-    if (motion) {
-      broadcastLive2D({ type: 'playMotion', group: motion.group, index: motion.index })
-      return { ok: true, emotion, applied: `motion:${motion.group}[${motion.index}]` }
-    }
-    // Emotion present in the enum but the model doesn't have a mapping
-    // for it — clear any held expression so we don't lie with stale state.
-    broadcastLive2D({ type: 'setExpression', name: null })
-    return { ok: true, emotion, applied: 'none' }
-  },
-})
+// setLive2DExpression tool was removed in favor of post-reply emotion
+// classification — see src/main/emotion-classifier.ts. The classifier is
+// always invoked once per reply with a lightweight LLM call, so every
+// turn ends with the right face instead of whatever was held last.
+
+// Note: Kimi's `$web_search` builtin function is NOT supported. Their
+// protocol sends `type: "builtin_function"` in streaming tool_calls,
+// which the Vercel AI SDK's strict OpenAI-compat parser rejects. Their
+// official docs only demonstrate the feature in NON-streaming mode
+// (chat.completions.create without stream:true). Adding it would
+// require bypassing streamText for that turn, which costs us all the
+// other tool integrations. Users wanting web search on Kimi should
+// switch to Gemini or GLM for the moment.
 
 /**
  * Resolve a fireAt ISO from the model's input. Returns null when no
@@ -296,7 +255,11 @@ const listRecentEmails = tool({
       .int()
       .min(1)
       .max(20)
-      .describe('Number of recent messages to fetch. Use 10 unless the user asks for more.'),
+      .describe(
+        'Number of recent messages to fetch. Use 5 unless the user asks for more. ' +
+          '5 is enough for a summary because items[].snippet has the first ~200 chars ' +
+          'of body — most replies need NO follow-up readEmail at all.',
+      ),
     onlyUnread: z
       .boolean()
       .describe('If true, only return unread messages. Use false unless the user asks for unread only.'),
@@ -580,54 +543,118 @@ const readFileTool = tool({
  * tool_result_id linkage and the model has no way to reference past tool
  * outputs (the "open WWDC email" → AI re-lists instead of reading bug).
  */
-function episodesToMessages(episodes: Episode[]): ModelMessage[] {
+function episodesToMessages(
+  episodes: Episode[],
+  /** How many trailing image-bearing user turns get their images
+   *  re-attached for the model. Older image-bearing turns are emitted
+   *  as text-only. See cfg.memory.imageRecallTurns. */
+  imageRecallTurns: number = 3,
+): ModelMessage[] {
   const sorted = episodes.slice().sort((a, b) => a.id - b.id)
 
-  // Defensive pairing: the SDK throws MissingToolResultsError if it sees an
-  // assistant message with a tool_call whose toolCallId never gets a matching
-  // tool-result later. This happens when an older build wrote the assistant
-  // row but its tool-result row was rejected by an out-of-date CHECK
-  // constraint (or for any other reason — transient sqlite error, crash
-  // mid-turn, etc.). We pre-scan history and keep only tool_calls that DO
-  // have a matching tool-result; orphans are downgraded to plain text.
-  const fulfilledIds = new Set<string>()
-  const calledIds = new Set<string>()
-  for (const e of sorted) {
-    if (e.speaker === 'tool') {
-      for (const p of e.toolParts ?? []) {
-        if (p.type === 'tool-result') fulfilledIds.add(p.toolCallId)
-      }
-    } else if (e.speaker === 'assistant') {
-      for (const p of e.toolParts ?? []) {
-        if (p.type === 'tool-call') calledIds.add(p.toolCallId)
+  // Decide which user episodes are "fresh enough" to replay their images.
+  // We walk newest→oldest, keep the first N user turns that actually have
+  // images, mark their episode ids. Older image-bearing turns lose their
+  // images on replay (they keep only their text content).
+  const replayImageEpisodeIds = new Set<number>()
+  if (imageRecallTurns > 0) {
+    let kept = 0
+    for (let i = sorted.length - 1; i >= 0 && kept < imageRecallTurns; i--) {
+      const e = sorted[i]!
+      if (e.speaker === 'user' && e.images && e.images.length > 0) {
+        replayImageEpisodeIds.add(e.id)
+        kept++
       }
     }
   }
 
+  // Build a tool_call_id → tool_result map by scanning ALL episodes. This
+  // lets us emit each assistant's tool_calls and their matching tool
+  // results adjacently — even if the row order in sqlite is wrong (e.g.,
+  // an earlier persistence race wrote the tool row BEFORE the assistant
+  // row, so id-sorted ordering would emit them out of OpenAI-spec order).
+  //
+  // Strict backends (Kimi, recent OpenAI) reject if an assistant message
+  // with tool_calls isn't immediately followed by tool messages responding
+  // to each call. The reorder below makes that adjacency invariant hold
+  // regardless of how the rows landed.
+  const resultByCallId = new Map<
+    string,
+    { toolCallId: string; toolName: string; output: unknown }
+  >()
+  // Track every tool_call_id that an assistant message claimed. Tool
+  // results for ids NOT in this set are orphans (the call was never
+  // persisted; we have a result but no caller). They get dropped.
+  const claimedCallIds = new Set<string>()
+  for (const e of sorted) {
+    if (e.speaker === 'assistant') {
+      for (const p of e.toolParts ?? []) {
+        if (p.type === 'tool-call' && p.toolCallId) {
+          claimedCallIds.add(p.toolCallId)
+        }
+      }
+    } else if (e.speaker === 'tool') {
+      for (const p of e.toolParts ?? []) {
+        // Skip tool-result entries with empty toolCallId — past streaming
+        // glitches occasionally persisted these and they're un-pairable.
+        if (p.type === 'tool-result' && p.toolCallId) {
+          resultByCallId.set(p.toolCallId, {
+            toolCallId: p.toolCallId,
+            toolName: p.toolName,
+            output: p.output,
+          })
+        }
+      }
+    }
+  }
+
+  // Tool-result episodes we've already emitted as part of their owning
+  // assistant message. The pass below skips them when it encounters them
+  // in id order, since they were already paired up.
+  const emittedResultIds = new Set<string>()
+
   const out: ModelMessage[] = []
   for (const e of sorted) {
     if (e.speaker === 'user') {
-      out.push({ role: 'user', content: e.text })
+      // If this user turn is recent enough to keep its images, build a
+      // multipart content array. Otherwise text-only (matches the
+      // pre-image-cache behavior for older turns).
+      if (replayImageEpisodeIds.has(e.id) && e.images && e.images.length > 0) {
+        out.push({
+          role: 'user',
+          content: [
+            { type: 'text' as const, text: e.text },
+            ...e.images.map((img) => ({
+              type: 'image' as const,
+              image: Buffer.from(img.base64, 'base64'),
+              mediaType: img.mimeType,
+            })),
+          ],
+        } as ModelMessage)
+      } else {
+        out.push({ role: 'user', content: e.text })
+      }
       continue
     }
     if (e.speaker === 'tool') {
-      const results = (e.toolParts ?? []).filter(
+      // Only emit if (a) results weren't already paired with their owning
+      // assistant above, (b) the toolCallId is non-empty, (c) some
+      // assistant actually claimed this call id. Without (c) the API
+      // rejects with "tool_call_id is not found".
+      const surviving = (e.toolParts ?? []).filter(
         (p): p is Extract<typeof p, { type: 'tool-result' }> =>
-          p.type === 'tool-result' && calledIds.has(p.toolCallId),
+          p.type === 'tool-result' &&
+          !!p.toolCallId &&
+          claimedCallIds.has(p.toolCallId) &&
+          !emittedResultIds.has(p.toolCallId),
       )
-      if (results.length === 0) continue // bogus tool row with no results — skip
-      // Cast through ModelMessage — TS can't narrow the union from object
-      // shape alone (the user-role and tool-role variants overlap on `type`
-      // field naming). The runtime shape matches ToolModelMessage exactly.
+      if (surviving.length === 0) continue
       out.push({
         role: 'tool',
-        content: results.map((r) => ({
+        content: surviving.map((r) => ({
           type: 'tool-result' as const,
           toolCallId: r.toolCallId,
           toolName: r.toolName,
-          // AI SDK expects { type: 'json'|'text'|…, value } for output.
-          // Wrap whatever the tool returned in a `json` envelope and let
-          // the provider's serializer handle nested structures.
           output: {
             type: 'json' as const,
             value: r.output as unknown as Parameters<
@@ -638,34 +665,58 @@ function episodesToMessages(episodes: Episode[]): ModelMessage[] {
       } as ModelMessage)
       continue
     }
-    // assistant — only keep tool_calls whose results we actually persisted.
-    // An orphan tool_call would make the next request fail with
-    // MissingToolResultsError before any tokens stream back.
+    // Assistant: keep only tool_calls that (a) have a non-empty id and
+    // (b) have a matching result somewhere on disk. Empty-id calls and
+    // orphans both get downgraded to plain text so they don't poison
+    // the next API call.
     const calls = (e.toolParts ?? []).filter(
       (p): p is Extract<typeof p, { type: 'tool-call' }> =>
-        p.type === 'tool-call' && fulfilledIds.has(p.toolCallId),
+        p.type === 'tool-call' &&
+        !!p.toolCallId &&
+        resultByCallId.has(p.toolCallId),
     )
     if (calls.length === 0) {
-      // Plain text assistant turn — keep content as string for cleanliness.
       out.push({ role: 'assistant', content: e.text })
-    } else {
-      const parts: ({ type: 'text'; text: string } | {
-        type: 'tool-call'
-        toolCallId: string
-        toolName: string
-        input: unknown
-      })[] = []
-      if (e.text) parts.push({ type: 'text', text: e.text })
-      for (const c of calls) {
-        parts.push({
-          type: 'tool-call',
-          toolCallId: c.toolCallId,
-          toolName: c.toolName,
-          input: c.input,
-        })
-      }
-      out.push({ role: 'assistant', content: parts })
+      continue
     }
+    const parts: ({ type: 'text'; text: string } | {
+      type: 'tool-call'
+      toolCallId: string
+      toolName: string
+      input: unknown
+    })[] = []
+    if (e.text) parts.push({ type: 'text', text: e.text })
+    for (const c of calls) {
+      parts.push({
+        type: 'tool-call',
+        toolCallId: c.toolCallId,
+        toolName: c.toolName,
+        input: c.input,
+      })
+    }
+    out.push({ role: 'assistant', content: parts })
+
+    // IMMEDIATELY emit the matching tool message — required by OpenAI
+    // spec, enforced strictly by Kimi. We pull results from the lookup
+    // map so reversed-row-order history still produces correct output.
+    out.push({
+      role: 'tool',
+      content: calls.map((c) => {
+        const r = resultByCallId.get(c.toolCallId)!
+        emittedResultIds.add(c.toolCallId)
+        return {
+          type: 'tool-result' as const,
+          toolCallId: r.toolCallId,
+          toolName: r.toolName,
+          output: {
+            type: 'json' as const,
+            value: r.output as unknown as Parameters<
+              typeof JSON.stringify
+            >[0],
+          },
+        }
+      }),
+    } as ModelMessage)
   }
   return out
 }
@@ -694,7 +745,15 @@ export async function runChat(
     // Fire-and-forget the user-turn write. We don't await it — the model
     // call doesn't depend on storage finishing, and a slow embedding API
     // shouldn't block the user's reply latency.
-    if (memory) void memory.addEpisode('user', userText)
+    // Images travel with the user episode so follow-up turns can re-attach
+    // them — see episodesToMessages for the replay logic.
+    if (memory) {
+      const persistedImages =
+        images && images.length > 0
+          ? images.map((img) => ({ mimeType: img.mimeType, base64: img.base64 }))
+          : undefined
+      void memory.addEpisode('user', userText, undefined, persistedImages)
+    }
 
     // Pull context BEFORE the model call so the retrieved messages can be
     // interleaved. retrieve() awaits embedding for the query, so this is
@@ -702,7 +761,10 @@ export async function runChat(
     const { recent, recalled } = memory
       ? await memory.retrieve(userText)
       : { recent: [], recalled: [] }
-    const historyMessages = episodesToMessages([...recalled, ...recent])
+    const historyMessages = episodesToMessages(
+      [...recalled, ...recent],
+      cfg.memory.imageRecallTurns,
+    )
 
     const persona = resolvePersona(cfg.persona)
 
@@ -744,25 +806,48 @@ export async function runChat(
       // surface it in the OpenAI-compat shim), but the model's answer
       // reflects fresh info — which is what users want.
       const isGlm = cfg.backend.baseUrl.includes('bigmodel.cn')
+      const isKimi =
+        cfg.backend.baseUrl.includes('moonshot.cn') ||
+        cfg.backend.baseUrl.includes('moonshot.ai')
       const injectGlmSearch = isGlm && cfg.backend.searchEnabled
-      if (cfg.backend.searchEnabled && !isGlm) {
+      // Kimi search disabled — see the comment block above kimiWebSearchEcho
+      // for context. The toggle in Settings warns users; if they still flip
+      // it on against a Kimi backend, we just silently ignore it.
+      if (cfg.backend.searchEnabled && isKimi) {
+        console.warn(
+          '[chat] searchEnabled set but Kimi web search is not currently supported. ' +
+            'Use Gemini or GLM for web search.',
+        )
+      } else if (cfg.backend.searchEnabled && !isGlm) {
         console.warn(
           '[chat] searchEnabled set but backend (' +
             cfg.backend.baseUrl +
-            ') is not Gemini or GLM. No-op.',
+            ') is not Gemini / GLM. No-op.',
         )
       }
-      // Custom fetch wrapper that injects {type:"web_search",...} into
-      // the outgoing tools array. Only constructed when injectGlmSearch
-      // is true so non-search calls have zero overhead.
-      const wrappedFetch = injectGlmSearch
+      // Kimi (Moonshot) — kimi-k2.6 defaults to thinking ON, which then
+      // demands `reasoning_content` on every assistant tool-call message
+      // we replay in history. We don't capture that channel, so subsequent
+      // turns 400 with "thinking is enabled but reasoning_content is
+      // missing in assistant tool call message at index N". Force-disable
+      // thinking by injecting `thinking: {type: "disabled"}`.
+      const needWrapper = injectGlmSearch || isKimi
+      const wrappedFetch = needWrapper
         ? ((async (url, init) => {
             if (init && init.method === 'POST' && typeof init.body === 'string') {
               try {
-                const body = JSON.parse(init.body) as { tools?: unknown[] }
-                const entry = { type: 'web_search', web_search: { enable: true } }
-                if (Array.isArray(body.tools)) body.tools.push(entry)
-                else body.tools = [entry]
+                const body = JSON.parse(init.body) as {
+                  tools?: unknown[]
+                  thinking?: { type: 'enabled' | 'disabled' }
+                }
+                if (injectGlmSearch) {
+                  const entry = { type: 'web_search', web_search: { enable: true } }
+                  if (Array.isArray(body.tools)) body.tools.push(entry)
+                  else body.tools = [entry]
+                }
+                if (isKimi) {
+                  body.thinking = { type: 'disabled' }
+                }
                 init = { ...init, body: JSON.stringify(body) }
               } catch {
                 /* malformed body — fall through to original fetch */
@@ -821,7 +906,12 @@ export async function runChat(
     const mailEnabled = cfg.mail.enabled || process.env.OPENMEIDO_FAKE_MAIL === '1'
     const result = streamText({
       model,
-      temperature: 1,
+      // 0.6 across all backends: enough persona variety for natural-feeling
+      // chat, but low enough that tool-calling stays reliable (high temps
+      // were causing wrong-tool-args and tool-name-as-text leaks). Kimi
+      // also requires exactly 0.6 — going higher would error on kimi-k2.6
+      // with "invalid temperature: only 0.6 is allowed for this model".
+      temperature: 0.6,
       // System prompt is intentionally short. Tool-specific guidance (when to
       // call, what to pass, what NOT to call) lives in each tool's
       // `description` field — the model sees that next to the schema, which
@@ -841,11 +931,37 @@ export async function runChat(
           ? `（邮箱功能用户没开启。如果用户问邮件，告诉他"邮箱还没接上，去 Settings → 邮箱 启用一下"，不要凭空捏造邮件内容。）\n`
           : '') +
         `\n` +
-        `# 你做不了的事（用户问起就温柔说做不到）\n` +
-        `点击界面 / 控制鼠标键盘 / 打开关闭程序窗口 / 下载上传文件 / 改系统设置 / 主动联网（除了用户给定 URL 的 readWebPage）。看图只能"看"和"说"，不能"做"。\n` +
+        `# 你能做的（仅限工具列表里的事）\n` +
+        `加/查/完成待办、读剪贴板、读用户给的网页 URL、读用户给的文件、` +
+        (mailEnabled ? `看邮件列表和邮件内容、` : ``) +
+        `看用户主动发来的截图。**就这些**。\n` +
+        // Web-search hint only when the backend ACTUALLY has search wired
+        // (Gemini grounding + GLM web_search; Kimi search isn't supported
+        // because their builtin_function tool type doesn't survive the
+        // Vercel AI SDK's streaming OpenAI parser).
+        (cfg.backend.searchEnabled &&
+        (cfg.backend.baseUrl.includes('googleapis.com') ||
+          cfg.backend.baseUrl.includes('bigmodel.cn'))
+          ? `\n# 联网搜索（这次已开启）\n` +
+            `主人问到时效性话题（"现在/今天/最近"、"谁是当前的 X"、"X 现在怎么样"、最新新闻、` +
+            `比赛/股价/天气当前值等），**直接联网搜索后再回答，不要说做不到**。` +
+            `搜索是自动的——你不需要确认、也不需要说"让我搜一下"，直接给结果就好。\n`
+          : ``) +
+        `\n` +
+        `# 你做不到的（绝大多数操作）\n` +
+        `调音量/亮度/键盘鼠标/系统设置；打开/关闭其他程序；替主人发消息、发邮件、转账、下单；` +
+        `自己截屏；改文件/写文件/删文件；操控浏览器、播放器、音乐 app。\n` +
+        `**关键规则**：不在工具列表里的事，**不要主动 offer 帮忙**——不要"要不要我帮您 X"、"我可以 X 一下"。` +
+        `不确定能不能做时，先承认做不到。被问起时怎么回绝，按你这个角色一贯的语气来（` +
+        `温柔的就温柔，傲娇的就傲娇，冷淡的就冷淡）——但不要假装尝试，也不要承诺。\n` +
         `\n` +
         `# 回复\n` +
-        `1-3 句人物语气，不要复读 JSON。**绝不**在文字里输出 <think>、<tool_call>、JSON / XML、或任何函数名（addTask/readEmail/...）——工具走专用通道，文字只用人物语气说话。**绝不**重复同一工具做同一件事（list 过就别再 list，read 过别再 read）。`,
+        `1-3 句人物语气，不要复读 JSON。**绝不**在文字里输出 <think>、<tool_call>、JSON / XML、或任何函数名——工具名只能出现在专用调用通道里，文字回复里一个字母都不许有。**绝不**重复同一工具做同一件事（列出过就别再列，读过就别再读）。\n` +
+        `**说话也别重复自己**：看看历史里你刚说过什么；如果只是换个说法把同一个意思又说一遍，没意义。变着角度说，或者承认前面已经说过、问主人需不需要换个话题。\n` +
+        `\n` +
+        `# 工具调用前后\n` +
+        `**调用工具时不要在前面说话**——不要"好的我去查"、"我看一下"、"稍等"这种铺垫。直接调工具。所有工具都跑完、有了最终结果，再开口说话——这一次就要把答案说完整、说清楚。\n` +
+        `**多工具并行**：能并行就并行（在同一个回复里返回多个 tool_call）。尤其是用户让你总结、汇总多封邮件这种场景，**一定**在拿到列表后同一回复里同时发起多封邮件的正文读取调用，不要一封一封串行处理。串行处理会撞步数上限，最后说不出总结。`,
       messages,
       // Conditional tool exposure: when mail isn't enabled, drop the email
       // tools entirely so the model doesn't see them in its function list.
@@ -861,7 +977,6 @@ export async function runChat(
         addTask,
         listTasks,
         markTaskDone,
-        setLive2DExpression,
         readClipboard,
         readWebPage,
         readFile: readFileTool,
@@ -869,15 +984,14 @@ export async function runChat(
         ...(googleSearchTool ? { google_search: googleSearchTool } : {}),
       } as unknown as Parameters<typeof streamText>[0]['tools'],
       // Step budget. stepCountIs(N) keeps the loop alive for up to N model
-      // invocations. We use 3 to cover the common chains:
-      //   text reply only  → 1 step
-      //   one tool + reply → 2 steps
-      //   list-email → read-email → reply → 3 steps
-      // We deliberately do NOT go higher: at 5+ models tend to fall into a
-      // chatter loop, repeating "yes I'm still looking" + setLive2DExpression
-      // on every step until the budget runs out. User then sees 3-5 near-
-      // identical replies stacked in one bubble.
-      stopWhen: stepCountIs(3),
+      // invocations. Earlier values (3, then 6) repeatedly hit the cap on
+      // legitimate "summarize my N recent emails" flows where GLM does
+      // sequential readEmail calls (1 list + N reads + 1 summary = N+2
+      // steps). 10 covers up to ~8 emails fully sequential, with the
+      // prompt below pushing the model to batch readEmail in parallel
+      // when summarizing, which collapses the sequence back to ~3 steps.
+      // Going higher risks chatter loops; 10 is the empirical sweet spot.
+      stopWhen: stepCountIs(10),
       // Disable SDK-level retries. Default is `maxRetries: 2` (3 attempts).
       // When a provider rate-limits AFTER the model has already streamed
       // some text + tool calls, each retry starts from scratch and the
@@ -1016,25 +1130,49 @@ export async function runChat(
     }
 
     // Tool-name-only leak. Some models (Gemini 2.5 flash was seen doing
-    // this in the wild) emit the function name as plain text instead of
-    // using the tool-call channel. The user's bubble ends up showing
-    // "setLive2DExpression" and the tool never actually fires. Detect the
-    // exact-match case and replace with a graceful retry hint.
-    const TOOL_NAMES = new Set([
+    // this in the wild; GLM 4.6 too) emit the function name as plain text
+    // instead of using the tool-call channel. The user's bubble ends up
+    // showing "readEmail" and the tool never actually fires.
+    //
+    // We catch a few variants:
+    //   - bare:        "readEmail"
+    //   - punctuated:  "readEmail.", "(readEmail)", "[readEmail]"
+    //   - call-like:   "readEmail()", "readEmail({})", "readEmail()."
+    //   - jsonish:     `{"name":"readEmail"}` truncated to just the name
+    // Anything where the trimmed text, stripped of common wrappers, equals
+    // a known tool name is treated as a leak.
+    const TOOL_NAMES = [
       'addTask',
       'listTasks',
       'markTaskDone',
-      'setLive2DExpression',
       'readClipboard',
       'readWebPage',
       'readFile',
       'listRecentEmails',
       'readEmail',
-    ])
+    ]
     const trimmedFinal = assistantText.trim()
-    if (trimmedFinal && TOOL_NAMES.has(trimmedFinal)) {
+    const looksLikeToolNameLeak = (text: string): string | null => {
+      if (!text) return null
+      // Quick path: exact match.
+      if (TOOL_NAMES.includes(text)) return text
+      // Strip wrappers: parens / brackets / quotes / trailing punctuation /
+      // empty function-call parens like ().
+      const stripped = text
+        .replace(/[()[\]{}"'`.,!?;:、。！？]/g, '')
+        .replace(/\s+/g, '')
+      if (TOOL_NAMES.includes(stripped)) return stripped
+      // Sometimes the whole reply is just "name()" or "name({})".
+      const funcCallMatch = text.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\.?$/)
+      if (funcCallMatch && TOOL_NAMES.includes(funcCallMatch[1]!)) {
+        return funcCallMatch[1]!
+      }
+      return null
+    }
+    const leaked = looksLikeToolNameLeak(trimmedFinal)
+    if (leaked) {
       console.warn(
-        `[chat] model leaked tool name "${trimmedFinal}" as text — replacing with retry hint`,
+        `[chat] model leaked tool name "${leaked}" as text (raw: "${trimmedFinal}") — replacing with retry hint`,
       )
       localEmit({ type: 'text-reset', length: assistantText.length })
       const hint = '（嗯…我刚才走神了，主人能再问一次吗？）'
@@ -1058,17 +1196,39 @@ export async function runChat(
     // because the SDK can reject .steps under odd agent-loop states and
     // silently drop tool_data — the streamed events are observed reality.
     if (memory) {
+      // Serialize persistence via a chained promise. We deliberately don't
+      // await it — the user-visible `done` event below should fire as soon
+      // as streaming finishes — but each addEpisode must complete before
+      // the next starts, otherwise their internal embedding calls race and
+      // the resulting sqlite row ids can come out reversed.
+      //
+      // Reversed ids → episodesToMessages outputs the tool message BEFORE
+      // the assistant message that owns its tool_calls → next turn fails
+      // with: "an assistant message with 'tool_calls' must be followed by
+      // tool messages responding to each 'tool_call_id'" (Kimi / strict
+      // OpenAI-compat backends).
+      let persistChain: Promise<unknown> = Promise.resolve()
       for (const cap of captures) {
         const stepText = cleanInlineText(cap.text)
         if (stepText || cap.calls.length > 0) {
-          void memory.addEpisode(
-            'assistant',
-            stepText,
-            cap.calls.length > 0 ? cap.calls : undefined,
-          )
+          persistChain = persistChain
+            .then(() =>
+              memory.addEpisode(
+                'assistant',
+                stepText,
+                cap.calls.length > 0 ? cap.calls : undefined,
+              ),
+            )
+            .catch((err) =>
+              console.warn('[chat] persist assistant episode failed:', err),
+            )
         }
         if (cap.results.length > 0) {
-          void memory.addEpisode('tool', '', cap.results)
+          persistChain = persistChain
+            .then(() => memory.addEpisode('tool', '', cap.results))
+            .catch((err) =>
+              console.warn('[chat] persist tool episode failed:', err),
+            )
         }
       }
       // Diagnostic — surfaces a real fix at a glance: "no tool_data persisted
@@ -1089,6 +1249,14 @@ export async function runChat(
     // the LLM call fails, the next trigger will try again.
     if (memory) {
       maybeTriggerReflection(memory)
+    }
+
+    // Emotion classifier — pick a Live2D expression for THIS reply via a
+    // lightweight LLM call. Fire-and-forget; classifier owns its own error
+    // handling and broadcasts to renderer when done. The expression catches
+    // up with the bubble ~500ms after the user sees the final word.
+    if (assistantText.trim()) {
+      void classifyAndApplyEmotion(assistantText)
     }
 
     localEmit({ type: 'done' })

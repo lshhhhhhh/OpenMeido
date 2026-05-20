@@ -105,7 +105,12 @@ async function handleNotification(n: NotifEvent): Promise<void> {
 
   let raw: string
   try {
-    raw = await runExtraction(buildPrompt({ ...n, app, title, body }))
+    // 0.6 — middle ground. The gate decision is binary so determinism
+    // helps; the `comment` field benefits from some variation so the
+    // same notification type doesn't get the same phrasing every time.
+    raw = await runExtraction(buildPrompt({ ...n, app, title, body }), {
+      temperature: 0.6,
+    })
   } catch (err) {
     console.warn('[notif] LLM gate failed:', err)
     return

@@ -55,14 +55,27 @@ async function drive({ model, prompt, tools, callLog }) {
   let visible = ''
   const result = streamText({
     model,
-    temperature: 1,
+    // Match production: 0.6 across all backends (Kimi requires exactly 0.6,
+    // and lower temp makes tool-call reliability noticeably better).
+    temperature: 0.6,
+    // Mirror the production system prompt's anti-narration + parallel-tool
+    // rules. Without these, GLM serializes readEmail calls and exhausts
+    // stepCountIs before producing a summary — which is exactly the bug
+    // a user hit in prod with "总结最近的邮件并且生成报告".
     system:
       '你是用户的私人女仆。回答时用主人称呼用户。' +
       '看到工具的 parent 字段时，要把"对方说了什么"和"你之前说了什么"都点出来，' +
-      '帮助主人快速建立对话上下文。1-3 句话即可。',
+      '帮助主人快速建立对话上下文。1-3 句话即可。\n' +
+      '\n' +
+      '**调用工具时不要在前面说话**。直接调工具，所有工具都跑完再开口。\n' +
+      '**多工具并行**：用户让你总结/汇总多封邮件时，**一定**在拿到列表后同一回复里同时调多个 readEmail，' +
+      '不要一封一封串行读——会撞步数上限。',
     prompt,
     tools,
-    stopWhen: stepCountIs(3),
+    // Match production budget. 3 was hiding budget-exhaustion bugs because
+    // tests were checking "tool was called" + "keywords appear" but never
+    // "the model actually produced a final answer".
+    stopWhen: stepCountIs(10),
     maxRetries: 0,
   })
   for await (const part of result.fullStream) {
@@ -100,6 +113,20 @@ async function runOnBackend(label, model) {
     })
     console.log(
       `Visible (${visible.length} chars):\n  ${visible.replace(/\n/g, '\n  ').slice(0, 800)}${visible.length > 800 ? '…' : ''}`,
+    )
+
+    // CRITICAL: must produce a non-empty reply. A user reported the model
+    // making 5 sequential readEmail calls and never speaking — budget
+    // exhausted. This assertion would have caught that.
+    check(
+      'visible reply is non-empty (model didn\'t exhaust step budget on tools)',
+      visible.trim().length > 0,
+      `got 0 chars — likely budget exhausted by sequential tool calls`,
+    )
+    check(
+      'visible reply is substantive (>= 40 chars, not just a placeholder)',
+      visible.trim().length >= 40,
+      `got ${visible.trim().length} chars: "${visible.slice(0, 80)}"`,
     )
 
     check(
@@ -171,6 +198,68 @@ async function runOnBackend(label, model) {
       'reply text references the sent (parent) side',
       hasSent,
       `looked for: ${sentSide.join(' / ')}`,
+    )
+  }
+
+  // ---------- Scenario 2b: many-email summary → tests step-budget headroom ----------
+  // Reproduces the prod bug: user asks for a summary, model decides to
+  // read every recent email, runs out of steps before producing a final
+  // reply. The fix is the "parallel readEmail" prompt rule + larger
+  // stepCountIs. This scenario fails LOUDLY when either regresses.
+  console.log('\n=== Scenario 2b: "总结最近的邮件并且生成报告" — many-email summary ===')
+  {
+    const callLog = []
+    const visible = await drive({
+      model,
+      prompt: '总结最近的邮件并且生成报告',
+      tools: { listRecentEmails, readEmail },
+      callLog,
+    })
+    console.log(
+      `Visible (${visible.length} chars):\n  ${visible.replace(/\n/g, '\n  ').slice(0, 800)}${visible.length > 800 ? '…' : ''}`,
+    )
+    const readCount = callLog.filter((c) => c.name === 'readEmail').length
+    console.log(`  tool calls: ${callLog.map((c) => c.name).join(', ')}`)
+
+    check(
+      'model produced a final summary (non-empty visible text)',
+      visible.trim().length > 0,
+      `0 chars — model consumed entire step budget on tool calls, never spoke`,
+    )
+    check(
+      'summary is substantive (>= 60 chars — a real report, not "ok done")',
+      visible.trim().length >= 60,
+      `got ${visible.trim().length} chars: "${visible.slice(0, 100)}"`,
+    )
+    // Tool-name leak: model emits "readEmail" / "listRecentEmails" as plain
+    // text instead of issuing a tool_call. Prod chat.ts has a fallback that
+    // replaces it with a "走神" hint, but a user shouldn't see that twice
+    // in a row. Catching it here means we notice when prompt regressions
+    // (e.g., putting tool names back into the example list) trigger it.
+    const looksLikeBareToolName = [
+      'readEmail',
+      'listRecentEmails',
+      'addTask',
+      'readFile',
+      'readWebPage',
+    ].some((n) => {
+      const stripped = visible
+        .trim()
+        .replace(/[()[\]{}"'`.,!?;:、。！？\s]/g, '')
+      return stripped === n
+    })
+    check(
+      'model did NOT leak a tool name as the entire visible reply',
+      !looksLikeBareToolName,
+      `visible was just a tool name: "${visible.slice(0, 60)}"`,
+    )
+    // If the model read multiple emails, it should be using parallel calls
+    // (same step) — otherwise we'll hit the budget cap as readCount grows.
+    // We tolerate any combination as long as a summary came out.
+    check(
+      `readEmail invoked at least twice (covered multiple emails, got ${readCount})`,
+      readCount >= 2,
+      `the prompt explicitly asks for a "总结" of multiple emails`,
     )
   }
 

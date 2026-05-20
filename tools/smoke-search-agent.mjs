@@ -37,7 +37,7 @@ async function ask(model, prompt, tools = {}) {
   let providerMetadata = null
   const result = streamText({
     model,
-    temperature: 1,
+    temperature: 0.6,
     system: '你是一个简洁的助手。回答用 1-2 句话。如果用到搜索，简短引用一下来源。',
     prompt,
     tools,

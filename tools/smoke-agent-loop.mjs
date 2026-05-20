@@ -220,7 +220,7 @@ async function driveTurn({ model, userText, mem, tools }) {
 
   const result = streamText({
     model,
-    temperature: 1,
+    temperature: 0.6,
     system:
       '你是一个邮箱小助手。用户问"看看邮件"先调用 listRecentEmails；' +
       '用户问"打开 X / 读 X 那封"等明确指代上一次列表中某封邮件时，调用 readEmail，' +

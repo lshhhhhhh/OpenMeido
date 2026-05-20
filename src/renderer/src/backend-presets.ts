@@ -41,6 +41,20 @@ export const BASE_URL_PRESETS: BackendPreset[] = [
     note: 'glm-4.6v-flash 免费',
   },
   {
+    label: 'Kimi 月之暗面 (国内)',
+    url: 'https://api.moonshot.cn/v1',
+    signupUrl: 'https://platform.kimi.com/console/api-keys',
+    envVar: 'MOONSHOT_API_KEY',
+    note: '性能强，国内直连',
+  },
+  {
+    label: 'Kimi (国际)',
+    url: 'https://api.moonshot.ai/v1',
+    signupUrl: 'https://platform.kimi.ai/',
+    envVar: 'MOONSHOT_API_KEY',
+    note: '性能强，需充值',
+  },
+  {
     label: 'DeepSeek',
     url: 'https://api.deepseek.com/v1',
     signupUrl: 'https://platform.deepseek.com/api_keys',
@@ -119,6 +133,24 @@ export const MODEL_SUGGESTIONS_BY_HOST: {
       'doubao-1-5-vision-pro-250328',
       'doubao-1-5-vision-pro-32k-250115',
     ],
+  },
+  {
+    // Moonshot Kimi — mainland (api.moonshot.cn). Full K2 lineup including
+    // the cheap/fast preview tiers. OpenMeido leads with kimi-k2.6 (the
+    // only multimodal flagship); turbo-preview and 0905-preview are
+    // text-only fallbacks for users who don't need vision.
+    // Verified against platform.kimi.com/docs/models.md 2026-05.
+    match: (url) => url.includes('moonshot.cn'),
+    models: ['kimi-k2.6', 'kimi-k2-0905-preview', 'kimi-k2-turbo-preview'],
+  },
+  {
+    // Moonshot Kimi — international (api.moonshot.ai). Narrower model list:
+    // verified via GET /v1/models 2026-05 → only kimi-k2.6, kimi-k2.5,
+    // moonshot-v1-* are available. NO kimi-k2-turbo-preview / k2-thinking
+    // / 0905-preview on this endpoint. Keys from platform.kimi.ai are NOT
+    // interchangeable with platform.kimi.com keys.
+    match: (url) => url.includes('moonshot.ai'),
+    models: ['kimi-k2.6', 'kimi-k2.5', 'moonshot-v1-128k-vision-preview'],
   },
   {
     match: (url) => url.includes('127.0.0.1') || url.includes('localhost'),

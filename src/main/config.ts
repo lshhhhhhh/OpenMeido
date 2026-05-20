@@ -91,6 +91,7 @@ export function resolveBackendKey(backend: Config['backend']): string {
   if (url.includes('deepseek.com')) return process.env.DEEPSEEK_API_KEY ?? ''
   if (url.includes('dashscope.aliyuncs.com')) return process.env.DASHSCOPE_API_KEY ?? ''
   if (url.includes('volces.com') || url.includes('ark.cn-beijing')) return process.env.ARK_API_KEY ?? ''
+  if (url.includes('moonshot.cn') || url.includes('moonshot.ai')) return process.env.MOONSHOT_API_KEY ?? ''
   // Local / self-hosted endpoints often don't need a real key.
   return process.env.OPENAI_API_KEY ?? ''
 }

@@ -15,6 +15,7 @@ import type { MemoryAdapter } from './adapter.js'
 import { reflect, renderFactsBlock, type ReflectionExtractor } from './reflection.js'
 import type {
   Episode,
+  EpisodeImage,
   Fact,
   SessionSummary,
   Speaker,
@@ -37,6 +38,7 @@ export interface MemoryService {
     speaker: Speaker,
     text: string,
     toolParts?: (ToolCallPart | ToolResultPart)[],
+    images?: EpisodeImage[],
   ): Promise<number | null>
 
   /**
@@ -74,6 +76,16 @@ export interface MemoryService {
 
   /** Active facts (supersededBy IS NULL), newest first. */
   listFacts(limit?: number): Promise<Fact[]>
+
+  /**
+   * Pull the user's name out of the L3 fact store if we have one.
+   * Convenience over listFacts → caller would otherwise have to grep
+   * for `user.profile.name` everywhere it wants to address the user by
+   * real name (greeting, goodbye, proactive remark, …). Returns null
+   * when there's no name fact recorded yet — caller should fall back
+   * to the persona's default addressing.
+   */
+  getUserName(): Promise<string | null>
 
   /**
    * Build the system-prompt fragment that lists known user facts. Returns
@@ -190,11 +202,14 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   }
 
   return {
-    async addEpisode(speaker, text, toolParts) {
+    async addEpisode(speaker, text, toolParts, images) {
       // Tool-result rows can have empty text (the result is in toolParts)
       // and assistant tool-only steps can be empty too. Allow empty text
-      // when there's at least toolParts. Reject only truly empty turns.
-      if (!text.trim() && (!toolParts || toolParts.length === 0)) return null
+      // when there's at least toolParts OR images attached. Reject only
+      // truly empty turns.
+      const hasTool = !!(toolParts && toolParts.length > 0)
+      const hasImages = !!(images && images.length > 0)
+      if (!text.trim() && !hasTool && !hasImages) return null
       try {
         // Naive mode: no model on disk. Persist the episode WITHOUT an
         // embedding so the user's chat history is still saved and
@@ -203,18 +218,15 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
         // function starts producing vectors again — but episodes added
         // during naive mode stay un-embedded (not worth a backfill).
         if (naive()) {
-          // Pass a zero vector; the adapter writes it to episodes_vec
-          // but it'll never match anything semantically (cosine distance
-          // = 1 against any non-zero query). Cheap, keeps schema simple.
           const zeros = new Float32Array(0)
-          return await adapter.addEpisode(speaker, text, zeros, sessionId, toolParts)
+          return await adapter.addEpisode(speaker, text, zeros, sessionId, toolParts, images)
         }
         // Same 5s ceiling as retrieve(). addEpisode is fire-and-forget
         // from chat.ts (we void the promise), so the user isn't blocked
         // on it — but if embed() hangs forever, we leak timers and
         // eventually OOM. Bail loudly instead.
         const vec = await withTimeout(embed(text || ' '), 5_000, 'embed timed out')
-        return await adapter.addEpisode(speaker, text, vec, sessionId, toolParts)
+        return await adapter.addEpisode(speaker, text, vec, sessionId, toolParts, images)
       } catch (err) {
         reportError('addEpisode', err)
         return null
@@ -286,6 +298,25 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
     async listFacts(limit = 200) {
       return adapter.listActiveFacts(limit)
+    },
+
+    async getUserName() {
+      try {
+        const facts = await adapter.listActiveFacts(200)
+        // Reflection convention uses `user.profile.name` for the user's
+        // name (see core/memory/reflection.ts PROMPT_HEADER). Allow a few
+        // common variants too in case a different reflector / older data
+        // used another spelling.
+        const aliases = ['user.profile.name', 'user.name', 'name', 'username']
+        for (const key of aliases) {
+          const f = facts.find((x) => x.key === key)
+          if (f && f.value.trim()) return f.value.trim()
+        }
+        return null
+      } catch (err) {
+        reportError('getUserName', err)
+        return null
+      }
     },
 
     async factsBlock(minConfidence) {

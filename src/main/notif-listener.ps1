@@ -79,10 +79,29 @@ $seen = New-Object 'System.Collections.Generic.HashSet[uint32]'
 # in PowerShell are flaky (the runspace closes before delivery in many
 # setups). Simple polling every 2s is reliable and cheap — Action Center
 # already deduplicates rapid-fire toasts so we don't miss bursts.
+#
+# Backfill suppression: on the very first poll, Action Center still holds
+# every notification the user hasn't dismissed (sometimes hours old). We
+# don't want the maid commenting on those at every app restart — by
+# definition the user already saw them. Prime $seen with current ids
+# silently on the first iteration; only EMIT notifications that arrive in
+# subsequent polls.
 $NotificationKinds = [Windows.UI.Notifications.NotificationKinds]
+$primed = $false
 while ($true) {
     try {
         $list = AwaitOp $listener.GetNotificationsAsync($NotificationKinds::Toast) ([System.Collections.Generic.IReadOnlyList`1[Windows.UI.Notifications.UserNotification]])
+        if (-not $primed) {
+            # First poll — record everything currently in Action Center as
+            # "already seen" without emitting. The maid stays quiet about
+            # leftovers from before this session started.
+            foreach ($n in $list) { $seen.Add($n.Id) | Out-Null }
+            $primed = $true
+            # Skip the emit loop this iteration but still hit Start-Sleep
+            # at the bottom of the outer while.
+            Start-Sleep -Milliseconds 2000
+            continue
+        }
         foreach ($n in $list) {
             if ($seen.Contains($n.Id)) { continue }
             $seen.Add($n.Id) | Out-Null

@@ -11,6 +11,7 @@ import { Sidebar } from './Sidebar'
 import { useConfig } from './useConfig'
 import { ConfirmHost } from './confirm'
 import { matchHotkey } from '../../shared/demos'
+import { stripMarkdown } from '../../shared/strip-markdown'
 
 interface ToolCall {
   name: string
@@ -111,6 +112,14 @@ export default function App() {
   // Messages whose 'done' event has already been processed — see the
   // 'done' case in the chat-event handler for why we need this.
   const doneSeenRef = useRef<Set<string>>(new Set())
+  // Synchronously-tracked accumulation of the current assistant turn's
+  // visible text. We CAN'T read this from messagesRef in the `done` case
+  // because the most recent setMessages (queued by flushPendingText) may
+  // not have committed yet — `done` fires on the IPC channel and the
+  // React re-render is async. Reading messagesRef under those conditions
+  // misses the most recent flushed chunk and TTS drops the first
+  // characters of the reply.
+  const accumulatedTextRef = useRef('')
   // Resolved meido-live2d:// URL for the currently-active model. Stays null
   // until the sidecar fetch returns — we render Live2DCanvas conditionally.
   const [modelUrl, setModelUrl] = useState<string | null>(null)
@@ -127,24 +136,89 @@ export default function App() {
     })
   }
 
+  // Text-display buffer: smooths over the "model emitted text then tool_call
+  // fires text-reset" pattern that was producing a visible flash (text
+  // appears, then erases). We hold incoming deltas for ~450ms before
+  // committing them to the visible bubble. If a text-reset arrives while
+  // text is still in the buffer, we discard it silently — no flash.
+  //
+  // Tradeoff: the user sees text appear in ~450ms-spaced batches instead of
+  // token-by-token. For a maid-style chat this reads more like "she pauses
+  // then says something" rather than a typewriter — which the user prefers
+  // over the flashing.
+  const TEXT_FLUSH_DELAY_MS = 450
+  const pendingTextRef = useRef<{
+    buffer: string
+    timer: ReturnType<typeof setTimeout> | null
+  }>({ buffer: '', timer: null })
+
+  function flushPendingText(): void {
+    const p = pendingTextRef.current
+    if (p.timer) {
+      clearTimeout(p.timer)
+      p.timer = null
+    }
+    if (p.buffer) {
+      const buf = p.buffer
+      p.buffer = ''
+      patchLastAssistant((m) => ({ ...m, text: m.text + buf }))
+    }
+  }
+
   useEffect(() => {
     return window.api.chat.onEvent((event: ChatEvent) => {
       if (event.messageId !== activeIdRef.current) return
 
       switch (event.type) {
-        case 'text':
-          patchLastAssistant((m) => ({ ...m, text: m.text + event.delta }))
+        case 'text': {
+          const p = pendingTextRef.current
+          p.buffer += event.delta
+          accumulatedTextRef.current += event.delta
+          // Throttle, don't debounce — once a flush is scheduled, let it
+          // fire so streaming text doesn't get held indefinitely.
+          if (!p.timer) {
+            p.timer = setTimeout(() => {
+              p.timer = null
+              flushPendingText()
+            }, TEXT_FLUSH_DELAY_MS)
+          }
           break
-        case 'text-reset':
-          // Filter detected a bare `</think>` and the reasoning prefix
-          // it preceded is being rolled back. Trim the last N chars
-          // from the visible bubble — the real reply will stream in
-          // right after via normal 'text' events.
-          patchLastAssistant((m) => ({
-            ...m,
-            text: event.length > 0 ? m.text.slice(0, -event.length) : m.text,
-          }))
+        }
+        case 'text-reset': {
+          // Two sources can trigger this: (a) `</think>` block stripped by
+          // the main-process filter, (b) pre-tool narration rolled back
+          // because a tool_call fired. In both cases, prefer to consume
+          // characters from our pending-text buffer FIRST — those chars
+          // were never committed to the visible bubble, so discarding them
+          // silently means the user never sees the flash. Only fall back to
+          // slicing the visible text when the reset is bigger than the
+          // pending buffer.
+          const p = pendingTextRef.current
+          const fromBuffer = Math.min(event.length, p.buffer.length)
+          if (fromBuffer > 0) {
+            p.buffer = p.buffer.slice(0, -fromBuffer)
+            if (!p.buffer && p.timer) {
+              clearTimeout(p.timer)
+              p.timer = null
+            }
+          }
+          const remaining = event.length - fromBuffer
+          if (remaining > 0) {
+            patchLastAssistant((m) => ({
+              ...m,
+              text: m.text.slice(0, -remaining),
+            }))
+          }
+          // Keep the synchronous accumulator in sync with what's actually
+          // going to end up visible.
+          if (event.length > 0) {
+            accumulatedTextRef.current = accumulatedTextRef.current.slice(
+              0,
+              -event.length,
+            )
+          }
           break
+        }
         case 'tool-call':
           patchLastAssistant((m) => ({
             ...m,
@@ -163,7 +237,12 @@ export default function App() {
             return { ...m, toolCalls: tc }
           })
           break
-        case 'done':
+        case 'done': {
+          // Commit the trailing buffered text to the visible bubble. We
+          // don't need to capture it for TTS — accumulatedTextRef has
+          // every char already (it's updated synchronously on each
+          // text-delta, unlike messagesRef which lags by one React render).
+          flushPendingText()
           setBusy(false)
           setLlmStatus('ok')
           // Guard against duplicate 'done' events on the same messageId.
@@ -177,13 +256,12 @@ export default function App() {
           if (doneSeenRef.current.has(event.messageId)) break
           doneSeenRef.current.add(event.messageId)
           {
-            const list = messagesRef.current
-            const idx = list.length - 1
-            const last = list[idx]
-            if (last && last.role === 'assistant' && last.text.trim()) {
+            const idx = messagesRef.current.length - 1
+            const fullText = accumulatedTextRef.current
+            if (fullText.trim()) {
               const cfg = configRef.current
               if (cfg?.tts.enabled && cfg.tts.autoPlay) {
-                void speakRef.current(last.text, idx)
+                void speakRef.current(fullText, idx)
               }
             }
           }
@@ -198,6 +276,7 @@ export default function App() {
           // turn just persisted new tool_calls/tool_results.
           setActivityRefreshToken((v) => v + 1)
           break
+        }
         case 'error':
           setError(event.error)
           setBusy(false)
@@ -267,18 +346,13 @@ export default function App() {
     })
   }, [])
 
-  // Task notification fired (the new unified channel) → same UX.
-  useEffect(() => {
-    return window.api.tasks.onFired((task) => {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          text: `⏰ 提醒：${task.text}`,
-        },
-      ])
-    })
-  }, [])
+  // Task notification fired (the new unified channel). We deliberately do
+  // NOT append a synthetic `⏰ 提醒：…` bubble anymore — tasks-host now asks
+  // the LLM to generate a maid-styled reminder line and broadcasts it as
+  // a `proactive:remark`, which the spontaneous-remark handler below picks
+  // up (display + TTS, same as proactive observer output). All we keep this
+  // channel around for is the eventual case where some non-text UX wants
+  // to react to a fire (badge, flash, etc.).
 
   // Spontaneous proactive remark from main. Drop it into the chat list and,
   // if TTS auto-play is on, speak it. We don't track it through activeIdRef
@@ -436,17 +510,105 @@ export default function App() {
     }
   }, [])
 
-  // Window-level click-through was removed in favor of a simpler model:
-  // the window is visually transparent (frame:false + transparent:true) but
-  // remains opaque to clicks. Clicks on transparent canvas areas land on
-  // the renderer (no-op) instead of passing to the desktop. Trade-off: you
-  // can't click "through" the maid to grab a desktop icon, but you also
-  // never hit the race conditions where setIgnoreMouseEvents got stuck ON
-  // and ate keystrokes / focus. The canvas itself still toggles its OWN
-  // pointer-events (auto over model pixels, none over transparent), so
-  // clicks on transparent canvas patches pass through TO THE CHAT PANEL
-  // beneath them within the same window — which is what users actually
-  // wanted ("don't block my view of the chat").
+  // Window-level click-through. Off by default; opt-in via
+  // `cfg.window.clickThroughTransparent` in Settings → 窗口.
+  //
+  // The earlier always-on version got stuck ON because the OS stopped
+  // delivering mousemove events to the window once setIgnoreMouseEvents
+  // was true, so we never knew when to flip it back off. The fix is two
+  // parts:
+  //   1. main process uses `forward: true` (mousemove still fires)
+  //   2. renderer re-evaluates on every mousemove + has safety nets:
+  //      - window 'mouseleave' force-OFF (mouse left entirely)
+  //      - feature toggled off in Settings force-OFF
+  //      - component unmount force-OFF
+  //
+  // The decision per mousemove: ask the Live2D stage `isOverModel(x, y)`
+  //   → 'pixel'       → click-through OFF (clicks hit the maid)
+  //   → 'transparent' → click-through ON  (pass to desktop)
+  //   → 'outside'     → click-through OFF (cursor in a UI panel)
+  const ignoreMouseRef = useRef(false)
+  useEffect(() => {
+    const enabled = config?.window.clickThroughTransparent ?? false
+    if (!enabled) {
+      // Feature off → make sure click-through is OFF (in case it was ON
+      // from a prior session before the user disabled it).
+      if (ignoreMouseRef.current) {
+        ignoreMouseRef.current = false
+        void window.api.window.setIgnoreMouseEvents(false)
+      }
+      return
+    }
+    console.log('[click-through] effect attached — listening for mousemove')
+    let raf = 0
+    let pendingX = 0
+    let pendingY = 0
+    let pending = false
+    let moveCount = 0
+    let lastLoggedCov = ''
+    const evaluate = (): void => {
+      pending = false
+      const ctrl = live2dRef.current
+      if (!ctrl) {
+        if (lastLoggedCov !== 'no-ctrl') {
+          console.log('[click-through] live2dRef is null — feature inactive')
+          lastLoggedCov = 'no-ctrl'
+        }
+        return
+      }
+      const cov = ctrl.isOverModel(pendingX, pendingY)
+      if (cov !== lastLoggedCov) {
+        console.log(
+          `[click-through] cursor (${pendingX},${pendingY}) → coverage=${cov}`,
+        )
+        lastLoggedCov = cov
+      }
+      const shouldIgnore = cov === 'transparent'
+      if (shouldIgnore !== ignoreMouseRef.current) {
+        ignoreMouseRef.current = shouldIgnore
+        console.log(`[click-through] setIgnoreMouseEvents(${shouldIgnore})`)
+        void window.api.window.setIgnoreMouseEvents(shouldIgnore)
+      }
+    }
+    const onMove = (ev: MouseEvent): void => {
+      moveCount++
+      // Log the first few raw events so we can confirm the listener is
+      // actually firing. After that we silence per-event logging (the
+      // throttled evaluate() still logs coverage transitions).
+      if (moveCount <= 3) {
+        console.log(`[click-through] mousemove #${moveCount} at (${ev.clientX},${ev.clientY})`)
+      }
+      pendingX = ev.clientX
+      pendingY = ev.clientY
+      if (!pending) {
+        pending = true
+        raf = requestAnimationFrame(evaluate)
+      }
+    }
+    const forceOff = (): void => {
+      if (ignoreMouseRef.current) {
+        ignoreMouseRef.current = false
+        void window.api.window.setIgnoreMouseEvents(false)
+      }
+    }
+    // Critical: use the capture phase. The Live2D PIXI canvas intercepts
+    // pointer events at the bubble phase, so a bubble-phase listener on
+    // window never fires while the cursor is over the canvas — which is
+    // exactly where click-through needs to make decisions. Attaching to
+    // document with capture:true gets us the event before any child
+    // handler can stop it.
+    document.addEventListener('mousemove', onMove, true)
+    document.addEventListener('mouseleave', forceOff, true)
+    return () => {
+      console.log('[click-through] effect detached')
+      document.removeEventListener('mousemove', onMove, true)
+      document.removeEventListener('mouseleave', forceOff, true)
+      if (raf) cancelAnimationFrame(raf)
+      // Always force-OFF on cleanup so a remount / config-toggle never
+      // leaves the window in a stuck-ignore state.
+      forceOff()
+    }
+  }, [config?.window.clickThroughTransparent])
 
   /**
    * Speak a chat message via TTS, driving the Live2D mouth from RMS.
@@ -538,11 +700,35 @@ export default function App() {
       { role: 'user', text, imageDataUrls },
       { role: 'assistant', text: '' },
     ])
+    // Reset the synchronous text accumulator for the new turn so any
+    // residue from a cancelled prior turn doesn't leak into TTS.
+    accumulatedTextRef.current = ''
     activeIdRef.current = window.api.chat.send(text, attachments.length ? attachments : undefined)
     setInput('')
     setAttachments([])
   }
   sendRef.current = send
+
+  // Send a chat message originated outside the main input box (currently the
+  // sidebar quick-add). Mirrors `send()` but takes the text as an argument
+  // instead of reading from `input` state.
+  function sendText(text: string): void {
+    const t = text.trim()
+    if (!t) return
+    if (busy) {
+      pendingSendRef.current = true
+      return
+    }
+    setError(null)
+    setBusy(true)
+    setMessages((prev) => [
+      ...prev,
+      { role: 'user', text: t },
+      { role: 'assistant', text: '' },
+    ])
+    accumulatedTextRef.current = ''
+    activeIdRef.current = window.api.chat.send(t, undefined)
+  }
 
 
   /** Capture every connected screen at once — let the model decide which is relevant. */
@@ -1058,6 +1244,7 @@ export default function App() {
           void window.api.sidebar.setOpen(next)
         }}
         refreshActivityToken={activityRefreshToken}
+        onSendChat={sendText}
       />
 
       {settingsOpen && config && (
@@ -1155,6 +1342,11 @@ function MessageBubble({
   // Speaker button: only on assistant bubbles, only when TTS is enabled,
   // and only when the message has text (skip empty placeholder bubbles).
   const showSpeaker = !isUser && ttsEnabled && message.text.trim().length > 0
+  // Strip markdown formatting from assistant text before display — the
+  // model sometimes emits `**bold**` / `- bullets` / `# headers` and we
+  // don't render markdown, so those would show as raw asterisks/hashes.
+  // User messages stay raw (user might intentionally paste markdown).
+  const visibleText = isUser ? message.text : stripMarkdown(message.text)
   return (
     <div
       style={{
@@ -1194,7 +1386,7 @@ function MessageBubble({
             ))}
           </div>
         )}
-        {message.text || (busy ? <span style={{ color: '#aaa' }}>thinking…</span> : '')}
+        {visibleText || (busy ? <span style={{ color: '#aaa' }}>thinking…</span> : '')}
         {showSpeaker && (
           <button
             onClick={onSpeak}

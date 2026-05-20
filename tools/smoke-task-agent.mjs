@@ -126,7 +126,7 @@ async function drive({ model, prompt, tools, callLog }) {
   let visible = ''
   const result = streamText({
     model,
-    temperature: 1,
+    temperature: 0.6,
     system:
       '你是用户的私人女仆。回答时用主人称呼用户，1-3 句话。' +
       '该用工具就用，不要先说"好的我看看"再调。' +

@@ -123,6 +123,10 @@ export function getMemoryService(): MemoryService | null {
   return service
 }
 
+export function getMemoryAdapter(): MemoryAdapter | null {
+  return adapter
+}
+
 export function getMemoryInitError(): string | null {
   return initError
 }

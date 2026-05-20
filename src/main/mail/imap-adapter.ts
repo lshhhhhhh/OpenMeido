@@ -253,13 +253,42 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
     return result
   }
 
+  /**
+   * Detect Gmail's IMAP server via the X-GM-EXT-1 capability. Other hosts
+   * with the same domain (e.g., aliases) get caught too, which is what we
+   * want — capability check is more reliable than host string matching.
+   */
+  function isGmail(c: ImapFlow): boolean {
+    const caps = c.serverInfo?.capabilities
+    if (!caps) return false
+    // capabilities is a Set<string> in imapflow.
+    return caps instanceof Set
+      ? caps.has('X-GM-EXT-1')
+      : Array.isArray(caps)
+        ? (caps as string[]).includes('X-GM-EXT-1')
+        : false
+  }
+
   return {
     async listInbox(o: ListInboxOptions) {
       // Phase 1: read INBOX, collect summaries + the In-Reply-To header on
       // each so we know which ones are replies.
       const results = await withInbox(async (c) => {
+        // On Gmail, INBOX includes everything from all category tabs
+        // (Primary, Promotions, Updates, Social, Forums). The user
+        // complained promos were being read out; restrict to Primary
+        // via Gmail's X-GM-RAW search extension. For other providers
+        // we keep the existing behavior — INBOX is just INBOX there.
+        const gmail = isGmail(c)
+        const searchCriteria = gmail
+          ? o.onlyUnread
+            ? { seen: false, gmailRaw: 'category:primary' }
+            : { gmailRaw: 'category:primary' }
+          : o.onlyUnread
+            ? { seen: false }
+            : { all: true }
         const uids = (await c.search(
-          o.onlyUnread ? { seen: false } : { all: true },
+          searchCriteria as Parameters<typeof c.search>[0],
           { uid: true },
         )) as number[]
         const recent = uids.slice(-o.limit).reverse()

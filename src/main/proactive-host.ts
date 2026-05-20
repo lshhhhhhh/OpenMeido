@@ -19,10 +19,46 @@
 import { BrowserWindow, powerMonitor } from 'electron'
 
 import { getConfig } from './config.js'
-import { runExtraction } from './chat-host.js'
+import { runExtraction, runExtractionWithImages } from './chat-host.js'
 import { getMemoryService } from './memory-host.js'
+import { captureAllScreensPng } from './screen-host.js'
+import { resolvePersona } from '../shared/config.js'
+import { buildProactiveRemarkPrompt } from '../shared/daily-prompts.js'
+import { formatLocalNow } from '../shared/time-format.js'
 import type { Config } from '../shared/config.js'
 import type { ProactiveDecision, Trigger } from '../core/perception/types.js'
+import type { MemoryService } from '../core/memory/service.js'
+
+/** Cap on how many trailing assistant lines to feed into the proactive
+ *  prompt as "you recently said this". 5 is enough to catch verbatim
+ *  loops without bloating prompt context. */
+const RECENT_SELF_LIMIT = 5
+const RECENT_SELF_MAX_CHARS_PER = 80
+
+/**
+ * Pull the most recent assistant remarks (oldest→newest within the
+ * window) for the proactive observer's "don't repeat yourself" hint.
+ *
+ * We look back ~20 episodes and keep the last RECENT_SELF_LIMIT
+ * assistant turns with non-empty text. Tool-call wrapper rows are
+ * skipped. Each line is truncated so the prompt stays small.
+ */
+async function getRecentSelfRemarks(memory: MemoryService): Promise<string[]> {
+  try {
+    const episodes = await memory.listRecent(20)
+    const assistantOnly = episodes
+      .filter((e) => e.speaker === 'assistant' && e.text && e.text.trim().length > 0)
+      .slice(-RECENT_SELF_LIMIT)
+    return assistantOnly.map((e) =>
+      e.text.length > RECENT_SELF_MAX_CHARS_PER
+        ? e.text.slice(0, RECENT_SELF_MAX_CHARS_PER) + '…'
+        : e.text,
+    )
+  } catch (err) {
+    console.warn('[proactive] failed to read recent self-remarks:', err)
+    return []
+  }
+}
 
 let pollTimer: NodeJS.Timeout | null = null
 let lastFiredAt = 0
@@ -72,23 +108,10 @@ function collectTriggers(cfg: Config['proactive']): Trigger[] {
   return triggers
 }
 
-const PROACTIVE_PROMPT = `你现在是后台运行的"主动模式"。系统检测到你可能该说点什么了。
-
-判断标准：
-- 用户应该专注做事时（凌晨在敲代码、刚发完很长一段话）→ should_speak=false
-- 用户长时间不动可能在摸鱼/走神 → 可以关心一句
-- 单纯定时器到点，但用户刚刚才发完话 → false（别打扰）
-- 不确定 → false（宁可沉默）
-
-只输出 JSON，不要解释：
-{"should_speak": true|false, "reason": "内部说明", "comment": "如果 should_speak=true 时要说的话；不超过 30 字"}
-
-`
-
-function buildProactivePrompt(triggers: Trigger[]): string {
-  const triggerLines = triggers.map((t) => `${t.kind}: ${t.note}`).join('\n')
-  return `${PROACTIVE_PROMPT}\n触发原因：\n${triggerLines}\n`
-}
+// Persona-aware prompt now lives in shared/daily-prompts.ts so we don't
+// duplicate addressing rules across multiple "side LLM" sites. See
+// buildProactiveRemarkPrompt — it consumes persona + now + triggers and
+// keeps the JSON contract identical to what parseDecision below expects.
 
 function parseDecision(raw: string): ProactiveDecision | null {
   let text = raw.trim()
@@ -129,9 +152,58 @@ async function evaluate(): Promise<void> {
   // first is still in flight, wasting tokens.
   lastFiredAt = now
 
+  const persona = resolvePersona(cfg.persona)
+  const memoryForCtx = getMemoryService()
+  const userName = memoryForCtx
+    ? await memoryForCtx.getUserName().catch(() => null)
+    : null
+  // Pull the last few assistant turns so the prompt can show "you
+  // recently said X" — without this the proactive observer at low
+  // temperature happily repeats the same line every cycle.
+  const recentSelfRemarks = memoryForCtx
+    ? await getRecentSelfRemarks(memoryForCtx)
+    : []
+  // Creative temperature: 0.2 is fine for JSON gate decisions but
+  // produces deterministic repetition on the `comment` field. Bump to
+  // 0.7 so similar triggers yield varied phrasing.
+  const creativeTemp = 0.7
   let raw: string
   try {
-    raw = await runExtraction(buildProactivePrompt(triggers))
+    if (cfg.proactive.includeScreen) {
+      // Vision path — capture every connected screen, hand them to the
+      // gating LLM along with the prompt. Failure to capture (no
+      // displays / permission denied) silently falls back to text-only.
+      let images: { mimeType: string; bytes: Uint8Array }[] = []
+      try {
+        const pngs = await captureAllScreensPng()
+        images = pngs.map((bytes) => ({ mimeType: 'image/png', bytes }))
+      } catch (err) {
+        console.warn('[proactive] screen capture failed, falling back to text:', err)
+      }
+      const prompt = buildProactiveRemarkPrompt({
+        persona,
+        now: formatLocalNow(),
+        triggers: triggers.map((t) => ({ kind: t.kind, note: t.note })),
+        userName,
+        hasScreenshot: images.length > 0,
+        recentSelfRemarks,
+      })
+      raw =
+        images.length > 0
+          ? await runExtractionWithImages(prompt, images, {
+              temperature: creativeTemp,
+            })
+          : await runExtraction(prompt, { temperature: creativeTemp })
+    } else {
+      const prompt = buildProactiveRemarkPrompt({
+        persona,
+        now: formatLocalNow(),
+        triggers: triggers.map((t) => ({ kind: t.kind, note: t.note })),
+        userName,
+        recentSelfRemarks,
+      })
+      raw = await runExtraction(prompt, { temperature: creativeTemp })
+    }
   } catch (err) {
     console.warn('[proactive] LLM call failed:', err)
     // Release the cooldown so a working call can be tried sooner.

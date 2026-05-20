@@ -374,6 +374,14 @@ export function Settings({ initial, onClose }: SettingsProps) {
           {(() => {
             const isGemini = draft.backend.baseUrl.includes('googleapis.com')
             const isGlm = draft.backend.baseUrl.includes('bigmodel.cn')
+            const isKimi =
+              draft.backend.baseUrl.includes('moonshot.cn') ||
+              draft.backend.baseUrl.includes('moonshot.ai')
+            // Kimi's $web_search uses a non-OpenAI tool_call shape
+            // (type: "builtin_function") that the Vercel AI SDK's
+            // streaming parser rejects. Until we add a non-streaming
+            // path for it, search via Kimi just doesn't work — toggle
+            // is shown disabled with a hint.
             const supported = isGemini || isGlm
             return (
               <div style={{ marginTop: 12 }}>
@@ -409,6 +417,8 @@ export function Settings({ initial, onClose }: SettingsProps) {
                     ? '✓ Gemini 支持：开启后模型自动决定何时谷歌搜索，回答会标注引用来源。'
                     : isGlm
                     ? '✓ GLM 支持：开启后模型自动决定何时搜索（智谱内置 web_search 工具）。'
+                    : isKimi
+                    ? '⚠️ Kimi 联网搜索暂不支持（他们的 $web_search 协议与流式 OpenAI 客户端不兼容）。需要联网搜索请切换到 Gemini 或 GLM。'
                     : supported
                     ? ''
                     : '⚠️ 当前 backend 暂未接入搜索（Qwen / DeepSeek / LM Studio 等）。打勾不会生效。'}
@@ -787,6 +797,43 @@ export function Settings({ initial, onClose }: SettingsProps) {
                 />
                 始终置顶
               </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={draft.window.startAtLogin}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      window: { ...draft.window, startAtLogin: e.target.checked },
+                    })
+                  }
+                />
+                开机自启（登录系统后自动打开 OpenMeido）
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={draft.window.clickThroughTransparent}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      window: {
+                        ...draft.window,
+                        clickThroughTransparent: e.target.checked,
+                      },
+                    })
+                  }
+                />
+                透明区域穿透鼠标（可点到桌面 / 后面的窗口）
+              </label>
+              <div style={{ fontSize: 11, color: '#888', marginLeft: 22, marginBottom: 6 }}>
+                只在女仆形象之外的透明区域生效；女仆 / 聊天 / 侧栏照常接收点击。
+                偶发卡住的话，关掉再开。
+              </div>
+              <div style={{ fontSize: 11, color: '#888', marginLeft: 22 }}>
+                只在安装版生效。如果想撤销，也可以在 Windows
+                任务管理器 → 启动 里禁用。
+              </div>
             </Section>
 
             <Section title="字体大小">
@@ -958,6 +1005,31 @@ function ProactiveTab({
             onChange={(e) => onChange({ ...draft, cooldownSec: Number(e.target.value) })}
             style={{ width: '100%', marginBottom: 12 }}
           />
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <input
+              type="checkbox"
+              checked={draft.includeScreen}
+              onChange={(e) => onChange({ ...draft, includeScreen: e.target.checked })}
+            />
+            <span>让她偶尔瞥一眼屏幕（截图传给 LLM）</span>
+          </label>
+          {draft.includeScreen && (
+            <div
+              style={{
+                fontSize: 11,
+                color: '#fc8',
+                marginBottom: 12,
+                padding: '6px 8px',
+                background: 'rgba(255,200,100,0.08)',
+                border: '1px solid rgba(255,200,100,0.25)',
+                borderRadius: 4,
+              }}
+            >
+              ⚠️ 每次主动触发都会拍下所有屏幕发给云端 LLM。会拍到密码框、私聊、银行界面。
+              请确认你信任当前后端的隐私策略。
+            </div>
+          )}
 
           <div style={{ fontSize: 11, color: '#888', marginBottom: 12 }}>
             模型可能仍然选择沉默（觉得不该打扰）。即使触发了也不一定开口。
@@ -1641,6 +1713,131 @@ function SovitsFields({
   )
 }
 
+/**
+ * Embedding-model panel for the 记忆 tab.
+ *
+ * Two states the user actually cares about:
+ *   1. Model present (bundled or already downloaded) → long-term memory works
+ *      via local semantic search (bge-small-zh-v1.5).
+ *   2. Naive mode (no model) → recent-N only, no semantic recall. User can
+ *      tap "下载模型" here to fetch it from hf-mirror.com (no GitHub-blocked
+ *      hosts) and switch into full mode without restarting.
+ */
+function EmbedModelPanel(): React.ReactElement {
+  const [s, setS] = useState<{
+    naive: boolean
+    modelPresent: boolean
+    inProgress: boolean
+    totalBytes: number
+    receivedBytes: number
+    currentFile: string | null
+  } | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  async function refresh(): Promise<void> {
+    setS(await window.api.embed.status())
+  }
+
+  useEffect(() => {
+    void refresh()
+    const offP = window.api.embed.onProgress((p) => {
+      setS((prev) => (prev ? { ...prev, ...p } : prev))
+    })
+    const offC = window.api.embed.onComplete((r) => {
+      if (!r.ok) setErr(r.error)
+      else setErr(null)
+      void refresh()
+    })
+    return () => {
+      offP()
+      offC()
+    }
+  }, [])
+
+  if (!s) return <></>
+
+  const pct =
+    s.totalBytes > 0 ? Math.min(100, Math.round((s.receivedBytes / s.totalBytes) * 100)) : 0
+  const mb = (n: number): string => (n / 1024 / 1024).toFixed(1)
+
+  // Three rendering modes: downloading, naive (offer download), ready.
+  return (
+    <div
+      style={{
+        marginBottom: 12,
+        padding: '8px 10px',
+        background: 'rgba(255,255,255,0.04)',
+        border: '1px solid rgba(255,255,255,0.08)',
+        borderRadius: 4,
+        fontSize: 12,
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ color: '#ddd', fontWeight: 500 }}>
+          长期记忆模型 ·{' '}
+          {s.modelPresent ? (
+            <span style={{ color: '#8c8' }}>已就绪</span>
+          ) : (
+            <span style={{ color: '#fc8' }}>未安装（简易模式）</span>
+          )}
+        </span>
+        {!s.inProgress && !s.modelPresent && (
+          <button
+            onClick={() => {
+              setErr(null)
+              void window.api.embed.download()
+            }}
+            style={btnStyle('secondary')}
+          >
+            下载模型 (~95MB)
+          </button>
+        )}
+      </div>
+
+      {s.inProgress && (
+        <div style={{ marginTop: 6 }}>
+          <div
+            style={{
+              width: '100%',
+              height: 6,
+              background: 'rgba(255,255,255,0.08)',
+              borderRadius: 3,
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                width: `${pct}%`,
+                height: '100%',
+                background: '#5b8def',
+                transition: 'width 100ms linear',
+              }}
+            />
+          </div>
+          <div style={{ marginTop: 4, color: '#aaa', fontSize: 11 }}>
+            {pct}% · {mb(s.receivedBytes)} / {mb(s.totalBytes)} MB
+            {s.currentFile && ` · ${s.currentFile}`}
+          </div>
+        </div>
+      )}
+
+      {!s.inProgress && !s.modelPresent && (
+        <div style={{ marginTop: 6, color: '#999', fontSize: 11, lineHeight: 1.5 }}>
+          当前是简易记忆模式，妹妹只能记得最近几条对话，无法做语义检索。
+          下载模型后会自动切换到完整模式，无需重启。模型从{' '}
+          <span style={{ color: '#aac' }}>hf-mirror.com</span> 获取，中国大陆可直接连接。
+        </div>
+      )}
+
+      {err && (
+        <div style={{ marginTop: 6, color: '#f88', fontSize: 11 }}>
+          下载失败：{err}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function MemoryTab() {
   const [status, setStatus] = useState<{
     ready: boolean
@@ -1764,6 +1961,7 @@ function MemoryTab() {
 
   return (
     <Section title="记忆">
+      <EmbedModelPanel />
       <div style={{ fontSize: 12, color: '#ccc', marginBottom: 8 }}>
         共 <b style={{ color: '#fff' }}>{status.count}</b> 条记录，分布在{' '}
         <b style={{ color: '#fff' }}>{sessions.length}</b> 个会话。

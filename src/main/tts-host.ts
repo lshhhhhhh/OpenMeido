@@ -19,6 +19,7 @@ import { MsEdgeTTS, OUTPUT_FORMAT, type Voice } from 'msedge-tts'
 
 import { getConfig } from './config.js'
 import type { Config } from '../shared/config.js'
+import { stripMarkdown } from '../shared/strip-markdown.js'
 
 export interface TTSVoice {
   shortName: string
@@ -71,18 +72,20 @@ export async function synthesize(
 }
 
 /**
- * Strip XML/HTML-looking tags before TTS. Edge TTS wraps the input in
- * SSML server-side; if the input itself contains `<think>`, `</think>`,
- * or other angle-bracketed garbage that a thinking-mode model leaked
- * past the chat filter, the SSML becomes malformed and the service
- * returns a binary payload that decodeAudioData later rejects with
- * "Unable to decode audio data". Strip them here as belt-and-braces.
+ * Pre-TTS text cleanup:
+ *   1. Strip XML/HTML-looking tags (`<think>` etc.) — they'd otherwise
+ *      end up inside the SSML envelope Edge TTS builds, and the service
+ *      returns a binary garbage payload when SSML is malformed.
+ *   2. Strip markdown formatting via the shared helper. Without this,
+ *      TTS literally reads "星号" / "井号" / "竖线" out loud — sounds
+ *      terrible. Shared with the chat-bubble display path so audio and
+ *      visible text stay consistent.
  */
 function sanitizeForTTS(text: string): string {
-  return text
+  const noTags = text
     .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
     .replace(/<\/?(?:think|thinking|tool_call|arg_key|arg_value)(?:\s[^>]*)?>/gi, '')
-    .trim()
+  return stripMarkdown(noTags).trim()
 }
 
 /**

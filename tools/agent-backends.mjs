@@ -60,9 +60,50 @@ export function getAgentBackends() {
     })
   }
 
+  if (process.env.MOONSHOT_API_KEY) {
+    // Moonshot Kimi K2 series — OpenAI-compat, tool calls supported.
+    // Two regional endpoints with SEPARATE auth: api.moonshot.cn (mainland)
+    // vs api.moonshot.ai (international). The key only works on the org it
+    // was issued for — testing against the wrong endpoint returns 401
+    // "Invalid Authentication". Default to .ai; set KIMI_BASE_URL to
+    // override (e.g. for mainland-only accounts).
+    // Default to kimi-k2.6 — it's on BOTH the .cn and .ai endpoints, while
+    // kimi-k2-turbo-preview is .cn-only and would 404 on international keys.
+    //
+    // One Kimi-specific quirk patched via wrapped fetch: kimi-k2.6 defaults
+    // to thinking ON, which requires every replayed assistant tool-call
+    // message to carry `reasoning_content`. We don't capture that — disable
+    // thinking on the wire. (Temperature is already 0.6 globally now, so
+    // no override needed for Kimi's 0.6-only constraint.)
+    const name = process.env.KIMI_TEST_MODEL || 'kimi-k2.6'
+    const baseURL = process.env.KIMI_BASE_URL || 'https://api.moonshot.ai/v1'
+    const wrappedFetch = async (url, init) => {
+      if (init && init.method === 'POST' && typeof init.body === 'string') {
+        try {
+          const body = JSON.parse(init.body)
+          body.thinking = { type: 'disabled' }
+          init = { ...init, body: JSON.stringify(body) }
+        } catch {
+          /* malformed body — fall through */
+        }
+      }
+      return globalThis.fetch(url, init)
+    }
+    const openai = createOpenAI({
+      baseURL,
+      apiKey: process.env.MOONSHOT_API_KEY,
+      fetch: wrappedFetch,
+    })
+    out.push({
+      label: `Kimi · ${name}`,
+      model: openai.chat(name),
+      modelName: name,
+    })
+  }
+
   if (out.length === 0) {
     throw new Error(
-      'no agent backends available — set GEMINI_API_KEY and/or ZHIPU_API_KEY in .env',
+      'no agent backends available — set GEMINI_API_KEY / ZHIPU_API_KEY / MOONSHOT_API_KEY in .env',
     )
   }
   return out

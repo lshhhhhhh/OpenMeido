@@ -50,7 +50,7 @@ async function main() {
   try {
     const result = streamText({
       model: google('gemini-3.1-pro-preview'),
-      temperature: 1,
+      temperature: 0.6,
       system: '使用 listMail 工具查看用户邮件，然后简短回复一句。',
       prompt: '看看我的邮件',
       tools: { listMail },

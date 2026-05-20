@@ -45,6 +45,66 @@ interface AppRegionStyle extends React.CSSProperties {
 }
 const noDrag: AppRegionStyle = { WebkitAppRegion: 'no-drag' }
 
+/** User-facing tool labels for the 最近活动 feed. Anything not listed
+ *  falls back to the raw tool name — better than hiding work entirely. */
+const TOOL_LABELS: Record<string, string> = {
+  addTask: '增加待办',
+  listTasks: '查看清单',
+  markTaskDone: '完成待办',
+  setLive2DExpression: '换表情',
+  readClipboard: '看剪贴板',
+  readWebPage: '查网页',
+  readFile: '读文件',
+  listRecentEmails: '看邮件',
+  readEmail: '读邮件',
+  google_search: '联网搜索',
+}
+function toolLabelZh(name: string): string {
+  return TOOL_LABELS[name] ?? name
+}
+
+/** Extract the user-meaningful "what about" out of a tool's input JSON.
+ *  Returns '' when there's nothing worth showing for that tool. */
+function toolDetailZh(toolName: string, summary: string): string {
+  // summary is the JSON.stringify'd input; parse and pick the field that
+  // a non-dev user would care about. Fall back to the raw summary so we
+  // don't lose information for unknown tools.
+  let obj: Record<string, unknown>
+  try {
+    obj = JSON.parse(summary) as Record<string, unknown>
+  } catch {
+    return summary
+  }
+  const pick = (k: string): string => {
+    const v = obj[k]
+    return typeof v === 'string' ? v : ''
+  }
+  switch (toolName) {
+    case 'addTask':
+      return pick('text')
+    case 'markTaskDone':
+      return typeof obj.id === 'number' ? `#${obj.id}` : ''
+    case 'setLive2DExpression':
+      return pick('expression') || pick('name')
+    case 'readWebPage':
+      return pick('url')
+    case 'readFile':
+      return pick('path') || pick('filepath')
+    case 'readEmail':
+      return typeof obj.id === 'string' || typeof obj.id === 'number'
+        ? `#${obj.id}`
+        : ''
+    case 'google_search':
+      return pick('query') || pick('q')
+    case 'listTasks':
+    case 'listRecentEmails':
+    case 'readClipboard':
+      return ''
+    default:
+      return summary.length > 40 ? summary.slice(0, 40) + '…' : summary
+  }
+}
+
 function relativeTime(iso: string, now = Date.now()): string {
   const t = new Date(iso).getTime()
   if (!Number.isFinite(t)) return iso
@@ -121,10 +181,19 @@ export function Sidebar({
   open,
   onToggle,
   refreshActivityToken,
+  onSendChat,
 }: {
   open: boolean
   onToggle: () => void
   refreshActivityToken: number
+  /**
+   * Send the text in the quick-add input as a chat message to the maid.
+   * Routes through the same chat pipeline as the main input box — the
+   * AI then decides whether to add a task, ask a clarifying question,
+   * or just respond. The sidebar deliberately does NOT call tasks.add
+   * directly anymore: typing here should feel like talking to her.
+   */
+  onSendChat: (text: string) => void
 }): React.ReactElement {
   const [tasks, setTasks] = useState<Task[]>([])
   const [activity, setActivity] = useState<ToolActivity[]>([])
@@ -150,10 +219,11 @@ export function Sidebar({
     void reloadActivity()
   }, [refreshActivityToken])
 
-  // Re-render every 30s so countdown labels stay fresh.
+  // Re-render every 1s so countdown labels stay fresh — at 30s users could
+  // watch "5秒后" sit unchanged for half a minute and assume the UI was stuck.
   const [, setTick] = useState(0)
   useEffect(() => {
-    const t = setInterval(() => setTick((v) => v + 1), 30_000)
+    const t = setInterval(() => setTick((v) => v + 1), 1_000)
     return () => clearInterval(t)
   }, [])
 
@@ -162,16 +232,40 @@ export function Sidebar({
     if (open) newTaskRef.current?.focus()
   }, [open])
 
-  async function submitNewTask(): Promise<void> {
+  function submitNewTask(): void {
     const text = newTaskText.trim()
     if (!text) return
-    await window.api.tasks.add(text, null, null)
+    // Route through chat instead of adding a row directly. The model
+    // will call the addTask tool when appropriate, ask follow-up
+    // questions when ambiguous ("提醒我喝水" → "什么时候提醒？"), or
+    // just chat back. Listing/refresh happens automatically because
+    // chat.ts persists tool_calls and broadcasts tasks:changed.
+    onSendChat(text)
     setNewTaskText('')
-    void reloadTasks()
   }
 
   const active = tasks.filter((t) => t.doneAt === null)
   const done = tasks.filter((t) => t.doneAt !== null)
+
+  // Shared style for the toggle strip — used in both closed and open states.
+  // The strip stays glued to the right edge of the Live2D pane: when closed
+  // that's `right: 0` of the small window; when open the window grows by
+  // 260px to the right, so the strip lives on the LEFT edge of the sidebar
+  // content (= the same screen X). Achieved by flex order in the open case
+  // (strip first → content second).
+  const stripStyle = {
+    ...noDrag,
+    width: 18,
+    background: 'rgba(255,255,255,0.55)',
+    backdropFilter: 'blur(8px)',
+    border: 'none',
+    borderLeft: '1px solid rgba(0,0,0,0.08)',
+    cursor: 'pointer',
+    fontSize: 11,
+    color: '#666',
+    padding: 0,
+    writingMode: 'vertical-rl' as const,
+  }
 
   if (!open) {
     return (
@@ -179,24 +273,14 @@ export function Sidebar({
         onClick={onToggle}
         title="展开侧边栏 — 查看任务 / 最近活动"
         style={{
-          ...noDrag,
+          ...stripStyle,
           position: 'absolute',
           right: 0,
           top: 28,
           bottom: 0,
-          width: 18,
-          background: 'rgba(255,255,255,0.55)',
-          backdropFilter: 'blur(8px)',
-          border: 'none',
-          borderLeft: '1px solid rgba(0,0,0,0.08)',
-          cursor: 'pointer',
-          fontSize: 11,
-          color: '#666',
-          padding: 0,
-          writingMode: 'vertical-rl',
         }}
       >
-        ◀ 侧栏
+        ▶ 侧栏
       </button>
     )
   }
@@ -210,46 +294,26 @@ export function Sidebar({
         top: 28,
         bottom: 0,
         width: 260,
-        background: 'rgba(255,255,255,0.92)',
-        backdropFilter: 'blur(12px)',
-        borderLeft: '1px solid rgba(0,0,0,0.08)',
         display: 'flex',
-        flexDirection: 'column',
+        flexDirection: 'row',
         fontFamily: 'system-ui, sans-serif',
         fontSize: 12,
         color: '#333',
-        boxShadow: '-2px 0 8px rgba(0,0,0,0.05)',
       }}
     >
+      <button onClick={onToggle} title="收起侧栏" style={{ ...stripStyle, flex: '0 0 18px' }}>
+        ◀ 侧栏
+      </button>
       <div
         style={{
-          flex: '0 0 auto',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          padding: '6px 10px',
-          borderBottom: '1px solid rgba(0,0,0,0.08)',
-          background: 'rgba(255,255,255,0.6)',
+          flex: 1,
+          minWidth: 0,
+          background: 'rgba(255,255,255,0.92)',
+          backdropFilter: 'blur(12px)',
+          boxShadow: '-2px 0 8px rgba(0,0,0,0.05)',
+          overflowY: 'auto',
         }}
       >
-        <span style={{ fontSize: 11, fontWeight: 600, color: '#555' }}>侧栏</span>
-        <button
-          onClick={onToggle}
-          title="收起"
-          style={{
-            background: 'transparent',
-            border: 'none',
-            cursor: 'pointer',
-            fontSize: 12,
-            color: '#666',
-            padding: '2px 6px',
-          }}
-        >
-          ▶
-        </button>
-      </div>
-
-      <div style={{ flex: 1, overflowY: 'auto' }}>
         {/* ===== Unified tasks (reminders + TODOs) ===== */}
         <Section title="📝 待办" badge={active.length} defaultOpen>
           {/* Quick-add input */}
@@ -260,9 +324,9 @@ export function Sidebar({
               value={newTaskText}
               onChange={(e) => setNewTaskText(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') void submitNewTask()
+                if (e.key === 'Enter') submitNewTask()
               }}
-              placeholder="加一条…"
+              placeholder="和女仆说一句…"
               style={{
                 flex: 1,
                 padding: '3px 6px',
@@ -273,7 +337,7 @@ export function Sidebar({
               }}
             />
             <button
-              onClick={() => void submitNewTask()}
+              onClick={() => submitNewTask()}
               disabled={!newTaskText.trim()}
               style={{
                 padding: '3px 8px',
@@ -409,43 +473,46 @@ export function Sidebar({
         </Section>
 
         <Section title="📋 最近活动" defaultOpen={false}>
-          {activity.length === 0 ? (
-            <div style={{ color: '#999', fontStyle: 'italic', fontSize: 11 }}>
-              暂无工具调用记录
-            </div>
-          ) : (
-            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-              {activity.map((a, i) => (
-                <li
-                  key={`${a.episodeId}-${i}`}
-                  style={{
-                    padding: '3px 0',
-                    borderBottom: '1px dotted rgba(0,0,0,0.05)',
-                    fontSize: 11,
-                  }}
-                >
-                  <div>
-                    <span style={{ color: a.kind === 'call' ? '#3a73d0' : '#888' }}>
-                      {a.kind === 'call' ? '→' : '←'}
-                    </span>{' '}
-                    <span style={{ fontWeight: 500 }}>{a.toolName}</span>
-                  </div>
-                  <div
+          {(() => {
+            // Only show call rows — result rows are noise to a non-dev user
+            // ("← addTask {ok:true,id:42}" reads like a debug log). The call
+            // alone is enough to communicate "the maid did X".
+            const calls = activity.filter((a) => a.kind === 'call')
+            if (calls.length === 0)
+              return (
+                <div style={{ color: '#999', fontStyle: 'italic', fontSize: 11 }}>
+                  最近没有做什么呢
+                </div>
+              )
+            return (
+              <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                {calls.map((a, i) => (
+                  <li
+                    key={`${a.episodeId}-${i}`}
                     style={{
-                      fontSize: 10,
-                      color: '#888',
-                      whiteSpace: 'nowrap',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
+                      padding: '4px 0',
+                      borderBottom: '1px dotted rgba(0,0,0,0.05)',
+                      fontSize: 11,
                     }}
-                    title={a.summary}
                   >
-                    {a.summary}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
+                    <div style={{ color: '#333' }}>
+                      <span style={{ fontWeight: 500 }}>
+                        {toolLabelZh(a.toolName)}
+                      </span>
+                      {(() => {
+                        const detail = toolDetailZh(a.toolName, a.summary)
+                        return detail ? (
+                          <span style={{ color: '#666', marginLeft: 4 }}>
+                            · {detail}
+                          </span>
+                        ) : null
+                      })()}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )
+          })()}
         </Section>
       </div>
     </div>

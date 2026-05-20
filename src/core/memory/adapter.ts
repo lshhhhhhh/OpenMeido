@@ -8,7 +8,16 @@
  * IndexedDB / Capacitor SQLite cases where async is unavoidable.
  */
 
-import type { Episode, Fact, NewFact, SessionSummary, Speaker, ToolCallPart, ToolResultPart } from './types.js'
+import type {
+  Episode,
+  EpisodeImage,
+  Fact,
+  NewFact,
+  SessionSummary,
+  Speaker,
+  ToolCallPart,
+  ToolResultPart,
+} from './types.js'
 
 export interface MemoryAdapter {
   /**
@@ -30,6 +39,7 @@ export interface MemoryAdapter {
     embedding: Float32Array,
     sessionId?: string | null,
     toolParts?: (ToolCallPart | ToolResultPart)[],
+    images?: EpisodeImage[],
   ): Promise<number>
 
   /**

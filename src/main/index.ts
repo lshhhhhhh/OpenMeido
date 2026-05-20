@@ -7,9 +7,17 @@ import { fileURLToPath } from 'node:url'
 
 import { runChat } from './chat.js'
 import { getConfig, setConfig, onConfigChange } from './config.js'
-import { initMemory, getMemoryService, getMemoryInitError, isNaiveMemoryMode } from './memory-host.js'
+import {
+  initMemory,
+  getMemoryService,
+  getMemoryAdapter,
+  getMemoryInitError,
+  isNaiveMemoryMode,
+} from './memory-host.js'
 import { initReminders, getReminderService } from './reminder-host.js'
 import { initTasks, getTaskService } from './tasks-host.js'
+import { greetOnLaunch } from './greeting-host.js'
+import { initGoodbye } from './goodbye-host.js'
 import { getDownloadState, startEmbedDownload } from './embed-download-host.js'
 import { testMailConfig } from './mail-host.js'
 import { testBackend, runExtraction } from './chat-host.js'
@@ -152,6 +160,33 @@ function createWindow(): void {
 
 }
 
+/**
+ * Sync the OS auto-start registration to match `window.startAtLogin`.
+ * Idempotent — calling with the same value repeatedly is harmless. On
+ * Windows this writes (or removes) the Run-key entry; on macOS it
+ * toggles the Login Item; on Linux it manages a .desktop file.
+ *
+ * Production builds (packaged exe) get registered with the exe path.
+ * Dev (`npm run dev`) gets registered with the electron binary + main
+ * script args — useful for testing but you almost never want that
+ * persisted, so we also skip writing in dev unless app.isPackaged is
+ * true.
+ */
+function applyStartAtLogin(startAtLogin: boolean): void {
+  if (!app.isPackaged) {
+    // Skip in dev — registering the dev binary as a startup entry would
+    // cause Electron + node to auto-launch on every login, which is
+    // almost never what the developer wants.
+    return
+  }
+  app.setLoginItemSettings({
+    openAtLogin: startAtLogin,
+    // Don't pop the window to the front on auto-launch; we want her to
+    // come up quietly. The greeting + proactive remarks still fire.
+    openAsHidden: false,
+  })
+}
+
 // Apply live config changes to the running window where possible. width/height
 // already persist via the resize listener above, so we don't push them back.
 onConfigChange((next) => {
@@ -159,6 +194,7 @@ onConfigChange((next) => {
     mainWindow.setAlwaysOnTop(next.window.alwaysOnTop)
     mainWindow.webContents.setZoomFactor(next.ui.fontScale)
   }
+  applyStartAtLogin(next.window.startAtLogin)
 })
 
 // ---- Chat IPC ----
@@ -175,11 +211,19 @@ ipcMain.on(IPC.ChatSend, (event, payload: ChatSendPayload) => {
   })
 })
 
-// Window click-through (setIgnoreMouseEvents) was removed in a hotfix —
-// it kept getting stuck in the ON state after modals closed, eating user
-// clicks and silently breaking input focus. The window stays opaque to
-// clicks now; visual transparency comes from `transparent: true` on the
-// BrowserWindow alone.
+// Window click-through (setIgnoreMouseEvents). Earlier version was always-on
+// + got stuck eating clicks; this revival is gated by an opt-in config flag
+// and uses `forward: true` so mousemove events keep firing while ignored —
+// the previous "stuck" failure came from losing mousemove and never being
+// able to detect when to turn click-through back off. Renderer drives the
+// toggle from the Live2D coverage probe (over-pixel vs over-transparent).
+ipcMain.handle('window:setIgnoreMouseEvents', (_event, ignore: boolean) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  // forward: true is critical — without it, the OS stops dispatching
+  // mousemove to the renderer once click-through is on, and we can never
+  // re-evaluate whether the cursor moved back onto a UI region.
+  mainWindow.setIgnoreMouseEvents(ignore, { forward: true })
+})
 
 // ---- TTS ----
 ipcMain.handle('tts:listVoices', async () => {
@@ -299,6 +343,55 @@ ipcMain.handle('memory:reflectNow', async () => {
   return svc.reflectOnce()
 })
 
+ipcMain.handle('memory:recentToolActivity', async (_event, limit: number = 20) => {
+  const adapter = getMemoryAdapter()
+  if (!adapter) return []
+  // Pull more episodes than the requested cap because each row contributes
+  // 0-N tool entries; we trim after flattening.
+  const episodes = await adapter.recent(Math.max(limit * 2, 30), null)
+  const out: Array<{
+    episodeId: number
+    ts: string
+    kind: 'call' | 'result'
+    toolName: string
+    summary: string
+  }> = []
+  for (const e of episodes) {
+    if (!e.toolParts || e.toolParts.length === 0) continue
+    for (const p of e.toolParts) {
+      if (p.type === 'tool-call') {
+        out.push({
+          episodeId: e.id,
+          ts: e.ts,
+          kind: 'call',
+          toolName: p.toolName,
+          summary: summarizeToolPayload(p.input),
+        })
+      } else if (p.type === 'tool-result') {
+        out.push({
+          episodeId: e.id,
+          ts: e.ts,
+          kind: 'result',
+          toolName: p.toolName,
+          summary: summarizeToolPayload(p.output),
+        })
+      }
+    }
+  }
+  return out.slice(-limit).reverse()
+})
+
+function summarizeToolPayload(v: unknown): string {
+  if (v === null || v === undefined) return ''
+  if (typeof v === 'string') return v.length > 80 ? v.slice(0, 80) + '…' : v
+  try {
+    const s = JSON.stringify(v)
+    return s.length > 80 ? s.slice(0, 80) + '…' : s
+  } catch {
+    return String(v)
+  }
+}
+
 // ---- Reminder IPC ----
 
 ipcMain.handle('reminders:list', async (_event, limit: number = 50) => {
@@ -406,7 +499,18 @@ void app.whenReady().then(async () => {
   await initTasks()
   initProactive(onConfigChange)
   initNotifListener()
+  // Wire the goodbye-on-close hook BEFORE creating the window — that way
+  // the very first quit attempt (whether from window close, Cmd-Q, etc.)
+  // is intercepted and gets the farewell line.
+  initGoodbye()
+  // Sync OS auto-start registration to whatever the persisted config says.
+  // Runs every boot so the user's choice survives uninstall/reinstall
+  // (the registry entry would be orphaned otherwise).
+  applyStartAtLogin(getConfig().window.startAtLogin)
   createWindow()
+  // Fire-and-forget the greeting — it self-waits for the renderer to be
+  // ready, so we don't block window creation behind an LLM round-trip.
+  void greetOnLaunch()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

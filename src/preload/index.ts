@@ -97,11 +97,24 @@ const api = {
     },
   },
 
-  // window: previously exposed setClickThrough + onCursorPoint for the
-  // transparent-window click-through feature. Removed in a hotfix — kept
-  // getting stuck ON and eating user input. Visual transparency alone is
-  // enough; clicks land on the renderer instead of falling through to the
-  // desktop.
+  window: {
+    /**
+     * Toggle window-level click-through. When `ignore` is true, mouse
+     * input passes through to whatever's behind OpenMeido (desktop /
+     * other windows). Renderer drives this from the Live2D coverage
+     * probe — over-pixel = false (capture), over-transparent = true
+     * (pass through). Main process applies the corresponding
+     * setIgnoreMouseEvents call with forward:true so mousemove still
+     * fires (otherwise we couldn't detect when to turn it back off).
+     *
+     * Gated by `cfg.window.clickThroughTransparent` — when that's off,
+     * the renderer never calls this, and the window stays fully
+     * interactive.
+     */
+    setIgnoreMouseEvents(ignore: boolean): Promise<void> {
+      return ipcRenderer.invoke('window:setIgnoreMouseEvents', ignore) as Promise<void>
+    },
+  },
 
   proactive: {
     /** Maid spoke up on her own (timer / idle trigger). Subscribe to render the bubble. */

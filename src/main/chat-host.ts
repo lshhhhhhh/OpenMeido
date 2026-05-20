@@ -15,6 +15,7 @@ import { generateText, type LanguageModel } from 'ai'
 
 import type { Config } from '../shared/config.js'
 import { getConfig, resolveApiKey, resolveBackendKey } from './config.js'
+import { lightweightModel } from '../shared/lightweight-models.js'
 
 export type LlmStatus = 'ok' | 'error' | 'idle'
 
@@ -36,30 +37,158 @@ export function notifyLlmStatus(status: LlmStatus): void {
 }
 
 /**
- * One-shot text generation against the user's configured chat backend. Used
- * by the L3 reflection module to ask the LLM for fact extraction without
- * dragging in tools, streaming, or memory injection.
+ * One-shot text generation against the configured backend's LIGHTWEIGHT
+ * tier. Used for "side LLM tasks": reflection (fact extraction), greeting
+ * line, reminder line, proactive observer, notification gate, emotion
+ * classification.
  *
- * Picks the same provider chat.ts picks (Google native for Gemini, OpenAI-
- * compat for everything else). Throws on failure — the caller handles
- * retries and parse failures.
+ * Routes to a cheap fast text-only model when one is known for the host
+ * (see src/shared/lightweight-models.ts) — falls back to the user's
+ * configured chat model otherwise. Picking lightweight per host means
+ * every reply that triggers an emotion classifier doesn't double our
+ * inference cost or latency.
+ *
+ * `opts.temperature` defaults to 0.2 — good for structured/JSON extraction
+ * where determinism matters (reflection, notif gate, emotion classifier).
+ * Creative tasks (greeting, proactive remark, reminder line, goodbye)
+ * should pass 0.7+ to avoid the model producing the same line every
+ * time when the input is similar.
+ *
+ * Picks the same provider chat.ts picks (Google native for Gemini,
+ * OpenAI-compat for everything else). Throws on failure — the caller
+ * handles retries and parse failures.
  */
-export async function runExtraction(prompt: string): Promise<string> {
+export async function runExtraction(
+  prompt: string,
+  opts: { temperature?: number } = {},
+): Promise<string> {
   const cfg = getConfig()
   const apiKey = resolveApiKey(cfg)
   if (!apiKey) throw new Error('no API key')
+  // Prefer the lightweight tier; fall back to the user's configured model
+  // when no lightweight tier is known (e.g., LM Studio with one loaded
+  // model).
+  const modelId = lightweightModel(cfg.backend.baseUrl) ?? cfg.backend.model
+  // Kimi requires temperature exactly 0.6 (HTTP 400 otherwise). Every
+  // other provider takes the lower 0.2 we want for structured extraction.
+  const isKimi =
+    cfg.backend.baseUrl.includes('moonshot.cn') ||
+    cfg.backend.baseUrl.includes('moonshot.ai')
   let model: LanguageModel
   if (cfg.backend.baseUrl.includes('googleapis.com')) {
     const google = createGoogleGenerativeAI({ apiKey })
-    model = google(cfg.backend.model)
+    model = google(modelId)
   } else {
-    const openai = createOpenAI({ baseURL: cfg.backend.baseUrl, apiKey })
+    // For Kimi: inject `thinking: {type: "disabled"}` even though
+    // runExtraction is single-turn (so the reasoning_content-missing
+    // 400 we saw in chat.ts shouldn't fire here). Cheap insurance —
+    // if a future Kimi model adds new validations around thinking,
+    // we're already covered.
+    const wrappedFetch = isKimi
+      ? (async (url: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+          if (init && init.method === 'POST' && typeof init.body === 'string') {
+            try {
+              const body = JSON.parse(init.body) as {
+                thinking?: { type: 'enabled' | 'disabled' }
+              }
+              body.thinking = { type: 'disabled' }
+              init = { ...init, body: JSON.stringify(body) }
+            } catch {
+              /* malformed body — fall through */
+            }
+          }
+          return globalThis.fetch(url, init)
+        })
+      : undefined
+    const openai = createOpenAI({
+      baseURL: cfg.backend.baseUrl,
+      apiKey,
+      ...(wrappedFetch
+        ? { fetch: wrappedFetch as unknown as typeof globalThis.fetch }
+        : {}),
+    })
     // .chat() — see chat.ts for why we don't use the default factory.
-    model = openai.chat(cfg.backend.model)
+    model = openai.chat(modelId)
   }
-  // temperature 0.2: extraction is structured / deterministic-ish work.
-  // Higher temps make the model wander off the schema.
-  const result = await generateText({ model, prompt, temperature: 0.2 })
+  // Kimi clamps to exactly 0.6 (HTTP 400 otherwise). For other providers,
+  // honor the caller's temperature or default to 0.2.
+  const temperature = isKimi ? 0.6 : (opts.temperature ?? 0.2)
+  const result = await generateText({ model, prompt, temperature })
+  return result.text
+}
+
+/**
+ * Multimodal variant of runExtraction — same routing rules but accepts
+ * one or more images alongside the text prompt. Used by the proactive
+ * observer's "look at the screen and decide whether to speak" path.
+ *
+ * Falls back to the user's main chat model when the lightweight tier is
+ * text-only — vision-capable lightweight tiers exist on Gemini, GLM,
+ * Qwen, Kimi (国际 / k2.6), but not on every provider.
+ */
+export async function runExtractionWithImages(
+  prompt: string,
+  images: { mimeType: string; bytes: Uint8Array }[],
+  opts: { temperature?: number } = {},
+): Promise<string> {
+  const cfg = getConfig()
+  const apiKey = resolveApiKey(cfg)
+  if (!apiKey) throw new Error('no API key')
+  const url = cfg.backend.baseUrl
+  const isKimi = url.includes('moonshot.cn') || url.includes('moonshot.ai')
+  // For vision tasks, prefer the lightweight tier if it's known vision-
+  // capable; otherwise drop back to the user's main model (which we
+  // guarantee is multimodal — OpenMeido needs it for screenshots).
+  // Text-only lightweight tiers: deepseek-v4-flash, kimi-k2-turbo-preview.
+  const lwModel = lightweightModel(url)
+  const lwIsTextOnly =
+    lwModel === 'deepseek-v4-flash' || lwModel === 'kimi-k2-turbo-preview'
+  const modelId = lwModel && !lwIsTextOnly ? lwModel : cfg.backend.model
+  let model: LanguageModel
+  if (url.includes('googleapis.com')) {
+    const google = createGoogleGenerativeAI({ apiKey })
+    model = google(modelId)
+  } else {
+    const wrappedFetch = isKimi
+      ? (async (u: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+          if (init && init.method === 'POST' && typeof init.body === 'string') {
+            try {
+              const body = JSON.parse(init.body) as {
+                thinking?: { type: 'enabled' | 'disabled' }
+              }
+              body.thinking = { type: 'disabled' }
+              init = { ...init, body: JSON.stringify(body) }
+            } catch {
+              /* malformed body — fall through */
+            }
+          }
+          return globalThis.fetch(u, init)
+        })
+      : undefined
+    const openai = createOpenAI({
+      baseURL: url,
+      apiKey,
+      ...(wrappedFetch ? { fetch: wrappedFetch as unknown as typeof globalThis.fetch } : {}),
+    })
+    model = openai.chat(modelId)
+  }
+  const result = await generateText({
+    model,
+    temperature: isKimi ? 0.6 : (opts.temperature ?? 0.2),
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          ...images.map((img) => ({
+            type: 'image' as const,
+            image: img.bytes,
+            mediaType: img.mimeType,
+          })),
+        ],
+      },
+    ],
+  })
   return result.text
 }
 

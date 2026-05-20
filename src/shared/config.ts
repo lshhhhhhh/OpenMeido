@@ -159,6 +159,25 @@ export const configSchema = z.object({
       alwaysOnTop: z.boolean().default(true),
       width: z.number().int().min(260).default(480),
       height: z.number().int().min(400).default(720),
+      /**
+       * Launch OpenMeido automatically when the user logs in.
+       * Default off — adding entries to OS auto-start without explicit
+       * opt-in feels intrusive. On Windows this writes to
+       * HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
+       * via Electron's app.setLoginItemSettings (which the OS hides
+       * under Task Manager → Startup so users can disable from there too).
+       */
+      startAtLogin: z.boolean().default(false),
+      /**
+       * When ON, mouse clicks on transparent areas of the window pass
+       * through to whatever's behind (desktop, other windows). Clicks on
+       * the Live2D model itself + on UI overlays (chat, sidebar) still
+       * register. Useful for larger windows that would otherwise block
+       * access to the desktop. Default off — earlier versions had this
+       * enabled by default and occasionally got stuck "ON" and ate all
+       * mouse input; opt-in is safer.
+       */
+      clickThroughTransparent: z.boolean().default(false),
     })
     .default({}),
   embedding: z
@@ -185,6 +204,18 @@ export const configSchema = z.object({
       topK: z.number().int().min(0).max(20).default(5),
       /** How many most-recent episodes to always include (working window). */
       recentN: z.number().int().min(0).max(40).default(10),
+      /**
+       * How many trailing image-bearing user turns get their original
+       * image bytes re-attached when replaying history. Older image
+       * turns are still kept in memory as text — the model just can't
+       * "see" them anymore.
+       *
+       * 3 is enough to cover a 2-3-turn discussion about a screenshot
+       * without paying vision-token cost on every image forever. Larger
+       * values give the model better fidelity at the cost of context
+       * length + token spend per turn.
+       */
+      imageRecallTurns: z.number().int().min(0).max(10).default(3),
     })
     .default({}),
   proactive: z
@@ -207,6 +238,19 @@ export const configSchema = z.object({
       minSilenceSec: z.number().int().min(5).max(600).default(30),
       /** Hard cooldown between any two proactive remarks, regardless of trigger. */
       cooldownSec: z.number().int().min(60).max(7200).default(600),
+      /**
+       * When true, every proactive evaluation also captures the current
+       * screen(s) and sends them to the gating LLM. Lets the character
+       * comment on what the user is actually looking at instead of only
+       * reasoning from time-of-day + idle. Default OFF — capturing the
+       * screen is sensitive (password fields, private chats, banking)
+       * and must be opt-in.
+       *
+       * Requires a vision-capable model. If the user's backend exposes
+       * a vision-capable lightweight tier we'll use it; otherwise we
+       * fall back to their main chat model.
+       */
+      includeScreen: z.boolean().default(false),
       /**
        * Windows toast-notification listener — when ON, OpenMeido subscribes
        * to the OS notification feed (QQ / WeChat / Outlook etc.) and the LLM

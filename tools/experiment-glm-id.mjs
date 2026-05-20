@@ -174,9 +174,9 @@ async function runTrial(backend, variant) {
     const result = streamText({
       model: backend.model,
       // Match production temperature so bug reproduction conditions are
-      // realistic. 0.7 was the previous run and showed less variation
-      // than 1.0; bumping to 1.0 to surface the flakiness.
-      temperature: 1,
+      // realistic. Production unified on 0.6 across all backends
+      // (Kimi requires exactly 0.6 and tool-call reliability is better).
+      temperature: 0.6,
       system: baseSystem + variant.systemAddendum,
       prompt,
       tools,

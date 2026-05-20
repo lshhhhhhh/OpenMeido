@@ -41,6 +41,13 @@ export interface ToolResultPart {
   output: unknown
 }
 
+export interface EpisodeImage {
+  /** MIME type, e.g. "image/png" / "image/jpeg". */
+  mimeType: string
+  /** Raw base64 (no `data:` prefix). */
+  base64: string
+}
+
 export interface Episode {
   id: number
   ts: string
@@ -55,6 +62,17 @@ export interface Episode {
    * Stored as JSON in sqlite; null on disk when absent.
    */
   toolParts?: (ToolCallPart | ToolResultPart)[]
+  /**
+   * Images attached to a user turn (screenshots, pasted images). Stored
+   * as JSON in sqlite. Persisted so the AI can keep "seeing" them in
+   * follow-up turns about the same image — without this, conversations
+   * about a screenshot devolve into the model hallucinating from its
+   * own turn-1 description.
+   *
+   * Replay is bounded by `cfg.memory.imageRecallTurns` (default 3) so
+   * long sessions don't pay token cost on images from days ago.
+   */
+  images?: EpisodeImage[]
 }
 
 /**
