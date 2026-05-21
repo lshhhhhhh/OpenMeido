@@ -40,6 +40,7 @@ import { getMailService } from './mail-host.js'
 import { getTaskService } from './tasks-host.js'
 import { createTextDeltaFilter } from './chat-text-filter.js'
 import { classifyAndApply } from './emotion-classifier.js'
+import { runExtraction } from './chat-host.js'
 import { buildTierPromptBlock } from '../shared/affinity.js'
 import type { Episode } from '../core/memory/types.js'
 
@@ -374,6 +375,220 @@ const readEmail = tool({
     }
   },
 })
+
+/**
+ * Walk an email's parent chain to assemble thread context. Stops at
+ * depth `maxDepth` OR when a parent is null (chain root / parent not
+ * locatable). Returns oldest-first so the LLM reads chronologically.
+ */
+async function buildEmailThreadContext(
+  mail: NonNullable<ReturnType<typeof getMailService>>,
+  startUid: string,
+  maxDepth: number = 5,
+): Promise<{ from: string; ts: string; subject: string; body: string }[]> {
+  const chain: { from: string; ts: string; subject: string; body: string }[] = []
+  let currentId: string | undefined = startUid
+  for (let i = 0; i < maxDepth && currentId; i++) {
+    const msg = await mail.readMessage(currentId)
+    if (!msg) break
+    chain.push({
+      from: msg.from,
+      ts: msg.ts,
+      subject: msg.subject,
+      body:
+        msg.body.length > 2000
+          ? msg.body.slice(0, 2000) + '\n…[truncated]'
+          : msg.body,
+    })
+    // The adapter already does one-level parent lookup. We use its
+    // parent.id if present to walk further.
+    currentId = msg.parent?.id
+  }
+  return chain.reverse() // oldest first
+}
+
+/**
+ * Parse the writing LLM's JSON output {subject, body}. Tolerant of:
+ *   - fenced block ```json\n{...}\n```
+ *   - bare JSON object
+ *   - structured plain-text fallback (Subject: ... \n\n body)
+ */
+function parseDraftJson(
+  raw: string,
+  fallbackSubject: string,
+): { subject: string; body: string } {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const tryStrings = [fenced?.[1], raw].filter((s): s is string => typeof s === 'string')
+  for (const s of tryStrings) {
+    try {
+      const obj = JSON.parse(s) as Record<string, unknown>
+      const subject = typeof obj.subject === 'string' ? obj.subject : fallbackSubject
+      const body = typeof obj.body === 'string' ? obj.body.trim() : ''
+      if (body) return { subject, body }
+    } catch {
+      /* try next */
+    }
+  }
+  // Fallback: try to find a JSON object inside the raw text.
+  const objMatch = raw.match(/\{[\s\S]*?"body"\s*:[\s\S]*?\}/i)
+  if (objMatch) {
+    try {
+      const obj = JSON.parse(objMatch[0]) as Record<string, unknown>
+      const subject = typeof obj.subject === 'string' ? obj.subject : fallbackSubject
+      const body = typeof obj.body === 'string' ? obj.body.trim() : ''
+      if (body) return { subject, body }
+    } catch {
+      /* fall through */
+    }
+  }
+  // Last-ditch: treat the whole raw text as the body.
+  return { subject: fallbackSubject, body: raw.trim() }
+}
+
+const draftEmailReply = tool({
+  description:
+    '帮用户起草一封回信。用于用户说"帮我回这封"、"草稿一下回复"、"写一版回复"、"再改一版"等场景。\n' +
+    '内部会自动读取邮件 + 走 thread 上下文，调一次 LLM 用**用户本人的口吻**写一份草稿，' +
+    '然后通过 side-channel 把草稿放进聊天里作为可复制 + 可改稿的卡片。\n' +
+    '**id 来源**：跟 readEmail 一样，必须用 listRecentEmails 返回的真实 id。\n' +
+    '**改稿**：用户说"再改一版，更简短/更正式/加一句确认时间"时，把上一次草稿的 body 作为 `previousDraft` 传回来，' +
+    '加上用户的反馈作为 `instruction`。返回新草稿替换聊天里的旧卡片。',
+  inputSchema: z.object({
+    uid: z
+      .string()
+      .describe('要回复的邮件 id（来自 listRecentEmails）'),
+    instruction: z
+      .string()
+      .optional()
+      .describe(
+        '可选：用户对回复内容的具体要求，比如"简短礼貌地拒绝"、"确认周三 3 点"、"追问截止日期"。' +
+          '不传时默认"自然回复"。',
+      ),
+    previousDraft: z
+      .string()
+      .optional()
+      .describe(
+        '改稿时传：上一版草稿的正文。模型会基于这版调整，而不是从头写。',
+      ),
+  }),
+  execute: async ({ uid, instruction, previousDraft }) => {
+    console.log(
+      `[mail] draftEmailReply uid="${uid}" instruction="${instruction ?? '(none)'}" iter=${
+        previousDraft ? 'yes' : 'no'
+      }`,
+    )
+    const mail = getMailService()
+    if (!mail) return { error: '邮箱未配置或未启用。' }
+    const target = await mail.readMessage(uid)
+    if (!target) {
+      return {
+        error: `id="${uid}" 在邮箱里找不到。先用 listRecentEmails 拿当前列表。`,
+      }
+    }
+    const thread = await buildEmailThreadContext(mail, uid, 5)
+    if (thread.length === 0) {
+      return { error: '邮件读取失败。' }
+    }
+    // Try to get the user's display name from memory for a more
+    // natural sign-off (still don't auto-sign — let the user's email
+    // client append). Used in the prompt as "this email is from <X>"
+    // to anchor the writing voice.
+    const memory = getMemoryService()
+    const userName = memory ? await memory.getUserName().catch(() => null) : null
+    const prompt = buildEmailDraftPrompt({
+      thread,
+      instruction,
+      previousDraft,
+      userName,
+    })
+    let raw: string
+    try {
+      raw = await runExtraction(prompt, { temperature: 0.6 })
+    } catch (err) {
+      return {
+        error: '写信助手 LLM 调用失败：' + (err instanceof Error ? err.message : String(err)),
+      }
+    }
+    const fallbackSubject = target.subject?.toLowerCase().startsWith('re:')
+      ? target.subject
+      : `Re: ${target.subject ?? ''}`
+    const { subject, body } = parseDraftJson(raw, fallbackSubject)
+    // Emit the card to the renderer. The model also gets a short
+    // confirmation in the tool result so its next text reply makes
+    // sense ("好了，主人 / 哥 / 你，草稿放上面了，您看看").
+    const cardId = `draft-${uid}-${Date.now().toString(36)}`
+    _activeEmit?.({
+      type: 'draft-card',
+      draft: {
+        cardId,
+        replyToUid: uid,
+        to: target.from,
+        subject,
+        body,
+      },
+    })
+    return {
+      ok: true,
+      cardId,
+      note:
+        '草稿已经放进聊天里。简短跟用户说一句"主人/哥/你 看看上面的草稿，要改一版告诉我哪里"。' +
+        '不要在你的回复里把草稿正文重复一遍——卡片已经显示了。',
+    }
+  },
+})
+
+/**
+ * Build the writing prompt for draftEmailReply. Deliberately STRIPS
+ * the persona system prompt — when she's helping draft an email she's
+ * writing AS THE USER, not as the maid / imouto / ojou character. The
+ * resulting voice should match the user's own emails, not OpenMeido's
+ * persona voice.
+ */
+function buildEmailDraftPrompt(args: {
+  thread: { from: string; ts: string; subject: string; body: string }[]
+  instruction?: string
+  previousDraft?: string
+  userName: string | null
+}): string {
+  const threadText = args.thread
+    .map(
+      (m, i) =>
+        `## ${i + 1}. From: ${m.from}\nDate: ${m.ts}\nSubject: ${m.subject}\n\n${m.body}`,
+    )
+    .join('\n\n---\n\n')
+  const iterationBlock = args.previousDraft
+    ? `\n# 上一版草稿（请按下方"用户要求"调整）\n${args.previousDraft}\n`
+    : ''
+  const instructionText = args.instruction?.trim()
+    ? args.instruction.trim()
+    : '自然、礼貌地回复，匹配对方邮件的正式度。'
+  const userVoiceHint = args.userName
+    ? `用户名字是 ${args.userName}，写作时用他/她的第一人称视角。`
+    : '用第一人称视角写。'
+
+  return (
+    `你是用户的私人邮件写作助手。\n` +
+    `\n` +
+    `**重要**：你现在不是 OpenMeido 的女仆/妹妹/大小姐角色——你是用户本人在写信。` +
+    `回信要听起来像**用户自己**写的，不是某个虚构角色的代笔。${userVoiceHint}\n` +
+    `\n` +
+    `# 收到的邮件（最新一封在最下面）\n${threadText}\n` +
+    iterationBlock +
+    `\n` +
+    `# 用户对这封回信的要求\n${instructionText}\n` +
+    `\n` +
+    `# 写作规则\n` +
+    `- 匹配最新邮件的语言（中文 → 用中文，英文 → 用英文）\n` +
+    `- 匹配对方的正式度（同事用工作语，朋友用日常语）\n` +
+    `- 简洁直接。不要"敬启者"、"此致敬礼"这种空套话——除非对方明显写得很正式\n` +
+    `- 不要写署名 / signature——用户的邮件客户端会自动加\n` +
+    `- 不要包含 emoji，除非对方的邮件里用了\n` +
+    `- subject 默认用 "Re: <原标题>"，除非话题真的拐了别的方向\n` +
+    `\n` +
+    `# 输出（只输出 JSON，不要解释）\n` +
+    `{"subject": "Re: 原标题", "body": "正文..."}\n`
+  )
+}
 
 const readClipboard = tool({
   description:
@@ -761,6 +976,13 @@ function episodesToMessages(
   return out
 }
 
+// Module-scoped reference to the active turn's emit callback. Tools
+// defined at module level (above) don't have closure access to
+// `localEmit` inside runChat — when a tool wants to push a side-channel
+// event to the renderer (e.g. the email-draft card), it reads this.
+// Cleared in finally so a closed turn never leaks into the next.
+let _activeEmit: ((body: ChatEventBody) => void) | null = null
+
 export async function runChat(
   messageId: string,
   userText: string,
@@ -768,6 +990,7 @@ export async function runChat(
   emit: (event: ChatEvent) => void,
 ): Promise<void> {
   const localEmit = (body: ChatEventBody): void => emit({ messageId, ...body })
+  _activeEmit = localEmit
 
   try {
     const cfg = getConfig()
@@ -1039,7 +1262,7 @@ export async function runChat(
         readWebPage,
         readFile: readFileTool,
         ...(cfg.mail.enabled
-          ? { listMailFolders, listRecentEmails, readEmail }
+          ? { listMailFolders, listRecentEmails, readEmail, draftEmailReply }
           : {}),
         ...(googleSearchTool ? { google_search: googleSearchTool } : {}),
       } as unknown as Parameters<typeof streamText>[0]['tools'],
@@ -1326,6 +1549,8 @@ export async function runChat(
       type: 'error',
       error: friendlyError(err),
     })
+  } finally {
+    _activeEmit = null
   }
 }
 

@@ -163,7 +163,18 @@ export function openSqliteMemory(
       persona_id TEXT PRIMARY KEY,
       score INTEGER NOT NULL DEFAULT 0,
       last_updated TEXT NOT NULL,
-      last_reason TEXT
+      last_reason TEXT,
+      -- Highest score band crossed so far (0/20/40/60/80). Used by the
+      -- affinity engine to detect "she just crossed into a new tier"
+      -- moments and fire a one-off milestone remark. We seed to the
+      -- current band on startup so existing relationships don't trigger
+      -- a flurry of "we became closer!" remarks for tiers already
+      -- earned. Default 0 = no milestone yet.
+      last_milestone INTEGER NOT NULL DEFAULT 0,
+      -- ISO timestamp of the last weekly-review remark (the periodic
+      -- "looking back at this week with you" feature). NULL means no
+      -- review has fired yet for this persona.
+      last_review_at TEXT
     );
   `)
 
@@ -247,6 +258,28 @@ export function openSqliteMemory(
     console.log(
       `[memory] migrated: added facts.persona_id, backfilled to '${migrateActivePersona}'`,
     )
+  }
+
+  // persona_affinity new columns for milestone + weekly review (v0.0.26).
+  // Seed last_milestone to the band the user is currently at — so we
+  // don't immediately fire a "we just crossed Lv.2!" event for users
+  // already past that. Reviews start as never-fired (NULL).
+  const affCols = db
+    .prepare('PRAGMA table_info(persona_affinity)')
+    .all() as { name: string }[]
+  if (!affCols.some((c) => c.name === 'last_milestone')) {
+    db.exec('ALTER TABLE persona_affinity ADD COLUMN last_milestone INTEGER NOT NULL DEFAULT 0')
+    // Seed each existing row's last_milestone to the highest band their
+    // current score has already crossed. floor(score / 20) * 20 gives
+    // 0 / 20 / 40 / 60 / 80 — the band lower bound.
+    db.exec(
+      "UPDATE persona_affinity SET last_milestone = CAST(score / 20 AS INTEGER) * 20",
+    )
+    console.log('[memory] migrated: added persona_affinity.last_milestone')
+  }
+  if (!affCols.some((c) => c.name === 'last_review_at')) {
+    db.exec('ALTER TABLE persona_affinity ADD COLUMN last_review_at TEXT')
+    console.log('[memory] migrated: added persona_affinity.last_review_at')
   }
 
   // ---- Vec0 setup (unchanged from pre-persona schema; episode JOIN
@@ -374,7 +407,10 @@ export function openSqliteMemory(
 
   // ---- Affinity prepared statements ----
   const selectAffinity = db.prepare<[string]>(
-    'SELECT persona_id AS personaId, score, last_updated AS lastUpdated, last_reason AS lastReason FROM persona_affinity WHERE persona_id = ?',
+    `SELECT persona_id AS personaId, score,
+            last_updated AS lastUpdated, last_reason AS lastReason,
+            last_milestone AS lastMilestone, last_review_at AS lastReviewAt
+     FROM persona_affinity WHERE persona_id = ?`,
   )
   const upsertAffinity = db.prepare<[string, number, string, string | null]>(
     `INSERT INTO persona_affinity (persona_id, score, last_updated, last_reason)
@@ -383,6 +419,16 @@ export function openSqliteMemory(
        score = excluded.score,
        last_updated = excluded.last_updated,
        last_reason = excluded.last_reason`,
+  )
+  const updateLastMilestone = db.prepare<[number, string]>(
+    `INSERT INTO persona_affinity (persona_id, score, last_updated, last_reason, last_milestone)
+     VALUES (?2, 0, datetime('now'), NULL, ?1)
+     ON CONFLICT(persona_id) DO UPDATE SET last_milestone = excluded.last_milestone`,
+  )
+  const updateLastReviewAt = db.prepare<[string, string]>(
+    `INSERT INTO persona_affinity (persona_id, score, last_updated, last_reason, last_review_at)
+     VALUES (?2, 0, datetime('now'), NULL, ?1)
+     ON CONFLICT(persona_id) DO UPDATE SET last_review_at = excluded.last_review_at`,
   )
 
   interface FactRow {
@@ -563,12 +609,24 @@ export function openSqliteMemory(
         score: 0,
         lastUpdated: new Date(0).toISOString(),
         lastReason: null,
+        lastMilestone: 0,
+        lastReviewAt: null,
       }
     },
 
     async setAffinity(personaId, score, reason) {
       ensureOpen()
       upsertAffinity.run(personaId, score, new Date().toISOString(), reason ?? null)
+    },
+
+    async setLastMilestone(personaId, milestone) {
+      ensureOpen()
+      updateLastMilestone.run(milestone, personaId)
+    },
+
+    async touchLastReview(personaId) {
+      ensureOpen()
+      updateLastReviewAt.run(new Date().toISOString(), personaId)
     },
 
     async deletePersona(personaId) {

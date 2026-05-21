@@ -19,12 +19,24 @@ interface ToolCall {
   result?: unknown
 }
 
+interface DraftCard {
+  cardId: string
+  replyToUid: string
+  to: string
+  subject: string
+  body: string
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant'
   text: string
   /** Data URLs of attached images (one per screen, plus future paste/drop). */
   imageDataUrls?: string[]
   toolCalls?: ToolCall[]
+  /** Email draft attached to this turn — rendered as an inline card
+   *  with copy + iterate controls below the assistant's text. Latest
+   *  draft for the same replyToUid replaces the prior one (no stack). */
+  draft?: DraftCard
 }
 
 // `-webkit-app-region` isn't in @types/react's CSSProperties yet. Bridge it.
@@ -282,6 +294,13 @@ export default function App() {
             }
             return { ...m, toolCalls: tc }
           })
+          break
+        case 'draft-card':
+          // Email-draft side-channel. The draftEmailReply tool emits
+          // this; we attach the draft to the current assistant message
+          // so it renders inline as a card. A second draft for the
+          // same replyToUid (iteration) replaces the first — no stack.
+          patchLastAssistant((m) => ({ ...m, draft: event.draft }))
           break
         case 'done': {
           // Commit the trailing buffered text to the visible bubble. We
@@ -1268,6 +1287,17 @@ export default function App() {
                 ttsEnabled={config?.tts.enabled ?? false}
                 speaking={speakingIdx === i}
                 onSpeak={() => void speak(m.text, i)}
+                onDraftIterate={(replyToUid, previousBody, feedback) => {
+                  // Iterate the draft: send a chat turn that nudges the
+                  // model to call draftEmailReply again with the
+                  // previousDraft arg. The model picks up the cues
+                  // (id + feedback) and routes through the same tool.
+                  sendText(
+                    `请重新拟一版回信。要回的邮件 id 是 ${replyToUid}。` +
+                      `用户的修改意见：${feedback}\n\n` +
+                      `上一版正文（请基于这版调整）：\n${previousBody}`,
+                  )
+                }}
               />
             ))}
             {error && (
@@ -1503,6 +1533,175 @@ export default function App() {
  * matching Settings tab). Text truncates with ellipsis on narrow windows.
  */
 /**
+ * Inline email-draft card rendered below an assistant message. Three
+ * affordances: copy the body to clipboard, show the subject/recipient
+ * for context, and an "improve" input that fires another LLM round
+ * via the parent's `onIterate(feedback)` callback. New drafts for the
+ * same email replace the prior card (no stacking) — that's handled in
+ * the chat event handler upstream.
+ */
+function EmailDraftCard({
+  draft,
+  onIterate,
+}: {
+  draft: DraftCard
+  onIterate: (feedback: string) => void
+}) {
+  const [copied, setCopied] = useState(false)
+  const [feedback, setFeedback] = useState('')
+  const [iterOpen, setIterOpen] = useState(false)
+
+  async function handleCopy(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(draft.body)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* clipboard API may be denied in some Electron sandbox modes — ignore */
+    }
+  }
+
+  function handleSubmitFeedback(): void {
+    const f = feedback.trim()
+    if (!f) return
+    onIterate(f)
+    setFeedback('')
+    setIterOpen(false)
+  }
+
+  return (
+    <div
+      style={{
+        marginTop: 6,
+        border: '1px solid rgba(0, 0, 0, 0.12)',
+        borderRadius: 8,
+        background: 'rgba(255, 255, 255, 0.7)',
+        fontSize: 12,
+      }}
+    >
+      <div
+        style={{
+          padding: '6px 8px',
+          borderBottom: '1px solid rgba(0,0,0,0.08)',
+          fontSize: 11,
+          color: '#555',
+        }}
+      >
+        <div>
+          <b>主题</b>：{draft.subject}
+        </div>
+        <div>
+          <b>收件人</b>：{draft.to}
+        </div>
+      </div>
+      <div
+        style={{
+          padding: '8px',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+          maxHeight: 240,
+          overflowY: 'auto',
+          color: '#222',
+          fontFamily: 'system-ui, sans-serif',
+          lineHeight: 1.5,
+        }}
+      >
+        {draft.body}
+      </div>
+      <div
+        style={{
+          display: 'flex',
+          gap: 6,
+          padding: '6px 8px',
+          borderTop: '1px solid rgba(0,0,0,0.08)',
+          alignItems: 'center',
+        }}
+      >
+        <button
+          onClick={handleCopy}
+          style={{
+            padding: '3px 10px',
+            fontSize: 11,
+            background: copied ? '#3fb950' : '#5a8edf',
+            color: 'white',
+            border: 'none',
+            borderRadius: 4,
+            cursor: 'pointer',
+          }}
+        >
+          {copied ? '✓ 已复制' : '📋 复制正文'}
+        </button>
+        <button
+          onClick={() => setIterOpen((v) => !v)}
+          style={{
+            padding: '3px 10px',
+            fontSize: 11,
+            background: 'rgba(0,0,0,0.06)',
+            color: '#444',
+            border: 'none',
+            borderRadius: 4,
+            cursor: 'pointer',
+          }}
+        >
+          ✎ 改一版
+        </button>
+        <span style={{ flex: 1 }} />
+        <span style={{ fontSize: 10, color: '#999' }}>{draft.body.length} 字</span>
+      </div>
+      {iterOpen && (
+        <div style={{ padding: '6px 8px', borderTop: '1px solid rgba(0,0,0,0.08)' }}>
+          <div
+            style={{
+              display: 'flex',
+              gap: 6,
+              alignItems: 'flex-start',
+            }}
+          >
+            <textarea
+              value={feedback}
+              onChange={(e) => setFeedback(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  handleSubmitFeedback()
+                }
+              }}
+              placeholder="比如：更简短 / 更正式 / 加一句确认时间 / 删掉客套话"
+              rows={2}
+              style={{
+                flex: 1,
+                fontSize: 11,
+                padding: '4px 6px',
+                border: '1px solid rgba(0,0,0,0.15)',
+                borderRadius: 4,
+                resize: 'vertical',
+                fontFamily: 'inherit',
+              }}
+            />
+            <button
+              onClick={handleSubmitFeedback}
+              disabled={!feedback.trim()}
+              style={{
+                padding: '3px 10px',
+                fontSize: 11,
+                background: feedback.trim() ? '#5a8edf' : 'rgba(0,0,0,0.1)',
+                color: feedback.trim() ? 'white' : '#888',
+                border: 'none',
+                borderRadius: 4,
+                cursor: feedback.trim() ? 'pointer' : 'default',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              发
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
  * Floating affinity readout pinned top-right of the Live2D pane. Shows
  * the current score + tier label; hover tooltip surfaces the last
  * judge reason. Listens to the affinity:changed broadcast so the chip
@@ -1633,12 +1832,17 @@ function MessageBubble({
   ttsEnabled,
   speaking,
   onSpeak,
+  onDraftIterate,
 }: {
   message: ChatMessage
   busy: boolean
   ttsEnabled: boolean
   speaking: boolean
   onSpeak: () => void
+  /** Called when the user submits feedback on the inline draft card —
+   *  parent (App) sends a new chat turn that re-runs draftEmailReply
+   *  with the previous draft + the feedback. */
+  onDraftIterate: (replyToUid: string, previousBody: string, feedback: string) => void
 }) {
   const isUser = message.role === 'user'
   // Speaker button: only on assistant bubbles, only when TTS is enabled,
@@ -1731,6 +1935,14 @@ function MessageBubble({
               </span>
             ))}
           </div>
+        )}
+        {message.draft && (
+          <EmailDraftCard
+            draft={message.draft}
+            onIterate={(feedback) =>
+              onDraftIterate(message.draft!.replyToUid, message.draft!.body, feedback)
+            }
+          />
         )}
       </div>
     </div>

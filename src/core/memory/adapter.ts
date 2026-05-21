@@ -32,6 +32,14 @@ export interface AffinityRecord {
   score: number
   lastUpdated: string
   lastReason: string | null
+  /** Highest tier-boundary score crossed so far (0 / 20 / 40 / 60 / 80).
+   *  Drives "we just crossed Lv.X" milestone events — the engine only
+   *  fires the milestone the FIRST time the score crosses upward into
+   *  a new band. */
+  lastMilestone: number
+  /** ISO timestamp of the last weekly-review remark. null when no
+   *  review has been delivered for this persona yet. */
+  lastReviewAt: string | null
 }
 
 export interface MemoryAdapter {
@@ -122,6 +130,15 @@ export interface MemoryAdapter {
    * layer — the adapter just writes what it's told.
    */
   setAffinity(personaId: string, score: number, reason: string | null): Promise<void>
+
+  /** Update the last-milestone-crossed band for this persona (0/20/40/60/80).
+   *  Called by the affinity engine after a milestone event has been
+   *  delivered to the renderer, so the same band doesn't re-fire. */
+  setLastMilestone(personaId: string, milestone: number): Promise<void>
+
+  /** Record that a weekly review fired right now for this persona.
+   *  Engine uses this + a 7-day check to decide when next to fire. */
+  touchLastReview(personaId: string): Promise<void>
 
   /** Permanently remove every trace of a persona (episodes, vec rows,
    *  facts, affinity). Returns total rows removed. */

@@ -21,6 +21,24 @@ export type ChatEventBody =
   | { type: 'text-reset'; length: number }
   | { type: 'tool-call'; toolName: string; args: unknown }
   | { type: 'tool-result'; toolName: string; result: unknown }
+  // Email reply draft — the draftEmailReply tool emits this side-channel
+  // event so the renderer can render a dedicated card (copy button +
+  // iterate input) instead of dumping the draft into the LLM's text
+  // bubble. Replaces any prior draft card in the same chat turn — UI
+  // is meant to show at most one active draft at a time (no stacking).
+  | {
+      type: 'draft-card'
+      draft: {
+        /** Stable id so the renderer can update the same card on
+         *  iteration. uid + monotonic counter is fine. */
+        cardId: string
+        /** Original email id this draft is replying to. */
+        replyToUid: string
+        to: string
+        subject: string
+        body: string
+      }
+    }
   | { type: 'done' }
   | { type: 'error'; error: string }
 

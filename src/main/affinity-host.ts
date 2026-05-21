@@ -22,6 +22,7 @@ import { getMemoryService, getMemoryAdapter } from './memory-host.js'
 import {
   applyDecay,
   applyDeltaWithGuardrails,
+  buildTierPromptBlock,
   tierFor,
   type TierInfo,
 } from '../shared/affinity.js'
@@ -107,11 +108,38 @@ export async function applyJudgement(
         `${result.note ? ', ' + result.note : ''}): ${reason}`,
     )
     broadcastAffinityChanged(personaId, result.finalScore, reason)
+
+    // Milestone detection — when the score crosses a tier boundary
+    // upward (20 / 40 / 60 / 80), fire a one-off "she notices the
+    // relationship shifted" remark. Fire-and-forget; don't block the
+    // judgement return path.
+    const crossed = milestoneCrossed(record.lastMilestone, result.finalScore)
+    if (crossed !== null) {
+      console.log(`[affinity] milestone crossed: ${personaId} → Lv.${crossed / 20 + 1}`)
+      void fireMilestone(personaId, result.finalScore, crossed).catch((err) => {
+        console.warn('[affinity] milestone fire failed:', err)
+      })
+    }
+
     return result.finalScore
   } catch (err) {
     console.warn('[affinity] applyJudgement failed:', err)
     return null
   }
+}
+
+/**
+ * Returns the new milestone band the score just crossed upward into
+ * (one of 20 / 40 / 60 / 80), or null if no band was crossed. The
+ * caller persists the new milestone via setLastMilestone so the same
+ * boundary doesn't re-fire on subsequent score updates.
+ */
+function milestoneCrossed(lastMilestone: number, newScore: number): number | null {
+  const BANDS = [20, 40, 60, 80]
+  for (const b of BANDS) {
+    if (newScore >= b && lastMilestone < b) return b
+  }
+  return null
 }
 
 /**
@@ -204,4 +232,97 @@ export function initAffinity(activePersona: string): void {
   // Re-run decay every 6 hours. Short enough that long-running sessions
   // see updates within the day, cheap enough to be invisible.
   setInterval(() => void applyDecayPass(), 6 * 60 * 60 * 1000)
+}
+
+/**
+ * Fire a milestone remark — she notices the relationship just stepped
+ * up a tier. Delivered through the existing proactive:remark channel
+ * so the renderer's bubble + TTS + classifier all work as if she
+ * spontaneously opened up. Persists the new milestone so the same
+ * band never fires twice.
+ *
+ * Soft-fails (logs + continues) if memory / chat host isn't ready.
+ */
+async function fireMilestone(
+  personaId: string,
+  score: number,
+  newMilestone: number,
+): Promise<void> {
+  const { resolvePersona } = await import('../shared/config.js')
+  const { runExtraction } = await import('./chat-host.js')
+  const { getConfig } = await import('./config.js')
+  const { buildMilestonePrompt } = await import('../shared/daily-prompts.js')
+  const { classifyAndApply } = await import('./emotion-classifier.js')
+
+  const cfg = getConfig()
+  // Milestones are persona-scoped — only fire when this persona is
+  // the user's currently active one. Firing for a non-active persona
+  // would surface a remark from a character the user isn't currently
+  // chatting with, which is confusing.
+  if (cfg.persona.preset !== personaId) {
+    console.log(`[affinity] milestone skipped: ${personaId} is not active persona`)
+    // Still mark it persisted so re-becoming-active doesn't re-fire
+    // an outdated milestone.
+    const adapter = getMemoryAdapter()
+    if (adapter) await adapter.setLastMilestone(personaId, newMilestone)
+    return
+  }
+
+  const persona = resolvePersona(cfg.persona)
+  const tierBlock = buildTierPromptBlock(score, persona.name, persona.traits)
+  // Pull a tiny bit of memory for grounding — the milestone remark
+  // should reference real shared history, not invent.
+  const memory = getMemoryService()
+  const factsBlock = memory ? await memory.factsBlock(0.5).catch(() => '') : ''
+  const recent = memory ? await memory.listRecent(20).catch(() => []) : []
+  const recentUserMessages = recent
+    .filter((e) => e.speaker === 'user' && e.text.trim())
+    .slice(-4)
+    .map((e) => (e.text.length > 120 ? e.text.slice(0, 120) + '…' : e.text))
+
+  const prompt = buildMilestonePrompt({
+    persona,
+    tierBlock,
+    score,
+    factsBlock,
+    recentUserMessages,
+  })
+  let line = ''
+  try {
+    const raw = await runExtraction(prompt, { temperature: 0.85 })
+    line = raw.trim()
+  } catch (err) {
+    console.warn('[affinity] milestone LLM call failed:', err)
+    return
+  }
+  if (!line || line.length < 8) return
+
+  // Persist the new milestone band BEFORE broadcasting — guarantees
+  // we won't re-fire on a duplicate event from the same boundary
+  // cross.
+  const adapter = getMemoryAdapter()
+  if (adapter) await adapter.setLastMilestone(personaId, newMilestone)
+
+  // Persist as an assistant episode so future retrieval sees it.
+  if (memory) {
+    try {
+      await memory.addEpisode('assistant', line)
+    } catch (err) {
+      console.warn('[affinity] milestone episode persist failed:', err)
+    }
+  }
+  // Broadcast through the same channel proactive uses — renderer
+  // chat handler renders it as a maid bubble.
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('proactive:remark', {
+        text: line,
+        ts: new Date().toISOString(),
+        triggers: [`milestone:Lv.${newMilestone / 20 + 1}`],
+      })
+    }
+  }
+  console.log(`[affinity] milestone delivered (Lv.${newMilestone / 20 + 1}): ${line}`)
+  // Fire the emotion classifier so her face matches.
+  void classifyAndApply(line, '')
 }

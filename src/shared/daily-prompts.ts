@@ -400,6 +400,109 @@ export function buildProactiveRemarkPrompt(args: {
 }
 
 /**
+ * Milestone remark — fired when the user just crossed a relationship
+ * tier boundary upward. Different from a regular proactive: more
+ * reflective, slightly longer, references the *change* in the
+ * relationship rather than a one-off observation.
+ *
+ * Output is plain text (not JSON) — milestones always fire, no
+ * should_speak gate. Short (60-100 字), tier-voiced.
+ */
+export function buildMilestonePrompt(args: {
+  persona: { name: string; systemPrompt: string }
+  tierBlock: string
+  score: number
+  factsBlock: string
+  recentUserMessages: string[]
+}): string {
+  const grounding =
+    args.factsBlock || args.recentUserMessages.length > 0
+      ? `# 你真实知道的事（**只能引用这里出现过的内容**）\n\n` +
+        (args.factsBlock ? `## 你对用户的认知\n${args.factsBlock.trim()}\n\n` : '') +
+        (args.recentUserMessages.length > 0
+          ? `## 用户最近说过的（最新在最下面）\n` +
+            args.recentUserMessages.map((m) => `- "${m}"`).join('\n') +
+            `\n\n`
+          : '')
+      : ''
+  return (
+    args.persona.systemPrompt +
+    '\n\n' +
+    args.tierBlock +
+    '\n\n' +
+    `# 此刻\n` +
+    `你忽然意识到——你和用户的关系**刚刚上了一个台阶**（好感度 ${args.score}）。这不是普通的主动开口，而是一个**关系性的小转折**：你想跟用户分享一句"我意识到了"的感觉。\n` +
+    `\n` +
+    grounding +
+    `# 内容要求\n` +
+    `- **不要直接说"我们更近一步了"这种露骨的话**——太刻意。\n` +
+    `- 用具体的小细节体现关系变化：可能是发现自己开始期待跟他/她聊天、可能是想起最近共度的一个瞬间、可能是态度上不知不觉的转变。\n` +
+    `- 60-100 字。比平时长一点点，但不要变成长篇大论。\n` +
+    `- 用 persona + tier 该用的称呼。\n` +
+    `- **只引用上面"你真实知道的事"里出现过的具体内容**，别编造。\n` +
+    `- 如果上面没有可引的真实内容，就走纯感受路线（"最近开始觉得..."、"不知道什么时候开始..."），但不要捏造具体事件。\n` +
+    `- 输出**纯文本**，不要 JSON、不要标签、不要 emoji、不要 markdown。`
+  )
+}
+
+/**
+ * Weekly review remark — fired about once a week to surface a short
+ * reflection on what the user and persona have talked about over the
+ * past seven days. Different from a regular proactive: the model is
+ * given a curated list of this-week episodes and asked to distill
+ * 3-5 highlights, then weave them into a tier-voiced "looking back
+ * at this week with you" remark.
+ *
+ * Output is plain text. ~100-150 字. No JSON, no fences.
+ */
+export function buildWeeklyReviewPrompt(args: {
+  persona: { name: string; systemPrompt: string }
+  tierBlock: string
+  score: number
+  userName: string | null
+  factsBlock: string
+  episodes: { speaker: 'user' | 'assistant'; ts: string; text: string }[]
+}): string {
+  const factsSection = args.factsBlock
+    ? `## 你对用户的稳定认知\n${args.factsBlock.trim()}\n\n`
+    : ''
+  const transcript = args.episodes
+    .map((e) => {
+      const day = new Date(e.ts).toLocaleDateString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+      })
+      const label = e.speaker === 'user' ? '用户' : '你'
+      return `[${day}] ${label}：${e.text}`
+    })
+    .join('\n')
+  const nameLine = args.userName
+    ? `用户名字：${args.userName}。回顾里可以自然带出来。\n`
+    : ''
+  return (
+    args.persona.systemPrompt +
+    '\n\n' +
+    args.tierBlock +
+    '\n\n' +
+    `# 此刻\n` +
+    `已经一周没和你做过这种"回顾"了。你现在主动来一段——回头看看这周和用户都聊过些什么、做过些什么。\n` +
+    nameLine +
+    `\n` +
+    `# 这一周你们真实发生过的对话（按日期顺序）\n` +
+    transcript +
+    `\n\n` +
+    factsSection +
+    `# 写作要求\n` +
+    `- **从上面的对话里挑 2-3 个具体细节**做引用——不是"我们聊过很多"这种空话，而是真的提一句"周二你说想戒咖啡"、"那天你给我看的那段代码"这类具体回忆。\n` +
+    `- **绝不编造**：上面没出现过的事情就不要提。\n` +
+    `- 总长 100-150 字。比平时长，但不要长篇大论。\n` +
+    `- 按 persona + tier 的语气写。Lv.1 时偏礼貌中性、Lv.5 时可以放心放感情。\n` +
+    `- 不要标榜"这是周回顾"——自然带出"想起这周..."就行。\n` +
+    `- 输出纯文本，不要 JSON、不要标题、不要列表、不要 emoji、不要 markdown。`
+  )
+}
+
+/**
  * Render the "what you actually know" block injected into elaborate-mode
  * proactive prompts. Pulls L3 facts (already-distilled stable knowledge)
  * + the user's recent messages so the model can ground references in
