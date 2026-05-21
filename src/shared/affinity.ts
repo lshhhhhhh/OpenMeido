@@ -189,8 +189,6 @@ function renderTier(args: {
   return (
     args.header +
     `\n` +
-    `**这是温度规则——它优先级高于 persona 描述里的性格词。**\n` +
-    `\n` +
     args.intro +
     `\n` +
     addressLine +

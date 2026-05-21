@@ -533,28 +533,12 @@ ipcMain.handle('memory:recentToolActivity', async (_event, limit: number = 20) =
       }
     }
   }
-  // Fold in emotion events so the user can see her non-verbal reactions
-  // (expressions / motions) alongside tool work. Emotion events have no
-  // backing episode — they fire AFTER the chat loop via a separate LLM
-  // call — so we synthesize episodeId=0 and reuse the existing
-  // setLive2DExpression label that the sidebar already translates to "换表情".
-  //
-  // Payload shape mirrors the historical setLive2DExpression tool input
-  // (`{expression: '<emotion>'}`) so toolDetailZh's existing handler
-  // renders the user-facing label rather than the model-specific
-  // expression filename.
-  for (const ev of recentEmotionEvents(limit * 2)) {
-    out.push({
-      episodeId: 0,
-      ts: ev.ts,
-      kind: 'call',
-      toolName: 'setLive2DExpression',
-      summary: JSON.stringify({ expression: ev.emotion }),
-    })
-  }
-  // Sort ascending by ts then trim from the end so we keep the newest;
-  // the existing renderer expects newest-first (reverse at end).
-  out.sort((a, b) => a.ts.localeCompare(b.ts))
+  // Emotion events used to be folded in here so the user could "see"
+  // her non-verbal reactions in 最近活动. Removed (2026-05-21 post-release):
+  // every chat turn now produces an emotion → activity feed turned
+  // into a wall of "换表情 · 害羞". The user can see the face directly
+  // on the Live2D model in real-time; the activity feed should surface
+  // tool work (which IS invisible), not redundant visible state.
   return out.slice(-limit).reverse()
 })
 

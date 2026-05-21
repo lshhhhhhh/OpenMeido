@@ -23,7 +23,7 @@ import { runExtraction, runExtractionWithImages } from './chat-host.js'
 import { getMemoryService } from './memory-host.js'
 import { captureAllScreensPng } from './screen-host.js'
 import { classifyAndApplyEmotion } from './emotion-classifier.js'
-import { buildTierPromptBlock } from '../shared/affinity.js'
+import { buildTierPromptBlock, tierFor } from '../shared/affinity.js'
 import { resolvePersona } from '../shared/config.js'
 import { buildProactiveRemarkPrompt } from '../shared/daily-prompts.js'
 import { formatLocalNow } from '../shared/time-format.js'
@@ -199,6 +199,46 @@ async function evaluate(): Promise<void> {
     ? await memoryForCtx.getAffinity().catch(() => null)
     : null
   const tierBlock = buildTierPromptBlock(affinity?.score ?? 0, persona.name, persona.traits)
+  // Roll a die for "this remark is an elaborate moment" — small chance
+  // by design, scaled by tier so a stranger-tier 0-score persona never
+  // unleashes a paragraph on a user who barely knows her. The host
+  // still gates on the eventual LLM judgment (it can say
+  // should_speak=false even when elaborate is allowed).
+  const tier = tierFor(affinity?.score ?? 0)
+  const elaborateProb = {
+    stranger: 0, // never — too forward before a relationship exists
+    acquaintance: 0.05,
+    close: 0.15,
+    deep: 0.25,
+  }[tier.tier]
+  const elaborate = Math.random() < elaborateProb
+
+  // Elaborate mode = long-form remark. Pull the actual memory we have on
+  // the user so the model can ground references in real material instead
+  // of inventing "上周你说的 X" out of thin air. Short remarks skip this
+  // — they don't have room to mention specifics anyway.
+  let factsBlock = ''
+  let recentUserMessages: string[] = []
+  if (elaborate && memoryForCtx) {
+    try {
+      factsBlock = await memoryForCtx.factsBlock(0.5).catch(() => '')
+      const episodes = await memoryForCtx.listRecent(40).catch(() => [])
+      recentUserMessages = episodes
+        .filter((e) => e.speaker === 'user' && e.text.trim().length > 0)
+        .slice(-6) // keep newest 6 user lines
+        .map((e) =>
+          e.text.length > 120 ? e.text.slice(0, 120) + '…' : e.text,
+        )
+    } catch (err) {
+      console.warn('[proactive] grounding pull failed:', err)
+    }
+  }
+  // Diagnostic: confirm the tier block is being built + which tier
+  // it landed in. Helps users verify "tier got injected into proactive"
+  // without having to print the full prompt.
+  console.log(
+    `[proactive] score=${affinity?.score ?? 0} (${tier.zhLabel}), elaborate=${elaborate}, tierBlock len=${tierBlock.length}`,
+  )
   // Creative temperature: 0.2 is fine for JSON gate decisions but
   // produces deterministic repetition on the `comment` field. Bump to
   // 0.7 so similar triggers yield varied phrasing.
@@ -224,6 +264,9 @@ async function evaluate(): Promise<void> {
         hasScreenshot: images.length > 0,
         recentSelfRemarks,
         tierBlock,
+        elaborate,
+        factsBlock,
+        recentUserMessages,
       })
       raw =
         images.length > 0
@@ -239,6 +282,9 @@ async function evaluate(): Promise<void> {
         userName,
         recentSelfRemarks,
         tierBlock,
+        elaborate,
+        factsBlock,
+        recentUserMessages,
       })
       raw = await runExtraction(prompt, { temperature: creativeTemp })
     }

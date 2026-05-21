@@ -317,6 +317,23 @@ export function buildProactiveRemarkPrompt(args: {
    *  proactive falls back to "stranger" defaults — which usually reads
    *  as her being too cold for users who actually have a relationship. */
   tierBlock?: string
+  /** When true, this roll is an "elaborate" moment — she's allowed
+   *  (and encouraged) to say something longer than the default 30
+   *  字 limit. Triggered at low probability by the host so most
+   *  remarks stay short; this is the surprise factor that lets her
+   *  occasionally share a feeling / observation / small reflection.
+   *  Host should not set this for stranger-tier users — too forward
+   *  before a relationship exists. */
+  elaborate?: boolean
+  /** Real facts the persona knows about the user (rendered from L3
+   *  facts table). Only meaningful when elaborate=true — short
+   *  remarks don't need grounding. Passing this without elaborate
+   *  is harmless but wastes tokens. */
+  factsBlock?: string
+  /** Recent user messages (most recent first). Same caveat as
+   *  factsBlock — only used in elaborate mode to ground references
+   *  in real conversation history instead of invention. */
+  recentUserMessages?: string[]
 }): string {
   const triggerLines = args.triggers.map((t) => `${t.kind}: ${t.note}`).join('\n')
   const mood = timeOfDayMood()
@@ -358,10 +375,57 @@ export function buildProactiveRemarkPrompt(args: {
     `- 其他情况（敲代码 / 看文档 / 浏览网页 / 摸鱼 / 走神 / 屏幕未变 / 时间是凌晨 / 工作日深夜）→ true，挑一个自然角度说点什么\n` +
     `- 不确定 → **true**（陪伴优先于沉默；说错小话比从不开口好得多）\n` +
     `\n` +
+    (args.elaborate
+      ? buildElaborateGroundingBlock(args.factsBlock, args.recentUserMessages) +
+        `# 这次开口的内容方向\n` +
+        `这次不是简单问候，而是分享一点具体的东西。可选角度：\n` +
+        `- 引用上面"你知道的事"或"最近聊过的"里**真实出现过**的内容做延伸\n` +
+        `- 你刚注意到的什么（环境、时间、用户的状态——这些是模糊感受可以编一点细节，但不要编"用户说过的事"）\n` +
+        `- 一个突然冒出的小感受 / 念头\n` +
+        `- 你自己角色这一刻在想的 / 在做的事\n` +
+        `\n` +
+        `**核心约束**：\n` +
+        `- 用户的具体信息（名字、家人、宠物、工作、提过的话题、之前的承诺、上次说要做的事）**只能引用上面真实记录的内容**。\n` +
+        `- 如果上面没有真实可引的东西，就别提"上周说的"、"上次提到"、"你之前那个"这类话——这些都是**幻觉**。\n` +
+        `- 没东西可分享 → should_speak=false。不要为凑字数堆客套。\n\n`
+      : '') +
     `# 输出（只输出 JSON，不要解释）\n` +
-    `{"should_speak": true|false, "reason": "内部说明，不会展示给用户", "comment": "如果 should_speak=true 时要说的话；用你这个角色的语气和称呼；不超过 30 字；不要 emoji、markdown、引号"}\n` +
+    (args.elaborate
+      ? `{"should_speak": true|false, "reason": "内部说明，不会展示给用户", "comment": "如果 should_speak=true 时要说的话；用你这个角色的语气和称呼；60-120 字；不要 emoji、markdown、引号"}\n`
+      : `{"should_speak": true|false, "reason": "内部说明，不会展示给用户", "comment": "如果 should_speak=true 时要说的话；用你这个角色的语气和称呼；不超过 30 字；不要 emoji、markdown、引号"}\n`) +
     `\n` +
     `# 触发原因\n` +
     `${triggerLines}\n`
   )
+}
+
+/**
+ * Render the "what you actually know" block injected into elaborate-mode
+ * proactive prompts. Pulls L3 facts (already-distilled stable knowledge)
+ * + the user's recent messages so the model can ground references in
+ * real material instead of inventing "上周说的 X" out of thin air.
+ *
+ * Returns empty string when neither facts nor recent messages exist —
+ * elaborate mode then has no ground truth to anchor to, and the
+ * subsequent content-direction prompt tells it to fall back to vague
+ * environmental observations (which can be tastefully imagined).
+ */
+function buildElaborateGroundingBlock(
+  factsBlock: string | undefined,
+  recentUserMessages: string[] | undefined,
+): string {
+  const hasFacts = factsBlock && factsBlock.trim().length > 0
+  const hasRecent = recentUserMessages && recentUserMessages.length > 0
+  if (!hasFacts && !hasRecent) return ''
+  let block = `# 你真实知道的事（**只能引用这里出现过的内容**）\n\n`
+  if (hasFacts) {
+    block += `## 你对用户的认知\n${factsBlock!.trim()}\n\n`
+  }
+  if (hasRecent) {
+    block +=
+      `## 用户最近说过的（最新的在最下面）\n` +
+      recentUserMessages!.map((m) => `- "${m}"`).join('\n') +
+      `\n\n`
+  }
+  return block
 }
