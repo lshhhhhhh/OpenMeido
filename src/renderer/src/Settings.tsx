@@ -601,6 +601,24 @@ export function Settings({ initial, onClose }: SettingsProps) {
               }
               return (
                 <>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: '#999',
+                      marginBottom: 8,
+                      padding: '6px 8px',
+                      background: 'rgba(255,255,255,0.04)',
+                      borderRadius: 4,
+                      border: '1px solid rgba(255,255,255,0.08)',
+                    }}
+                  >
+                    💡 自定义人设的好感度系统正常工作（分数会涨/降、tier
+                    切换、记忆隔离都生效），但内置三个人设那种按等级解锁的
+                    具体特征列表（生疏 → 熟络时新出现什么动作）目前只有内置
+                    才有；自定义会用通用文案。如果想要细粒度的等级化态度，
+                    在 system prompt 里自己描述"等级 X 时该怎么表现"。
+                  </div>
+
                   <Label>名称（显示在 chip 上）</Label>
                   <input
                     value={active.name}
