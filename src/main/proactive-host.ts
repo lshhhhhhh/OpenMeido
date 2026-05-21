@@ -206,10 +206,11 @@ async function evaluate(): Promise<void> {
   // should_speak=false even when elaborate is allowed).
   const tier = tierFor(affinity?.score ?? 0)
   const elaborateProb = {
-    stranger: 0, // never — too forward before a relationship exists
-    acquaintance: 0.05,
-    close: 0.15,
-    deep: 0.25,
+    tier1: 0, // never — too forward before a relationship exists
+    tier2: 0.03,
+    tier3: 0.08,
+    tier4: 0.15,
+    tier5: 0.25,
   }[tier.tier]
   const elaborate = Math.random() < elaborateProb
 

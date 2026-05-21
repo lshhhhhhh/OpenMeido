@@ -44,7 +44,7 @@ const model = ds.chat('deepseek-chat')
 
 // ---------- Test matrix ----------
 
-const TIER_SCORES = [0, 30, 60, 90] // one score per tier band
+const TIER_SCORES = [0, 30, 50, 70, 90] // one score per tier band (5 tiers)
 
 const PERSONAS = ['maid', 'imouto', 'ojou']
 
@@ -178,21 +178,20 @@ async function main() {
       const anyHasIntimate = chatHasIntimate || proHasIntimate
 
       if (score === 0) {
-        // Stranger: HARD assertion — intimate address must NOT appear.
+        // Tier 1: HARD assertion — intimate address must NOT appear.
         check(
-          `生疏期不使用 "${intimate}"`,
+          `${t.zhLabel} 不使用 "${intimate}"`,
           !anyHasIntimate,
           anyHasIntimate ? `泄漏到 chat=${chatHasIntimate} / proactive=${proHasIntimate}` : '',
         )
-      } else if (score >= 51) {
-        // Close+: soft check — intimate address SHOULD appear (model
-        // judgment varies; warning if missing).
+      } else if (score >= 60) {
+        // Tier 4+: soft check — intimate address SHOULD appear.
         if (!anyHasIntimate) {
           console.log(
-            `    ⚠️ ${t.zhLabel}期没出现 "${intimate}"（不一定是 bug，模型自由度）`,
+            `    ⚠️ ${t.zhLabel} 没出现 "${intimate}"（不一定是 bug，模型自由度）`,
           )
         } else {
-          check(`${t.zhLabel}期出现 "${intimate}"`, true)
+          check(`${t.zhLabel} 出现 "${intimate}"`, true)
         }
       }
     }

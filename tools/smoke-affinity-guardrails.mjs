@@ -36,36 +36,42 @@ const check = (name, fn) => {
 
 console.log('\n████ tierFor ████\n')
 
-check('0 maps to stranger', () => {
-  assert.equal(tierFor(0).tier, 'stranger')
-  assert.equal(tierFor(0).zhLabel, '生疏')
+check('0 maps to tier1', () => {
+  assert.equal(tierFor(0).tier, 'tier1')
+  assert.equal(tierFor(0).zhLabel, 'Lv.1')
 })
-check('20 still stranger (inclusive upper)', () => {
-  assert.equal(tierFor(20).tier, 'stranger')
+check('19 still tier1 (inclusive upper)', () => {
+  assert.equal(tierFor(19).tier, 'tier1')
 })
-check('21 jumps to acquaintance', () => {
-  assert.equal(tierFor(21).tier, 'acquaintance')
+check('20 jumps to tier2', () => {
+  assert.equal(tierFor(20).tier, 'tier2')
 })
-check('50 still acquaintance', () => {
-  assert.equal(tierFor(50).tier, 'acquaintance')
+check('39 still tier2', () => {
+  assert.equal(tierFor(39).tier, 'tier2')
 })
-check('51 jumps to close', () => {
-  assert.equal(tierFor(51).tier, 'close')
+check('40 jumps to tier3', () => {
+  assert.equal(tierFor(40).tier, 'tier3')
 })
-check('80 still close', () => {
-  assert.equal(tierFor(80).tier, 'close')
+check('59 still tier3', () => {
+  assert.equal(tierFor(59).tier, 'tier3')
 })
-check('81 jumps to deep', () => {
-  assert.equal(tierFor(81).tier, 'deep')
+check('60 jumps to tier4', () => {
+  assert.equal(tierFor(60).tier, 'tier4')
 })
-check('100 still deep', () => {
-  assert.equal(tierFor(100).tier, 'deep')
+check('79 still tier4', () => {
+  assert.equal(tierFor(79).tier, 'tier4')
+})
+check('80 jumps to tier5', () => {
+  assert.equal(tierFor(80).tier, 'tier5')
+})
+check('100 still tier5', () => {
+  assert.equal(tierFor(100).tier, 'tier5')
 })
 check('clamps out-of-range high', () => {
-  assert.equal(tierFor(500).tier, 'deep')
+  assert.equal(tierFor(500).tier, 'tier5')
 })
 check('clamps out-of-range low', () => {
-  assert.equal(tierFor(-50).tier, 'stranger')
+  assert.equal(tierFor(-50).tier, 'tier1')
 })
 
 // ---------- Per-turn clamp ----------
@@ -270,12 +276,12 @@ check('block mentions current score', () => {
   const b = buildTierPromptBlock(47, '小晴')
   assert.match(b, /47/)
 })
-check('stranger block warns against intimate address', () => {
+check('tier1 block warns against intimate address', () => {
   const b = buildTierPromptBlock(10, '小晴')
   // Should warn about being too forward — look for distance keywords
-  assert.match(b, /还不要|您|距离/)
+  assert.match(b, /您|不要使用任何亲密称呼|初识/)
 })
-check('deep block enables intimate behaviors', () => {
+check('tier5 block enables intimate behaviors', () => {
   const b = buildTierPromptBlock(90, '小晴')
   assert.match(b, /默契|内部梗/)
 })

@@ -2550,10 +2550,11 @@ const closeBtnStyle: React.CSSProperties = {
 /** Match shared/affinity.ts tier breakpoints. Duplicated in renderer to
  *  avoid pulling a Node-typed module into the renderer bundle. */
 function tierLabelFor(score: number): string {
-  if (score >= 81) return '默契'
-  if (score >= 51) return '亲近'
-  if (score >= 21) return '熟络'
-  return '生疏'
+  if (score >= 80) return 'Lv.5'
+  if (score >= 60) return 'Lv.4'
+  if (score >= 40) return 'Lv.3'
+  if (score >= 20) return 'Lv.2'
+  return 'Lv.1'
 }
 
 /**

@@ -22,11 +22,13 @@
  * acknowledge their prior chat history (see memory-host backfill).
  */
 
-export type Tier = 'stranger' | 'acquaintance' | 'close' | 'deep'
+export type Tier = 'tier1' | 'tier2' | 'tier3' | 'tier4' | 'tier5'
 
 export interface TierInfo {
   tier: Tier
-  /** Chinese label shown in UI. */
+  /** Short label shown in UI — no character name, just the number.
+   *  Field still called `zhLabel` for backward compat with renderer
+   *  code; value is "Lv.X" form. */
   zhLabel: string
   /** Lower bound (inclusive) of this tier's score range. */
   min: number
@@ -37,20 +39,30 @@ export interface TierInfo {
 /**
  * Per-tier {address, traits} pair — each tier's entry is the **delta**
  * unlocked at that tier. The engine concatenates lower tiers' traits
- * when assembling a higher tier's prompt. Re-exported so callers can
- * pass it through without crossing module boundaries.
+ * when assembling a higher tier's prompt. tier1 has no traits by
+ * design (cold-start equivalent: model uses formal "您", no character
+ * specifics). tier2-tier5 each unlock a layer.
  */
 export interface PersonaTraits {
-  acquaintance: { address: string; traits: string[] }
-  close: { address: string; traits: string[] }
-  deep: { address: string; traits: string[] }
+  tier2: { address: string; traits: string[] }
+  tier3: { address: string; traits: string[] }
+  tier4: { address: string; traits: string[] }
+  tier5: { address: string; traits: string[] }
 }
 
+/**
+ * Five equal-width tiers (20 points each). Five was deliberately picked
+ * over four for finer gradation — a +5 affinity gain has meaningful odds
+ * of crossing a tier boundary (= visible behavior change). Names dropped
+ * per user request: numbers stay neutral and don't tempt the model to
+ * "perform" the label.
+ */
 export const TIERS: TierInfo[] = [
-  { tier: 'stranger',     zhLabel: '生疏', min: 0,  max: 20 },
-  { tier: 'acquaintance', zhLabel: '熟络', min: 21, max: 50 },
-  { tier: 'close',        zhLabel: '亲近', min: 51, max: 80 },
-  { tier: 'deep',         zhLabel: '默契', min: 81, max: 100 },
+  { tier: 'tier1', zhLabel: 'Lv.1', min: 0,  max: 19 },
+  { tier: 'tier2', zhLabel: 'Lv.2', min: 20, max: 39 },
+  { tier: 'tier3', zhLabel: 'Lv.3', min: 40, max: 59 },
+  { tier: 'tier4', zhLabel: 'Lv.4', min: 60, max: 79 },
+  { tier: 'tier5', zhLabel: 'Lv.5', min: 80, max: 100 },
 ]
 
 export const AFFINITY_MIN = 0
@@ -96,11 +108,10 @@ export function buildTierPromptBlock(
   const t = tierFor(score)
   const header = `# 你和用户的关系\n好感度 ${score} / 100（${t.zhLabel}）。`
   switch (t.tier) {
-    case 'stranger':
+    case 'tier1':
+      // Cold start equivalent — no traits, formal address.
       return (
         header +
-        `\n` +
-        `**这是温度规则——它优先级高于 persona 描述里的性格词。**\n` +
         `\n` +
         `你和用户才刚见面。等同于"初识的陌生人"，**不是**"已经熟悉的旧识"。\n` +
         `- **不要使用任何亲密称呼**（主人 / 哥 / 本小姐 / 笨蛋 等都不要）。用"您"或不称呼。\n` +
@@ -109,30 +120,50 @@ export function buildTierPromptBlock(
         `- 不主动嘘寒问暖。不说"我会陪着您"、"辛苦了"、"很开心见到您"。\n` +
         `- 只有用户**主动**释放亲近信号（夸她 / 分享私事 / 表达关心）时，才可以稍微回应一点温度——但**不要过头**，仍保持初识感。\n` +
         `\n` +
-        `这一阶段她应该感觉像**一个新来的合作对象**：能干、得体、还没投入感情。`
+        `这一阶段你像一个新来的合作对象：能干、得体、还没投入感情。`
       )
-    case 'acquaintance': {
-      // Just this tier's delta — no lower tier with traits.
+    case 'tier2': {
+      // First warmup — basic address, very light personality.
       return renderTier({
         header,
-        intro: '你和用户**开始熟络**。可以解锁一部分原型态度，但还不到全开。',
-        address: traits?.acquaintance.address,
-        unlocked: traits?.acquaintance.traits ?? [],
+        intro: '你和用户开始有点熟了。可以解锁**最轻**的一层态度——刚开始展露，远未全开。',
+        address: traits?.tier2.address,
+        unlocked: traits?.tier2.traits ?? [],
         defaultBullet: '稍微展露一点性格特色，点到即止',
         closing: [
           '**不要**主动撒娇 / 顶嘴 / 关心。等用户主动放出信号你再回应。',
-          '重要的事情用户主动提起再聊，不主动追问 / 八卦。',
+          '不主动追问 / 八卦。礼貌职业感为主，性格只是偶尔露一两笔。',
         ],
       })
     }
-    case 'close': {
-      // Inherit acquaintance + own delta.
+    case 'tier3': {
+      // Mid-tier — tier2 + tier3 traits.
+      return renderTier({
+        header,
+        intro: '你和用户已经熟络。可以展露中等程度的态度——比之前更自在，但还没到无话不谈。',
+        address: traits?.tier3.address,
+        unlocked: traits
+          ? [...traits.tier2.traits, ...traits.tier3.traits]
+          : [],
+        defaultBullet: '展露中等程度的性格特色',
+        closing: [
+          '可以主动关心，但不主动追问深层私事。',
+          '可以偶尔有性格化的反应（被夸/被冷落），但情绪表达克制。',
+        ],
+      })
+    }
+    case 'tier4': {
+      // Close — full archetype.
       return renderTier({
         header,
         intro: '你和用户**关系亲近**。原型态度**全开**：',
-        address: traits?.close.address,
+        address: traits?.tier4.address,
         unlocked: traits
-          ? [...traits.acquaintance.traits, ...traits.close.traits]
+          ? [
+              ...traits.tier2.traits,
+              ...traits.tier3.traits,
+              ...traits.tier4.traits,
+            ]
           : [],
         defaultBullet: '按你的人设态度全开',
         closing: [
@@ -141,17 +172,18 @@ export function buildTierPromptBlock(
         ],
       })
     }
-    case 'deep': {
-      // Inherit acquaintance + close + own delta.
+    case 'tier5': {
+      // Deep — full archetype + intimate / inside-joke layer.
       return renderTier({
         header,
-        intro: '你和用户已有**默契**。比"亲近"更进一步：',
-        address: traits?.deep.address,
+        intro: '你和用户已有**默契**。比上一层更进一步，私下面全开：',
+        address: traits?.tier5.address,
         unlocked: traits
           ? [
-              ...traits.acquaintance.traits,
-              ...traits.close.traits,
-              ...traits.deep.traits,
+              ...traits.tier2.traits,
+              ...traits.tier3.traits,
+              ...traits.tier4.traits,
+              ...traits.tier5.traits,
             ]
           : [],
         defaultBullet: `${personaName}独特的小习惯、口头禅、私下才会露出的一面`,
