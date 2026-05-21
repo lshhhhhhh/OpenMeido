@@ -30,6 +30,7 @@
     "test:tier-conversation": "node --env-file=.env --import tsx tools/smoke-tier-conversation.mjs",
     "test:elaborate": "node --env-file=.env --import tsx tools/smoke-elaborate-proactive.mjs",
     "test:email-draft": "node --env-file=.env --import tsx tools/smoke-email-draft.mjs",
+    "test:email-draft-routing": "node --env-file=.env --import tsx tools/smoke-email-draft-routing.mjs",
     "test:persona-isolation": "electron tools/smoke-persona-isolation.mjs",
     "test:stt-sovits": "electron tools/smoke-stt-sovits.mjs",
     "test:mail-parent": "node --import tsx tools/smoke-mail-parent.mjs",
