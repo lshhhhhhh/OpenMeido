@@ -36,15 +36,14 @@ const MAIL_PRESETS: { label: string; host: string; helpUrl: string }[] = [
   { label: 'QQ', host: 'imap.qq.com', helpUrl: 'https://service.mail.qq.com/detail/0/351' },
 ]
 
-type TabId = 'ai' | 'persona' | 'live2d' | 'voice' | 'mail' | 'memory' | 'window' | 'proactive'
+type TabId = 'ai' | 'persona' | 'live2d' | 'voice' | 'mail' | 'window' | 'proactive'
 const TABS: { id: TabId; label: string }[] = [
   { id: 'ai', label: 'AI' },
-  { id: 'persona', label: '人设' },
+  { id: 'persona', label: '人物' },
   { id: 'live2d', label: 'Live2D' },
   { id: 'voice', label: '语音' },
   { id: 'proactive', label: '主动' },
   { id: 'mail', label: '邮箱' },
-  { id: 'memory', label: '记忆' },
   { id: 'window', label: '窗口' },
 ]
 
@@ -477,31 +476,40 @@ export function Settings({ initial, onClose }: SettingsProps) {
 
         {/* ---- Persona ---- */}
         {activeTab === 'persona' && (
-        <Section title="人设">
-          <Label>选择人设</Label>
+        <Section title="人物">
+          <div style={{ fontSize: 11, color: '#888', marginBottom: 6 }}>
+            每个人物有独立的记忆和好感度。切换 = 见不同的人。
+          </div>
+          <Label>选择人物</Label>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
             {/* Built-in chips */}
-            <button
-              style={chipStyle(draft.persona.preset === 'maid')}
+            <PersonaChip
+              label="女仆"
+              personaId="maid"
+              active={draft.persona.preset === 'maid'}
               onClick={() => setDraft({ ...draft, persona: { ...draft.persona, preset: 'maid' } })}
-            >
-              女仆
-            </button>
-            <button
-              style={chipStyle(draft.persona.preset === 'imouto')}
+            />
+            <PersonaChip
+              label="妹妹"
+              personaId="imouto"
+              active={draft.persona.preset === 'imouto'}
               onClick={() => setDraft({ ...draft, persona: { ...draft.persona, preset: 'imouto' } })}
-            >
-              妹妹
-            </button>
+            />
+            <PersonaChip
+              label="大小姐"
+              personaId="ojou"
+              active={draft.persona.preset === 'ojou'}
+              onClick={() => setDraft({ ...draft, persona: { ...draft.persona, preset: 'ojou' } })}
+            />
             {/* User-saved customs */}
             {draft.persona.customs.map((c) => (
-              <button
+              <PersonaChip
                 key={c.id}
-                style={chipStyle(draft.persona.preset === c.id)}
+                label={c.name || '(未命名)'}
+                personaId={c.id}
+                active={draft.persona.preset === c.id}
                 onClick={() => setDraft({ ...draft, persona: { ...draft.persona, preset: c.id } })}
-              >
-                {c.name || '(未命名)'}
-              </button>
+              />
             ))}
             {/* "+ new" chip — creates a fresh custom seeded with the template. */}
             <button
@@ -527,22 +535,48 @@ export function Settings({ initial, onClose }: SettingsProps) {
             </button>
           </div>
 
+          {/* Per-persona stats: affinity bar + episode count + actions.
+              Always rendered (built-in OR custom) since these stats are
+              about the relationship, not the persona definition. */}
+          <PersonaStatsPanel
+            personaId={draft.persona.preset}
+            draft={draft}
+            setDraft={setDraft}
+          />
+
           {/* Detail panel for the currently-selected persona. */}
-          {(draft.persona.preset === 'maid' || draft.persona.preset === 'imouto') ? (
-            <div
-              style={{
-                whiteSpace: 'pre-wrap',
-                background: 'rgba(255,255,255,0.06)',
-                padding: 8,
-                borderRadius: 6,
-                fontSize: 11,
-                lineHeight: 1.5,
-                color: '#ccc',
-                maxHeight: 200,
-                overflowY: 'auto',
-              }}
-            >
-              {personaPresets[draft.persona.preset as 'maid' | 'imouto'].systemPrompt}
+          {draft.persona.preset in personaPresets ? (
+            // Built-in personas are READ-ONLY — the prompt is the result
+            // of careful tuning against the tier system, exposing it for
+            // edit invites users to add warmth keywords (温柔 / 忠诚)
+            // back in and undo the tier-driven escalation. Custom
+            // personas remain fully editable below.
+            <div style={{ fontSize: 12, color: '#bbb', lineHeight: 1.6 }}>
+              {(() => {
+                const archetypeDescription: Record<string, string> = {
+                  maid: '能干、专业、注重服务。态度（温柔、撒娇、"主人"称呼）随亲密度逐步解锁。',
+                  imouto: '年纪比你小、记性好、有自己的个性。态度（毒舌、撒娇、"哥"称呼）随亲密度逐步解锁。',
+                  ojou: '青梅竹马的傲娇大小姐，家世显赫。态度（刀子嘴、"本小姐"、嘴硬心软）随亲密度逐步解锁。',
+                }
+                return (
+                  <>
+                    <div style={{ marginBottom: 6 }}>
+                      <b style={{ color: '#ddd' }}>
+                        {
+                          personaPresets[draft.persona.preset as keyof typeof personaPresets]
+                            .name
+                        }
+                      </b>
+                      ：
+                      {archetypeDescription[draft.persona.preset] ?? ''}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#888' }}>
+                      内置人设的 prompt 不可编辑——它跟好感度等级系统是配套调试的。
+                      想自定义？点上面 "+ 新建"。
+                    </div>
+                  </>
+                )
+              })()}
             </div>
           ) : (
             (() => {
@@ -646,6 +680,16 @@ export function Settings({ initial, onClose }: SettingsProps) {
             })()
           )}
         </Section>
+        )}
+
+        {/* Memory infrastructure section — folded into 人物 tab per the
+            "人设和记忆合一" decision. Embedding model status / download,
+            reflection cadence, and any other system-level memory settings
+            live inside MemoryTab. Shown ONLY when the 人物 tab is open. */}
+        {activeTab === 'persona' && (
+          <Section title="记忆系统（高级）">
+            <MemoryTab personaId={draft.persona.preset} />
+          </Section>
         )}
 
         {/* ---- Live2D ---- */}
@@ -825,9 +869,6 @@ export function Settings({ initial, onClose }: SettingsProps) {
           />
         )}
 
-        {/* ---- Memory ---- */}
-        {activeTab === 'memory' && <MemoryTab />}
-
         {/* ---- Window ---- */}
         {activeTab === 'window' && (
           <>
@@ -881,6 +922,52 @@ export function Settings({ initial, onClose }: SettingsProps) {
               <div style={{ fontSize: 11, color: '#888', marginLeft: 22 }}>
                 只在安装版生效。如果想撤销，也可以在 Windows
                 任务管理器 → 启动 里禁用。
+              </div>
+            </Section>
+
+            <Section title="全局快捷键">
+              <Label>召唤 / 隐藏 OpenMeido</Label>
+              <input
+                type="text"
+                placeholder="例如 CommandOrControl+Alt+M（留空 = 禁用）"
+                value={draft.window.summonHotkey}
+                onChange={(e) =>
+                  setDraft({
+                    ...draft,
+                    window: { ...draft.window, summonHotkey: e.target.value },
+                  })
+                }
+                style={inputStyle}
+              />
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 6 }}>
+                {['CommandOrControl+Alt+M', 'CommandOrControl+Shift+M', 'F8'].map(
+                  (combo) => (
+                    <button
+                      key={combo}
+                      onClick={() =>
+                        setDraft({
+                          ...draft,
+                          window: { ...draft.window, summonHotkey: combo },
+                        })
+                      }
+                      style={{
+                        ...chipStyle(draft.window.summonHotkey === combo),
+                        fontSize: 11,
+                      }}
+                    >
+                      {combo}
+                    </button>
+                  ),
+                )}
+              </div>
+              <HotkeyStatus savedAccelerator={initial.window.summonHotkey} />
+              <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>
+                Electron 加速器格式：修饰键（CommandOrControl / Alt / Shift / Super）+ 字母 /
+                数字 / F1-F24 / Space / Enter / 方向键，用 + 连接。保存后立即生效；
+                如果显示"已被占用"换一个组合。窗口被快捷键隐藏后，再按一次就拉回来。
+                <br />
+                ⚠️ 避开 <b>Alt+Shift</b>（Windows 输入法切换）、<b>Ctrl+Space</b>
+                （中文输入法开关）、<b>Win+...</b>（系统保留），这些会被系统先拦截。
               </div>
             </Section>
 
@@ -2096,102 +2183,53 @@ function EmbedModelPanel(): React.ReactElement {
   )
 }
 
-function MemoryTab() {
-  const [status, setStatus] = useState<{
-    ready: boolean
-    count?: number
-    sessionId?: string
-    initError?: string
-  }>({ ready: false })
-  const [sessions, setSessions] = useState<SessionSummary[]>([])
-  /** Which session is being viewed below. Defaults to current. */
-  const [viewSessionId, setViewSessionId] = useState<string | null>(null)
+function MemoryTab({ personaId }: { personaId: string }) {
+  // Simplified per "一个人物，一个记忆" decision (2026-05-21): no session
+  // picker, no manual session creation, no cross-persona "clear all". The
+  // per-persona panel above already exposes "清空这个人物" — which IS the
+  // user-facing "wipe her memory" action. Here we only show:
+  //   - embedding-model download/status (system-level infra)
+  //   - aggregate count for the focused persona
+  //   - a read-only recent-episodes browser for that persona
+  //   - the L3 facts inspector (her distilled knowledge about you)
+  //
+  // The `personaId` prop is the DRAFT-level focus, NOT the persisted
+  // active persona — so clicking a different chip above immediately
+  // refreshes this view, without requiring the user to click 保存.
+  const [memReady, setMemReady] = useState<{ ready: boolean; initError?: string }>({
+    ready: false,
+  })
+  const [count, setCount] = useState<number>(0)
   const [episodes, setEpisodes] = useState<Episode[]>([])
-  const [busy, setBusy] = useState(false)
 
   async function refresh(): Promise<void> {
     const s = await window.api.memory.status()
-    setStatus(s)
+    setMemReady(s.ready ? { ready: true } : { ready: false, initError: s.initError })
     if (!s.ready) return
-    let list = await window.api.memory.listSessions()
-    // The current session might be brand-new and have zero episodes yet —
-    // make sure it still appears in the dropdown so the user can SEE it.
-    if (s.sessionId && !list.find((x) => x.id === s.sessionId)) {
-      const now = new Date().toISOString()
-      list = [
-        { id: s.sessionId, preview: '', startTs: now, lastTs: now, count: 0 },
-        ...list,
-      ]
-    }
-    setSessions(list)
-    // Default to current session, falling back to whichever session is on top.
-    const target = s.sessionId ?? list[0]?.id ?? null
-    setViewSessionId(target)
-    if (target) {
-      setEpisodes(await window.api.memory.listRecent(200, target))
-    } else {
-      setEpisodes([])
-    }
+    const all = await window.api.affinity.listAll()
+    const me = all.find((a) => a.personaId === personaId)
+    setCount(me?.episodeCount ?? 0)
+    // Per-persona recent — bypass the active-persona-scoped listRecent
+    // because the focused chip may not match the saved active persona.
+    setEpisodes(await window.api.memory.listRecentFor(personaId, 200))
   }
 
   useEffect(() => {
     void refresh()
+    // Also listen for persona-switch broadcasts so a save-driven persona
+    // change updates us even when the Settings dialog stays open.
+    const offSwitch = window.api.affinity.onPersonaSwitched(() => void refresh())
+    return () => {
+      offSwitch()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [personaId])
 
-  // Re-fetch episodes when viewSessionId changes (but skip the first
-  // mount where refresh() already populated them).
-  useEffect(() => {
-    if (!viewSessionId || !status.ready) return
-    void (async () => {
-      setEpisodes(await window.api.memory.listRecent(200, viewSessionId))
-    })()
-  }, [viewSessionId, status.ready])
-
-  async function onNewSession(): Promise<void> {
-    setBusy(true)
-    try {
-      await window.api.memory.newSession()
-      // Reset view to follow the new current session.
-      setViewSessionId(null)
-      await refresh()
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function onClearAll(): Promise<void> {
-    if (!(await confirm('清空全部记忆？此操作无法撤销，妹妹会忘记之前所有对话。'))) return
-    setBusy(true)
-    try {
-      await window.api.memory.clear()
-      setViewSessionId(null)
-      await refresh()
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function onDeleteViewed(): Promise<void> {
-    if (!viewSessionId) return
-    const sess = sessions.find((s) => s.id === viewSessionId)
-    const label = sess ? sessionLabel(sess, sess.id === status.sessionId) : viewSessionId
-    if (!(await confirm(`删除会话「${label}」的全部记录？无法撤销。`))) return
-    setBusy(true)
-    try {
-      await window.api.memory.deleteSession(viewSessionId)
-      setViewSessionId(null)
-      await refresh()
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  if (!status.ready) {
+  if (!memReady.ready) {
     return (
       <div style={{ fontSize: 12, lineHeight: 1.5 }}>
         <div style={{ color: '#f88', marginBottom: 6 }}>记忆模块初始化失败 / 未启用。</div>
-        {status.initError && (
+        {memReady.initError && (
           <pre
             style={{
               background: 'rgba(255,255,255,0.06)',
@@ -2206,7 +2244,7 @@ function MemoryTab() {
               margin: 0,
             }}
           >
-            {status.initError}
+            {memReady.initError}
           </pre>
         )}
         <div style={{ color: '#888', marginTop: 8 }}>
@@ -2221,122 +2259,52 @@ function MemoryTab() {
     <Section title="记忆">
       <EmbedModelPanel />
       <div style={{ fontSize: 12, color: '#ccc', marginBottom: 8 }}>
-        共 <b style={{ color: '#fff' }}>{status.count}</b> 条记录，分布在{' '}
-        <b style={{ color: '#fff' }}>{sessions.length}</b> 个会话。
+        这个人物对你有 <b style={{ color: '#fff' }}>{count}</b> 段记忆。
+      </div>
+      <div style={{ fontSize: 11, color: '#999', marginBottom: 12 }}>
+        每个人物拥有独立的记忆池——切换人物时记忆自动跟着切换。要清空当前人物的记忆，到上面"清空这个人物"。
       </div>
 
-      <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
-        <button onClick={onNewSession} disabled={busy} style={btnStyle('secondary')}>
-          新建会话
-        </button>
-        <button
-          onClick={onDeleteViewed}
-          disabled={busy || !viewSessionId}
-          style={{
-            ...btnStyle('subtle'),
-            background: 'rgba(200, 80, 80, 0.15)',
-            border: '1px solid rgba(200, 80, 80, 0.35)',
-            color: '#f99',
-          }}
-        >
-          删除此会话
-        </button>
-        <button
-          onClick={onClearAll}
-          disabled={busy}
-          style={{
-            ...btnStyle('subtle'),
-            background: 'rgba(200, 80, 80, 0.2)',
-            border: '1px solid rgba(200, 80, 80, 0.4)',
-            color: '#f99',
-          }}
-        >
-          清空全部
-        </button>
-      </div>
-
-      <Label>查看会话（切换需要点下方按钮）</Label>
-      {sessions.length === 0 ? (
-        <div style={{ color: '#777', fontSize: 12, padding: 8 }}>
-          还没有任何对话记录。聊几句就有了。
-        </div>
-      ) : (
-        <>
-          <select
-            value={viewSessionId ?? ''}
-            // Dropdown is preview-only. Switching the ACTIVE session is a
-            // big deal (changes where future chat lands) so we require an
-            // explicit click on the "切换到此会话" button below.
-            onChange={(e) => setViewSessionId(e.target.value)}
-            style={{ ...inputStyle, marginBottom: 8 }}
-          >
-            {sessions.map((s) => (
-              <option key={s.id} value={s.id}>
-                {sessionLabel(s, s.id === status.sessionId)}
-              </option>
-            ))}
-          </select>
-
-          {/* Switch button — appears only when peeking at a session that
-              isn't already the active one. Disabled on the current session
-              to make "this is already active" visible. */}
-          {viewSessionId && viewSessionId !== status.sessionId && (
-            <button
-              onClick={async () => {
-                if (!viewSessionId) return
-                setBusy(true)
-                try {
-                  await window.api.memory.setSession(viewSessionId)
-                  await refresh()
-                } finally {
-                  setBusy(false)
-                }
+      <Label>最近的对话</Label>
+      <div
+        style={{
+          background: 'rgba(255,255,255,0.04)',
+          borderRadius: 6,
+          padding: 6,
+          maxHeight: 320,
+          overflowY: 'auto',
+          fontSize: 11,
+        }}
+      >
+        {episodes.length === 0 ? (
+          <div style={{ color: '#777', padding: 8 }}>还没有任何对话记录。聊几句就有了。</div>
+        ) : (
+          episodes.map((e) => (
+            <div
+              key={e.id}
+              style={{
+                padding: '4px 6px',
+                marginBottom: 2,
+                borderLeft: `3px solid ${e.speaker === 'user' ? '#5a8edf' : '#888'}`,
               }}
-              disabled={busy}
-              style={{ ...btnStyle('primary'), marginBottom: 8, width: '100%' }}
             >
-              切换到此会话 · 之后的对话都续在这里
-            </button>
-          )}
-
-          <div
-            style={{
-              background: 'rgba(255,255,255,0.04)',
-              borderRadius: 6,
-              padding: 6,
-              maxHeight: 320,
-              overflowY: 'auto',
-              fontSize: 11,
-            }}
-          >
-            {episodes.length === 0 ? (
-              <div style={{ color: '#777', padding: 8 }}>该会话没有记录。</div>
-            ) : (
-              episodes.map((e) => (
-                <div
-                  key={e.id}
-                  style={{
-                    padding: '4px 6px',
-                    marginBottom: 2,
-                    borderLeft: `3px solid ${e.speaker === 'user' ? '#5a8edf' : '#888'}`,
-                  }}
-                >
-                  <div style={{ color: '#888', fontSize: 10, display: 'flex', gap: 6 }}>
-                    <span>{new Date(e.ts).toLocaleTimeString()}</span>
-                    <span>· {e.speaker === 'user' ? '我' : '她'}</span>
-                  </div>
-                  <div style={{ color: '#ddd', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                    {e.text.length > 200 ? e.text.slice(0, 200) + '…' : e.text}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-          <div style={{ fontSize: 10, color: '#777', marginTop: 4 }}>
-            ★ = 当前活跃会话（新对话会归入这里）。dropdown 只是预览，要切换请点上方按钮。
-          </div>
-        </>
-      )}
+              <div style={{ color: '#888', fontSize: 10, display: 'flex', gap: 6 }}>
+                <span>{new Date(e.ts).toLocaleTimeString()}</span>
+                <span>· {e.speaker === 'user' ? '我' : '她'}</span>
+              </div>
+              <div
+                style={{
+                  color: '#ddd',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                }}
+              >
+                {e.text.length > 200 ? e.text.slice(0, 200) + '…' : e.text}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
 
       <FactsPanel />
     </Section>
@@ -2559,4 +2527,362 @@ const closeBtnStyle: React.CSSProperties = {
   fontSize: 14,
   cursor: 'pointer',
   padding: 0,
+}
+
+/** Match shared/affinity.ts tier breakpoints. Duplicated in renderer to
+ *  avoid pulling a Node-typed module into the renderer bundle. */
+function tierLabelFor(score: number): string {
+  if (score >= 81) return '默契'
+  if (score >= 51) return '亲近'
+  if (score >= 21) return '熟络'
+  return '生疏'
+}
+
+/**
+ * Per-persona stats panel for the 人物 tab. Shows affinity (bar + tier
+ * label + last judge reason) plus episode/fact counts and reset actions.
+ * Also hosts the per-persona custom-background picker.
+ * Re-fetches on persona switch.
+ */
+function PersonaStatsPanel({
+  personaId,
+  draft,
+  setDraft,
+}: {
+  personaId: string
+  draft: Config
+  setDraft: (next: Config) => void
+}) {
+  const [stats, setStats] = useState<{
+    score: number
+    lastReason: string | null
+    episodeCount: number
+  } | null>(null)
+  const reload = async (): Promise<void> => {
+    const rec = await window.api.affinity.get(personaId)
+    if (!rec) return
+    const all = await window.api.affinity.listAll()
+    const me = all.find((a) => a.personaId === personaId)
+    setStats({
+      score: rec.score,
+      lastReason: rec.lastReason,
+      episodeCount: me?.episodeCount ?? 0,
+    })
+  }
+  useEffect(() => {
+    void reload()
+  }, [personaId])
+  if (!stats) {
+    return <div style={{ fontSize: 11, color: '#888', marginBottom: 8 }}>...</div>
+  }
+  const tier = tierLabelFor(stats.score)
+  return (
+    <div
+      style={{
+        marginBottom: 8,
+        padding: '8px 10px',
+        background: 'rgba(255,255,255,0.04)',
+        borderRadius: 6,
+        fontSize: 11,
+        color: '#bbb',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          marginBottom: 4,
+          color: '#ddd',
+          fontWeight: 500,
+        }}
+      >
+        <span>❤️ 好感度</span>
+        <span>
+          {stats.score} / 100 · {tier}
+        </span>
+      </div>
+      <div
+        style={{
+          height: 5,
+          borderRadius: 3,
+          background: 'rgba(0,0,0,0.3)',
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            width: `${Math.max(2, stats.score)}%`,
+            height: '100%',
+            background: 'linear-gradient(90deg, #f6a4b3, #d4768a)',
+            transition: 'width 400ms ease',
+          }}
+        />
+      </div>
+      {stats.lastReason && (
+        <div
+          style={{
+            marginTop: 4,
+            fontSize: 10,
+            color: '#888',
+            fontStyle: 'italic',
+          }}
+        >
+          最近：{stats.lastReason}
+        </div>
+      )}
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          marginTop: 6,
+        }}
+      >
+        <span>记忆：{stats.episodeCount} 条 episode</span>
+        <button
+          onClick={async () => {
+            if (
+              !(await confirm(
+                `清空${personaId}的所有记忆 + 好感度？此操作无法撤销。`,
+              ))
+            ) {
+              return
+            }
+            await window.api.persona.delete(personaId)
+            await reload()
+          }}
+          style={{
+            fontSize: 10,
+            padding: '1px 8px',
+            background: 'rgba(200, 80, 80, 0.18)',
+            border: '1px solid rgba(200, 80, 80, 0.35)',
+            borderRadius: 3,
+            color: '#f99',
+            cursor: 'pointer',
+          }}
+        >
+          清空这个人物
+        </button>
+      </div>
+
+      {/* ===== Per-persona background image ===== */}
+      <div
+        style={{
+          marginTop: 10,
+          paddingTop: 8,
+          borderTop: '1px dotted rgba(255,255,255,0.08)',
+          fontSize: 11,
+          color: '#bbb',
+        }}
+      >
+        <div style={{ marginBottom: 4, color: '#ddd', fontWeight: 500 }}>
+          🖼 背景图
+        </div>
+        <div
+          style={{
+            display: 'flex',
+            gap: 6,
+            alignItems: 'center',
+            marginBottom: 4,
+          }}
+        >
+          <button
+            onClick={async () => {
+              const result = await window.api.background.import(personaId)
+              if (!result) return
+              const oldFile = draft.window.customBackgrounds[personaId]
+              setDraft({
+                ...draft,
+                window: {
+                  ...draft.window,
+                  customBackgrounds: {
+                    ...draft.window.customBackgrounds,
+                    [personaId]: result.basename,
+                  },
+                },
+              })
+              if (oldFile && oldFile !== result.basename) {
+                void window.api.background.delete(oldFile)
+              }
+            }}
+            style={{
+              fontSize: 10,
+              padding: '2px 8px',
+              background: 'rgba(90, 142, 223, 0.22)',
+              border: '1px solid #5a8edf',
+              borderRadius: 3,
+              color: '#cfdcf3',
+              cursor: 'pointer',
+            }}
+          >
+            导入图片…
+          </button>
+          {draft.window.customBackgrounds[personaId] && (
+            <>
+              <span style={{ fontSize: 10, color: '#9b9' }}>
+                已使用自定义
+              </span>
+              <button
+                onClick={async () => {
+                  const old = draft.window.customBackgrounds[personaId]
+                  const next = { ...draft.window.customBackgrounds }
+                  delete next[personaId]
+                  setDraft({
+                    ...draft,
+                    window: { ...draft.window, customBackgrounds: next },
+                  })
+                  if (old) void window.api.background.delete(old)
+                }}
+                style={{
+                  fontSize: 10,
+                  padding: '1px 6px',
+                  background: 'rgba(255,255,255,0.06)',
+                  border: '1px solid rgba(255,255,255,0.15)',
+                  borderRadius: 3,
+                  color: '#bbb',
+                  cursor: 'pointer',
+                }}
+              >
+                恢复默认
+              </button>
+            </>
+          )}
+        </div>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            marginTop: 4,
+          }}
+        >
+          <span style={{ fontSize: 10, color: '#888', minWidth: 36 }}>
+            缩放
+          </span>
+          <input
+            type="range"
+            min={0.5}
+            max={3}
+            step={0.05}
+            value={draft.window.backgroundZoom}
+            onChange={(e) =>
+              setDraft({
+                ...draft,
+                window: {
+                  ...draft.window,
+                  backgroundZoom: Number(e.target.value),
+                },
+              })
+            }
+            style={{ flex: 1 }}
+          />
+          <span
+            style={{
+              fontSize: 10,
+              color: '#bbb',
+              minWidth: 36,
+              textAlign: 'right',
+            }}
+          >
+            {Math.round(draft.window.backgroundZoom * 100)}%
+          </span>
+        </div>
+        <div style={{ fontSize: 10, color: '#777', marginTop: 2 }}>
+          100% = 默认填满窗口（cover）；&gt;100% = 放大近景；&lt;100% =
+          缩小看更多画面。所有人物共享同一个缩放。
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Persona chip with affinity score + tier badge. Polls the per-persona
+ * affinity record once on mount so the user can see "女仆 ❤️47 · 熟络"
+ * at a glance — comparing personas side-by-side becomes meaningful only
+ * when you can see each one's relationship state.
+ */
+function PersonaChip({
+  label,
+  personaId,
+  active,
+  onClick,
+}: {
+  label: string
+  personaId: string
+  active: boolean
+  onClick: () => void
+}) {
+  const [score, setScore] = useState<number | null>(null)
+  useEffect(() => {
+    let alive = true
+    void window.api.affinity.get(personaId).then((rec) => {
+      if (alive && rec) setScore(rec.score)
+    })
+    return () => {
+      alive = false
+    }
+  }, [personaId])
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        ...chipStyle(active),
+        display: 'inline-flex',
+        gap: 4,
+        alignItems: 'center',
+      }}
+    >
+      <span>{label}</span>
+      {score !== null && score > 0 && (
+        <span style={{ fontSize: 9, color: active ? '#fff' : '#c45e76' }}>
+          ❤️{score}
+        </span>
+      )}
+    </button>
+  )
+}
+
+/**
+ * Shows whether the global summon hotkey is actually registered with the OS
+ * right now. Polls main on mount and whenever the saved accelerator changes
+ * (i.e. after the user clicks 保存). Stale while the user is editing — that's
+ * intentional: the hint text tells them changes apply on save.
+ */
+function HotkeyStatus({ savedAccelerator }: { savedAccelerator: string }) {
+  const [status, setStatus] = useState<{
+    registered: boolean
+    accelerator: string
+    error: string | null
+  } | null>(null)
+  useEffect(() => {
+    let alive = true
+    void window.api.window.getHotkeyStatus().then((s) => {
+      if (alive) setStatus(s)
+    })
+    return () => {
+      alive = false
+    }
+  }, [savedAccelerator])
+  if (!savedAccelerator) {
+    return (
+      <div style={{ fontSize: 11, color: '#888' }}>
+        ⚪ 未启用——填入快捷键并保存。
+      </div>
+    )
+  }
+  if (!status) {
+    return <div style={{ fontSize: 11, color: '#888' }}>检查中…</div>
+  }
+  if (status.registered) {
+    return (
+      <div style={{ fontSize: 11, color: '#7fc97f' }}>
+        ✓ 已注册（{status.accelerator}）。在任意窗口按一次即可呼出 / 隐藏 OpenMeido。
+      </div>
+    )
+  }
+  return (
+    <div style={{ fontSize: 11, color: '#e88' }}>
+      ✗ 注册失败：{status.error || '可能被其他程序占用或格式不正确。换一个组合试试。'}
+    </div>
+  )
 }

@@ -1,22 +1,19 @@
 /**
- * Emotion classifier — picks a Live2D expression for every assistant reply
- * via a separate lightweight LLM call (NOT a tool in the main chat loop).
+ * Combined emotion + affinity classifier.
  *
- * Why a separate call rather than a tool:
- *   - The main chat prompt stays focused on tools/replies. Emotion logic
- *     doesn't bloat it.
- *   - The tool was optional, so most replies ended with whatever face was
- *     held from a previous turn. With this classifier, every reply gets
- *     a fresh face — no stale state.
- *   - Routes through the configured backend's LIGHTWEIGHT tier (see
- *     shared/lightweight-models.ts), so per-reply cost is minimal.
- *   - Easy to swap models, throttle, or upgrade to mid-stream
- *     classification later without touching chat.ts.
+ * Runs ONE lightweight LLM call after each chat exchange that returns:
+ *   - the emotion ${persona.name} should display (drives Live2D)
+ *   - the affinity delta the user's behavior earned with this persona
+ *     (drives the relationship tier)
  *
- * Failure modes:
- *   - Empty / very short text → skip (no point classifying "嗯").
- *   - LLM call errors / times out → log and bail (face stays as it was).
- *   - Output isn't in the label set → treated as 中性 (no expression).
+ * Replaces what used to be two separate calls. Failure mode: if the JSON
+ * parse fails we still try to extract an emotion label from the raw
+ * output (robust regex), and default affinity_delta to 0 — better to
+ * lose half the signal than both.
+ *
+ * The pure resolution-to-command logic lives in ./emotion-apply.ts so
+ * unit tests can exercise it without electron / network. This file
+ * does the LLM round-trip + wires production deps.
  */
 
 import { runExtraction } from './chat-host.js'
@@ -25,39 +22,158 @@ import { getConfig } from './config.js'
 import { resolvePersona } from '../shared/config.js'
 import { getSidecar as live2dGetSidecar } from './live2d-models-host.js'
 import { EMOTIONS, type Emotion } from '../shared/live2d-models.js'
-import { buildEmotionPrompt } from '../shared/daily-prompts.js'
+import { buildCombinedClassifierPrompt } from '../shared/daily-prompts.js'
+import { pushEmotionEvent } from './emotion-events.js'
+import { applyEmotion } from './emotion-apply.js'
+import { applyJudgement, currentTier } from './affinity-host.js'
 
 /** Below this length we assume the reply is too short to carry useful
  *  emotion signal (e.g., "嗯", "好的"). Skip the round-trip. */
 const MIN_TEXT_LEN_FOR_CLASSIFICATION = 6
 
+interface JudgeResult {
+  emotion: Emotion | null
+  affinityDelta: number
+  reason: string
+}
+
 /**
- * Public entry — call after the chat stream finishes with the final reply
- * text. Fire-and-forget; errors are swallowed (logged only).
+ * Public entry — call after the chat stream finishes. Fire-and-forget;
+ * errors are swallowed (logged only).
+ *
+ * `userText` is the most recent user message; needed for affinity
+ * judgement (which is about the USER's behavior, not the maid's reply).
+ * Pass empty string when called from greeting / proactive — those don't
+ * have a user message to judge against and the affinity update is
+ * skipped naturally because no delta makes sense.
  */
-export async function classifyAndApplyEmotion(text: string): Promise<void> {
-  const trimmed = text.trim()
+export async function classifyAndApply(
+  assistantText: string,
+  userText: string = '',
+): Promise<void> {
+  const trimmed = assistantText.trim()
   if (trimmed.length < MIN_TEXT_LEN_FOR_CLASSIFICATION) return
 
   const cfg = getConfig()
   const persona = resolvePersona(cfg.persona)
+  const personaId = cfg.persona.preset
+  const tier = currentTier(personaId)
   let raw: string
   try {
     raw = await runExtraction(
-      buildEmotionPrompt({ text: trimmed, persona, validLabels: EMOTIONS }),
+      buildCombinedClassifierPrompt({
+        userText: userText.trim(),
+        assistantText: trimmed,
+        persona,
+        validLabels: EMOTIONS,
+        currentAffinity: tier.min, // approximation; engine has the precise value
+        tierLabel: tier.zhLabel,
+      }),
     )
   } catch (err) {
-    console.warn('[emotion] classifier LLM call failed:', err)
+    console.warn('[classifier] LLM call failed:', err)
     return
   }
-  const label = parseEmotionLabel(raw)
-  await applyEmotion(label)
+  const result = parseJudgeResult(raw)
+  await applyEmotion(result.emotion, {
+    send: broadcastLive2D,
+    pushEvent: pushEmotionEvent,
+    sidecarFor: live2dGetSidecar,
+    modelName: cfg.live2d.activeModel,
+  })
+  // Affinity only when we have user context (chat path). Greeting /
+  // proactive emit assistant text with no preceding user turn — judging
+  // affinity off a one-sided utterance would be noise.
+  if (userText.trim() && result.affinityDelta !== 0) {
+    void applyJudgement(personaId, result.affinityDelta, result.reason)
+  }
+  console.log(
+    `[classifier] → emotion=${result.emotion ?? '中性'} Δaffinity=${result.affinityDelta} (${result.reason})`,
+  )
 }
 
 /**
- * Pull a clean label out of the model's response. Tolerates extra
- * whitespace, surrounding quotes, trailing punctuation. Unknown
- * outputs → null (= 中性, clear any held expression).
+ * Backward-compat shim. Anything that used the old name keeps working
+ * during the transition; once all callers migrate to classifyAndApply
+ * with explicit userText this can be removed.
+ */
+export async function classifyAndApplyEmotion(text: string): Promise<void> {
+  return classifyAndApply(text, '')
+}
+
+/**
+ * Parse the JSON judge output. Tolerant of:
+ *   - fenced blocks: ```json\n{...}\n```
+ *   - embedded JSON in prose: "Here's my answer: {...}"
+ *   - bare JSON
+ *   - JSON with extra keys (we ignore them)
+ *
+ * If JSON parsing fails entirely, fall back to: regex-extracting an
+ * emotion label from the raw text and returning delta=0. Better to keep
+ * the face working than to lose both signals.
+ */
+function parseJudgeResult(raw: string): JudgeResult {
+  // 1. Try strict JSON modes.
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const tryStrings = [fenced?.[1], extractFirstJsonObject(raw), raw].filter(
+    (s): s is string => typeof s === 'string',
+  )
+  for (const s of tryStrings) {
+    try {
+      const obj = JSON.parse(s) as Record<string, unknown>
+      const emotion = parseEmotionLabel(typeof obj.emotion === 'string' ? obj.emotion : '')
+      const rawDelta = typeof obj.affinity_delta === 'number' ? obj.affinity_delta : 0
+      const reason =
+        typeof obj.reason === 'string' ? obj.reason.slice(0, 50) : ''
+      return { emotion, affinityDelta: clampToTwo(rawDelta), reason }
+    } catch {
+      /* try next form */
+    }
+  }
+  // 2. Fallback: regex-extract emotion only.
+  const emotion = parseEmotionLabel(raw)
+  return { emotion, affinityDelta: 0, reason: '(parse failed)' }
+}
+
+function clampToTwo(n: number): number {
+  if (!Number.isFinite(n)) return 0
+  if (n > 2) return 2
+  if (n < -2) return -2
+  return Math.trunc(n)
+}
+
+/** Find the first top-level {...} block in a string, balancing braces. */
+function extractFirstJsonObject(s: string): string | null {
+  const start = s.indexOf('{')
+  if (start < 0) return null
+  let depth = 0
+  let inString = false
+  let escape = false
+  for (let i = start; i < s.length; i++) {
+    const c = s[i]!
+    if (inString) {
+      if (escape) {
+        escape = false
+      } else if (c === '\\') {
+        escape = true
+      } else if (c === '"') {
+        inString = false
+      }
+      continue
+    }
+    if (c === '"') inString = true
+    else if (c === '{') depth++
+    else if (c === '}') {
+      depth--
+      if (depth === 0) return s.slice(start, i + 1)
+    }
+  }
+  return null
+}
+
+/**
+ * Pull a clean emotion label out of arbitrary text. Tolerates extra
+ * whitespace, quotes, punctuation. Unknown outputs → null (= 中性).
  */
 function parseEmotionLabel(raw: string): Emotion | null {
   const stripped = raw
@@ -69,47 +185,11 @@ function parseEmotionLabel(raw: string): Emotion | null {
   if ((EMOTIONS as readonly string[]).includes(stripped)) {
     return stripped as Emotion
   }
-  // Model sometimes returns the label inside a sentence ("情绪：开心").
-  // Last-ditch substring scan.
   for (const e of EMOTIONS) {
     if (stripped.includes(e)) return e
   }
   return null
 }
 
-/**
- * Resolve `emotion` against the active Live2D model's sidecar mapping and
- * broadcast the corresponding expression / motion. `null` means neutral —
- * clear any held expression.
- *
- * Same lookup logic the old setLive2DExpression tool used; lifted here so
- * the chat loop no longer needs the tool at all.
- */
-async function applyEmotion(emotion: Emotion | null): Promise<void> {
-  if (!emotion) {
-    broadcastLive2D({ type: 'setExpression', name: null })
-    return
-  }
-  const cfg = getConfig()
-  const sidecar = await live2dGetSidecar(cfg.live2d.activeModel)
-  if (!sidecar) {
-    broadcastLive2D({ type: 'setExpression', name: null })
-    return
-  }
-  const expr = sidecar.emotionMapping?.[emotion]
-  if (expr) {
-    broadcastLive2D({ type: 'setExpression', name: expr })
-    return
-  }
-  const motion = sidecar.motionMapping?.[emotion]
-  if (motion) {
-    broadcastLive2D({ type: 'playMotion', group: motion.group, index: motion.index })
-    return
-  }
-  // Emotion known but model doesn't have a mapping for it — clear so we
-  // don't lie with stale state.
-  broadcastLive2D({ type: 'setExpression', name: null })
-}
-
 /** Exported for tests. */
-export const __testing = { parseEmotionLabel }
+export const __testing = { parseEmotionLabel, parseJudgeResult, extractFirstJsonObject }

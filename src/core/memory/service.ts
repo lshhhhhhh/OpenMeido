@@ -6,12 +6,19 @@
  * future PWA service worker, etc.) wires them up however that platform
  * exposes them.
  *
+ * Persona scope: the service reads the active persona from config on every
+ * operation. Callers don't pass it in — that keeps the agent loop /
+ * greeting / proactive code free of plumbing, and a config change
+ * propagates to the very next memory call. The adapter handles persona
+ * isolation in storage; the service is the place that picks "which
+ * persona's bucket should this read/write touch."
+ *
  * The host is also responsible for choosing when to instantiate this:
  * lazy init at app whenReady is typical.
  */
 
 import type { Config } from '../../shared/config.js'
-import type { MemoryAdapter } from './adapter.js'
+import type { AffinityRecord, MemoryAdapter } from './adapter.js'
 import { reflect, renderFactsBlock, type ReflectionExtractor } from './reflection.js'
 import type {
   Episode,
@@ -27,13 +34,7 @@ import type {
 export type EmbedFn = (text: string) => Promise<Float32Array>
 
 export interface MemoryService {
-  /**
-   * Embed + persist a single turn. Returns null on any failure — a missed
-   * memory write must never break chat. Errors are logged via console.warn
-   * so the host can pipe them somewhere visible.
-   *
-   * `toolParts` carries agent-loop structure (see MemoryAdapter.addEpisode).
-   */
+  /** Embed + persist a single turn (under active persona). */
   addEpisode(
     speaker: Speaker,
     text: string,
@@ -41,130 +42,63 @@ export interface MemoryService {
     images?: EpisodeImage[],
   ): Promise<number | null>
 
-  /**
-   * Build the context for the NEXT model call: top-K semantically relevant
-   * past episodes (excluding ones already in the recent window) plus the
-   * recent-N window itself.
-   */
+  /** Build retrieval context for the active persona. */
   retrieve(userMessage: string): Promise<{ recent: Episode[]; recalled: Episode[] }>
 
-  /** Diagnostic — episode count. */
   count(): Promise<number>
-
-  /** Most-recent N episodes for the Memory inspection UI; optionally one session only. */
   listRecent(limit: number, sessionId?: string): Promise<Episode[]>
-
-  /** Per-session summaries with first-user-message preview for the picker. */
   listSessions(): Promise<SessionSummary[]>
-
-  /** Wipe everything. Returns rows removed. */
   clearAll(): Promise<number>
-
-  /** Delete a single session's episodes. */
   deleteSession(sessionId: string): Promise<number>
-
-  /** Generate a new session id; future addEpisode calls tag with it. */
   newSession(): string
-
-  /** Switch the active session to an existing id (continue an old chat). */
   setSession(id: string): void
-
-  /** Current session id (what new turns are being tagged with). */
   currentSession(): string
 
-  // ---- L3 facts ----
-
-  /** Active facts (supersededBy IS NULL), newest first. */
+  // ---- L3 facts (active persona) ----
   listFacts(limit?: number): Promise<Fact[]>
-
-  /**
-   * Pull the user's name out of the L3 fact store if we have one.
-   * Convenience over listFacts → caller would otherwise have to grep
-   * for `user.profile.name` everywhere it wants to address the user by
-   * real name (greeting, goodbye, proactive remark, …). Returns null
-   * when there's no name fact recorded yet — caller should fall back
-   * to the persona's default addressing.
-   */
   getUserName(): Promise<string | null>
-
-  /**
-   * Build the system-prompt fragment that lists known user facts. Returns
-   * empty string when there's nothing worth injecting (no facts above the
-   * confidence threshold). Cached implicitly per-call by the caller —
-   * service doesn't memo because facts can change between turns.
-   */
   factsBlock(minConfidence?: number): Promise<string>
-
-  /**
-   * Drive one reflection pass: pull the last N episodes, ask the LLM to
-   * distill facts, upsert what comes back. Best-effort — failures don't
-   * throw, just log. Returns the number of facts upserted (0 if no
-   * extractor configured or extraction failed).
-   */
   reflectOnce(): Promise<number>
-
-  /**
-   * Wipe all L3 facts (history included). Returns rows removed. Use from
-   * the Memory tab "clear all" action.
-   */
   clearFacts(): Promise<number>
+
+  // ---- Persona-scoped helpers exposed for UI / migration ----
+  /** Active persona id at call time (read from config). */
+  activePersona(): string
+  /** Affinity record for the active persona (auto-creates zero row). */
+  getAffinity(): Promise<AffinityRecord>
+  /** Direct affinity write (post-guardrail score). For internal use by
+   *  the affinity engine; UI should not call this directly. */
+  setAffinity(score: number, reason: string | null): Promise<void>
+  /** Drop everything (episodes, facts, affinity) for a given persona. */
+  deletePersona(personaId: string): Promise<number>
+  /** Read facts for a SPECIFIC persona (UI uses this in the 人物 panel
+   *  to show "she knows: …" for personas the user is not currently active). */
+  listFactsFor(personaId: string, limit?: number): Promise<Fact[]>
+  /** Count episodes for a specific persona — used by the Settings 人物 tab
+   *  to show "213 条 episode" per persona without switching. */
+  countFor(personaId: string): Promise<number>
+  /** Read recent episodes for a SPECIFIC persona (regardless of which is
+   *  currently active). The Settings 人物 tab uses this so clicking a
+   *  chip immediately previews that persona's history without requiring
+   *  a save-and-switch. */
+  listRecentFor(personaId: string, limit: number): Promise<Episode[]>
 }
 
 export interface MemoryServiceDeps {
   adapter: MemoryAdapter
   /** Called per-operation so config changes apply immediately. */
   getConfig: () => Config
-  /**
-   * Pluggable embedding function. Production uses local bge-small-zh.
-   * When `naiveMode` returns true (no model on disk), this function is
-   * never called — addEpisode skips embedding and retrieve skips
-   * semantic search.
-   */
   embed: EmbedFn
-  /**
-   * Returns true when the embed model isn't available yet (user hasn't
-   * downloaded it). Service then skips all embedding-dependent paths
-   * but keeps storing episodes (just without vectors) so the user's
-   * chat history isn't lost and recall-by-recency still works.
-   *
-   * When the user finishes downloading and the model is loadable,
-   * memory-host swaps this to return false and embeddings resume — but
-   * episodes added during naive mode never get backfilled (low value
-   * for the complexity cost; semantic recall over a fresh user's first
-   * dozen turns isn't worth a migration).
-   */
   isNaiveMode?: () => boolean
-  /**
-   * Optional sink for "addEpisode failed" / "retrieve failed" notices.
-   * The host (Electron main) wires this up to broadcast to renderer
-   * windows so silent storage failures become visible to the user.
-   */
   onError?: (operation: string, message: string) => void
-  /**
-   * Optional LLM extractor for L3 fact reflection. When absent, reflectOnce
-   * is a no-op (just returns 0). The host wires this to the same chat
-   * provider it uses for normal turns.
-   */
   reflectExtractor?: ReflectionExtractor
-  /**
-   * Session id to start with. Host should pass the most-recent session id
-   * (looked up before construction) so chat continues across restarts.
-   * When omitted, a fresh session id is minted.
-   */
   initialSessionId?: string
 }
 
-/** crypto.randomUUID is on globalThis in Node 20+ and all browsers we support. */
 function makeSessionId(): string {
   return globalThis.crypto.randomUUID()
 }
 
-/**
- * Wrap a promise with a hard timeout. Used to protect chat from hanging
- * on a slow embed() call (transformers.js doesn't time out network
- * fetches itself — in mainland China without a mirror, the TCP connect
- * to huggingface.co can stall for minutes).
- */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`${label} (${ms}ms)`)), ms)
@@ -184,15 +118,11 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   const { adapter, embed, getConfig, onError, reflectExtractor, initialSessionId, isNaiveMode } = deps
   const naive = (): boolean => isNaiveMode?.() ?? false
+  /** Always read the persona at the moment of the operation, never cache.
+   *  Config changes mid-session must take effect on the next memory call. */
+  const persona = (): string => getConfig().persona.preset
 
-  // Resume the previous session by default — users expect chat continuity
-  // across restarts; they only get a fresh session when they explicitly
-  // pick "新建会话" in the Memory tab. The host resolves the most-recent
-  // session id synchronously before constructing us (see memory-host.ts);
-  // if it didn't find one, we mint a brand new one here.
   let sessionId = initialSessionId ?? makeSessionId()
-  // In-flight guard for reflectOnce — prevents two reflection cycles
-  // overlapping when called from both a timer and a turn count threshold.
   let reflecting = false
 
   const reportError = (operation: string, err: unknown): void => {
@@ -202,31 +132,37 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   }
 
   return {
+    activePersona() {
+      return persona()
+    },
+
     async addEpisode(speaker, text, toolParts, images) {
-      // Tool-result rows can have empty text (the result is in toolParts)
-      // and assistant tool-only steps can be empty too. Allow empty text
-      // when there's at least toolParts OR images attached. Reject only
-      // truly empty turns.
       const hasTool = !!(toolParts && toolParts.length > 0)
       const hasImages = !!(images && images.length > 0)
       if (!text.trim() && !hasTool && !hasImages) return null
       try {
-        // Naive mode: no model on disk. Persist the episode WITHOUT an
-        // embedding so the user's chat history is still saved and
-        // recent-N recall still works. Vector recall (L2) is the only
-        // thing degraded. Once the user downloads the model, this
-        // function starts producing vectors again — but episodes added
-        // during naive mode stay un-embedded (not worth a backfill).
         if (naive()) {
           const zeros = new Float32Array(0)
-          return await adapter.addEpisode(speaker, text, zeros, sessionId, toolParts, images)
+          return await adapter.addEpisode(
+            persona(),
+            speaker,
+            text,
+            zeros,
+            sessionId,
+            toolParts,
+            images,
+          )
         }
-        // Same 5s ceiling as retrieve(). addEpisode is fire-and-forget
-        // from chat.ts (we void the promise), so the user isn't blocked
-        // on it — but if embed() hangs forever, we leak timers and
-        // eventually OOM. Bail loudly instead.
         const vec = await withTimeout(embed(text || ' '), 5_000, 'embed timed out')
-        return await adapter.addEpisode(speaker, text, vec, sessionId, toolParts, images)
+        return await adapter.addEpisode(
+          persona(),
+          speaker,
+          text,
+          vec,
+          sessionId,
+          toolParts,
+          images,
+        )
       } catch (err) {
         reportError('addEpisode', err)
         return null
@@ -235,27 +171,13 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
     async retrieve(userMessage) {
       const cfg = getConfig()
-      const recent = await adapter.recent(cfg.memory.recentN)
+      const recent = await adapter.recent(persona(), cfg.memory.recentN)
       let recalled: Episode[] = []
-      // Skip semantic search entirely in naive mode — there's no embed
-      // function to call, and any cached vec0 rows from naive-era inserts
-      // are zero-vectors that wouldn't match anyway. Recent-N already
-      // returned above; L2 just isn't a thing yet.
       if (!naive() && cfg.memory.topK > 0 && userMessage.trim()) {
         try {
-          // 5s timeout on the embed call. Without this, when the bge model
-          // download is reachable-but-slow (e.g. huggingface.co from
-          // mainland China, where TCP connect can hang for minutes), the
-          // whole chat turn is blocked — user types "总结邮件" and sees
-          // "思考中…" forever. Better to skip semantic recall this turn
-          // than to stall the whole agent loop.
-          const qVec = await withTimeout(
-            embed(userMessage),
-            5_000,
-            'embed timed out',
-          )
+          const qVec = await withTimeout(embed(userMessage), 5_000, 'embed timed out')
           const exclude = new Set(recent.map((e) => e.id))
-          recalled = await adapter.searchByEmbedding(qVec, cfg.memory.topK, exclude)
+          recalled = await adapter.searchByEmbedding(persona(), qVec, cfg.memory.topK, exclude)
         } catch (err) {
           reportError('retrieve', err)
         }
@@ -264,23 +186,23 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     },
 
     count() {
-      return adapter.count()
+      return adapter.count(persona())
     },
 
-    listRecent(limit, sessionId) {
-      return adapter.recent(limit, sessionId)
+    listRecent(limit, sessionIdArg) {
+      return adapter.recent(persona(), limit, sessionIdArg)
     },
 
     listSessions() {
-      return adapter.listSessions()
+      return adapter.listSessions(persona())
     },
 
     clearAll() {
-      return adapter.clear()
+      return adapter.clear(persona())
     },
 
     deleteSession(id) {
-      return adapter.deleteSession(id)
+      return adapter.deleteSession(persona(), id)
     },
 
     newSession() {
@@ -297,16 +219,24 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     },
 
     async listFacts(limit = 200) {
-      return adapter.listActiveFacts(limit)
+      return adapter.listActiveFacts(persona(), limit)
+    },
+
+    async listFactsFor(personaId, limit = 200) {
+      return adapter.listActiveFacts(personaId, limit)
+    },
+
+    async countFor(personaId) {
+      return adapter.count(personaId)
+    },
+
+    async listRecentFor(personaId, limit) {
+      return adapter.recent(personaId, limit)
     },
 
     async getUserName() {
       try {
-        const facts = await adapter.listActiveFacts(200)
-        // Reflection convention uses `user.profile.name` for the user's
-        // name (see core/memory/reflection.ts PROMPT_HEADER). Allow a few
-        // common variants too in case a different reflector / older data
-        // used another spelling.
+        const facts = await adapter.listActiveFacts(persona(), 200)
         const aliases = ['user.profile.name', 'user.name', 'name', 'username']
         for (const key of aliases) {
           const f = facts.find((x) => x.key === key)
@@ -321,7 +251,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
     async factsBlock(minConfidence) {
       try {
-        const facts = await adapter.listActiveFacts(200)
+        const facts = await adapter.listActiveFacts(persona(), 200)
         return renderFactsBlock(facts, minConfidence)
       } catch (err) {
         reportError('factsBlock', err)
@@ -335,17 +265,14 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       reflecting = true
       try {
         const cfg = getConfig()
-        // Use the same window size as recent-context retrieval — keeps
-        // the cost predictable and ensures we don't replay episodes the
-        // model has already seen as L1 context.
         const window = Math.max(cfg.memory.recentN, 12)
-        const recent = await adapter.recent(window)
+        const recent = await adapter.recent(persona(), window)
         const facts = await reflect(recent, reflectExtractor)
         if (!facts || facts.length === 0) return 0
         let upserted = 0
         for (const f of facts) {
           try {
-            await adapter.upsertFact(f)
+            await adapter.upsertFact(persona(), f)
             upserted += 1
           } catch (err) {
             reportError('upsertFact', err)
@@ -361,7 +288,19 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     },
 
     async clearFacts() {
-      return adapter.clearFacts()
+      return adapter.clearFacts(persona())
+    },
+
+    async getAffinity() {
+      return adapter.getAffinity(persona())
+    },
+
+    async setAffinity(score, reason) {
+      return adapter.setAffinity(persona(), score, reason)
+    },
+
+    async deletePersona(personaId) {
+      return adapter.deletePersona(personaId)
     },
   }
 }

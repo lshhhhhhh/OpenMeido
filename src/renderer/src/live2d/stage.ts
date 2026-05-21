@@ -262,19 +262,23 @@ export class Live2DStage implements Live2DController {
     let baseX: number
     let baseY: number
     if (this.fitMode === 'portrait') {
-      // Zoom in so only the upper body fits in the canvas — lower body
-      // falls below the visible area. Configurable via Live2DStageOptions;
-      // 1.6 default. Head must still fit horizontally — avoid pushing past
-      // ~1.8 unless the model's head/body width ratio is small.
+      // Portrait: scale by width × zoom (upper body crop). Anchor at
+      // BOTTOM-center so the model's feet (which are off-screen below in
+      // portraitZoom > 1) sit at the bottom of the canvas. Pairs with
+      // the bg's `position: center bottom` so the floor in the image
+      // and the feet of the model stay aligned regardless of window
+      // height — without this, resizing made her drift "up" relative
+      // to the floor (the floor moved down with the bg, the model
+      // stayed top-anchored).
       this.model.scale.set((sw / mw) * this.portraitZoom)
-      this.model.anchor.set(0.5, 0.0)
+      this.model.anchor.set(0.5, 1.0)
       baseX = sw / 2
-      baseY = 0
+      baseY = sh
     } else {
       this.model.scale.set(Math.min(sw / mw, sh / mh) * 0.95)
-      this.model.anchor.set(0.5, 0.5)
+      this.model.anchor.set(0.5, 1.0)
       baseX = sw / 2
-      baseY = sh / 2
+      baseY = sh
     }
 
     // User-dragged position overrides auto-fit until they double-click reset.
@@ -382,8 +386,26 @@ export class Live2DStage implements Live2DController {
     this.clearExpressionTimer()
     if (!this.model) return
     try {
-      // Calling expression() with no arg clears the current one.
-      this.model.expression()
+      // pixi-live2d-display-lipsyncpatch's `expression()` with NO arg
+      // plays a random expression instead of clearing. To actually
+      // reset to the model's default face, go through the expression
+      // manager's resetExpression. Falls back to passing null in case
+      // the internal-model shape differs by build.
+      const internal = (this.model as unknown as {
+        internalModel?: {
+          motionManager?: {
+            expressionManager?: { resetExpression?: () => void } | null
+          }
+        }
+      }).internalModel
+      const exprMgr = internal?.motionManager?.expressionManager
+      if (exprMgr && typeof exprMgr.resetExpression === 'function') {
+        exprMgr.resetExpression()
+        return
+      }
+      // Fallback: explicit null arg (some pixi-live2d-display versions
+      // honor `expression(null)` as clear).
+      ;(this.model as unknown as { expression: (n: string | null) => void }).expression(null)
     } catch (err) {
       console.warn('[Live2DStage] clearExpression failed:', err)
     }

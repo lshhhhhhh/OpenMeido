@@ -15,10 +15,28 @@ export type Live2DCommand =
   | { type: 'setExpression'; name: string | null }
   | { type: 'playMotion'; group: string; index?: number }
 
-export function broadcastLive2D(cmd: Live2DCommand): void {
+export type Live2DSender = (cmd: Live2DCommand) => void
+
+/** Default sender: fan out over every open BrowserWindow. */
+function defaultSender(cmd: Live2DCommand): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) {
       win.webContents.send('live2d:command', cmd)
     }
   }
+}
+
+let sender: Live2DSender = defaultSender
+
+export function broadcastLive2D(cmd: Live2DCommand): void {
+  sender(cmd)
+}
+
+/** Test seam — replace the sender with a spy. Call `__resetSender()` to undo. */
+export function __setSender(fn: Live2DSender): void {
+  sender = fn
+}
+
+export function __resetSender(): void {
+  sender = defaultSender
 }

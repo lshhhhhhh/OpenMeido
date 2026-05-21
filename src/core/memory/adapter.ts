@@ -6,6 +6,13 @@
  * All methods are async even though some impls (better-sqlite3) are
  * actually synchronous — this keeps the interface future-proof for the
  * IndexedDB / Capacitor SQLite cases where async is unavoidable.
+ *
+ * Every episode + fact is scoped to a `personaId`. The active persona is
+ * read from config at every operation by the service layer; the adapter
+ * itself is stateless w.r.t. which persona is current. Cross-persona
+ * leakage (a maid query returning a 大小姐 episode) would be both a
+ * privacy bug and a UX disaster, so the persona scope is required on
+ * every method that touches per-persona data.
  */
 
 import type {
@@ -18,6 +25,14 @@ import type {
   ToolCallPart,
   ToolResultPart,
 } from './types.js'
+
+/** Affinity record stored in `persona_affinity`. */
+export interface AffinityRecord {
+  personaId: string
+  score: number
+  lastUpdated: string
+  lastReason: string | null
+}
 
 export interface MemoryAdapter {
   /**
@@ -34,6 +49,7 @@ export interface MemoryAdapter {
    * call against.
    */
   addEpisode(
+    personaId: string,
     speaker: Speaker,
     text: string,
     embedding: Float32Array,
@@ -44,52 +60,72 @@ export interface MemoryAdapter {
 
   /**
    * Most-recent N turns in chronological order (oldest first). If `sessionId`
-   * is given, restrict to that session; otherwise return globally most-recent.
+   * is given, restrict to that session; otherwise return globally most-recent
+   * for this persona.
    */
-  recent(n: number, sessionId?: string | null): Promise<Episode[]>
+  recent(personaId: string, n: number, sessionId?: string | null): Promise<Episode[]>
 
-  /** Per-session summaries, ordered by last-activity (newest first). */
-  listSessions(): Promise<SessionSummary[]>
+  /** Per-session summaries for this persona, ordered by last-activity (newest first). */
+  listSessions(personaId: string): Promise<SessionSummary[]>
 
   /**
-   * Top-K cosine-nearest episodes to the query embedding. `excludeIds`
-   * filters out episodes already returned via `recent()` to avoid
-   * double-counting.
+   * Top-K cosine-nearest episodes to the query embedding, within this persona's
+   * pool. `excludeIds` filters out episodes already returned via `recent()` to
+   * avoid double-counting.
    */
   searchByEmbedding(
+    personaId: string,
     queryEmbedding: Float32Array,
     k: number,
     excludeIds?: ReadonlySet<number>,
   ): Promise<Episode[]>
 
-  /** Total un-archived row count — for diagnostics / "/recent" UIs. */
-  count(): Promise<number>
+  /** Total un-archived row count for this persona — for diagnostics / "/recent" UIs. */
+  count(personaId: string): Promise<number>
 
-  /** Wipe every episode and its embedding. Returns the number of rows removed. */
-  clear(): Promise<number>
+  /** Wipe every episode and its embedding for this persona. Returns the number of rows removed. */
+  clear(personaId: string): Promise<number>
 
-  /** Delete just one session's episodes. Returns rows removed. */
-  deleteSession(sessionId: string): Promise<number>
+  /** Delete just one session's episodes (scoped to this persona). Returns rows removed. */
+  deleteSession(personaId: string, sessionId: string): Promise<number>
 
   // ---- L3 facts ----
 
   /**
-   * Upsert a fact for `key`. If an active fact (supersededBy IS NULL) with the
-   * same key + same value already exists, just bumps `confidence` (toward 1.0)
-   * and `updatedAt`. If the value differs, a NEW row is inserted and the
-   * previous active row gets `supersededBy = newId` — old facts stay queryable
-   * for audit but only the active one is injected into the system prompt.
+   * Upsert a fact for `key` under this persona. Same key but a different
+   * persona is a different fact — facts about the user can drift per-relationship
+   * (e.g. she only knows your work nickname after you mentioned it to her).
    */
-  upsertFact(input: NewFact): Promise<Fact>
+  upsertFact(personaId: string, input: NewFact): Promise<Fact>
 
-  /** All facts currently active (supersededBy IS NULL), newest first. */
-  listActiveFacts(limit?: number): Promise<Fact[]>
+  /** All facts currently active under this persona, newest first. */
+  listActiveFacts(personaId: string, limit?: number): Promise<Fact[]>
 
-  /** Full history of facts for a key, oldest first. Used by the Memory inspector. */
-  listFactHistory(key: string): Promise<Fact[]>
+  /** Full history of facts for a key under this persona, oldest first. */
+  listFactHistory(personaId: string, key: string): Promise<Fact[]>
 
-  /** Wipe all facts. Returns rows removed. */
-  clearFacts(): Promise<number>
+  /** Wipe all facts for this persona. Returns rows removed. */
+  clearFacts(personaId: string): Promise<number>
+
+  // ---- Per-persona affinity (relationship state) ----
+
+  /**
+   * Read the affinity record for this persona. If no row exists yet,
+   * returns a synthesized zero record — callers don't need to handle
+   * "first-time" specially.
+   */
+  getAffinity(personaId: string): Promise<AffinityRecord>
+
+  /**
+   * Replace the affinity record for this persona. `score` is the resolved
+   * post-guardrail value; callers handle clamping + capping above this
+   * layer — the adapter just writes what it's told.
+   */
+  setAffinity(personaId: string, score: number, reason: string | null): Promise<void>
+
+  /** Permanently remove every trace of a persona (episodes, vec rows,
+   *  facts, affinity). Returns total rows removed. */
+  deletePersona(personaId: string): Promise<number>
 
   /** Release resources. After close, all other methods reject. */
   close(): void

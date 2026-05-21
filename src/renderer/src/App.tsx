@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import type { ChatEvent, ChatImageAttachment } from '../../shared/ipc'
-import { resolvePersona } from '../../shared/config'
+import { resolvePersona, backgroundFor } from '../../shared/config'
 import { Live2DCanvas } from './live2d/Live2DCanvas'
 import type { Live2DController, Coverage } from './live2d/stage'
 import { playMp3Base64, type PlayHandle } from './tts/player'
@@ -589,8 +589,23 @@ export default function App() {
   // Hook used by the Live2DCanvas prop below. Wraps setIgnore so the
   // toggle is respected even when Live2DCanvas keeps emitting coverage
   // events after the user disables the feature.
+  //
+  // Click-through is gated by TWO conditions:
+  //   1. The user opted into clickThroughTransparent.
+  //   2. The window's "transparent area" is actually transparent (i.e.
+  //      no background image is showing). When the room background is
+  //      on, those pixels are opaque and clicks belong to the window,
+  //      not the desktop — pixel-perfect coverage detection would
+  //      otherwise say "transparent" anyway because it only samples the
+  //      Live2D canvas, leading to the user seeing a room they can't
+  //      click on.
   const handleLive2DCoverage = (cov: Coverage): void => {
     if (!config?.window.clickThroughTransparent) {
+      setIgnore(false)
+      return
+    }
+    if (!config.window.transparentBackground) {
+      // Room background is showing → ALL pixels are opaque; never click-through.
       setIgnore(false)
       return
     }
@@ -830,17 +845,56 @@ export default function App() {
   const dragRegion: AppRegionStyle = { WebkitAppRegion: 'drag' }
   const noDragRegion: AppRegionStyle = { WebkitAppRegion: 'no-drag' }
 
+  // Background: persona-appropriate room image painted via CSS background
+  // on the root container itself (NOT an absolute-positioned sibling — that
+  // approach created a stacking context where chat / Live2D occasionally
+  // rendered underneath, making the whole UI look "frozen"). Toggled via
+  // a title-bar button → cfg.window.transparentBackground. Zoom multiplier
+  // applies as a background-size percentage (>100% = closer-in crop).
+  const showBackground = config ? !config.window.transparentBackground : true
+  const backgroundUrl = config
+    ? backgroundFor(config.persona.preset, config.window.customBackgrounds)
+    : null
+  const zoom = config?.window.backgroundZoom ?? 1
+
   return (
     <div
       style={{
         height: '100vh',
         display: 'flex',
         flexDirection: 'column',
-        // Window is `transparent: true, frame: false`, so the whole root must
-        // also be transparent to let the desktop show through.
+        // Window is `transparent: true, frame: false`. Root stays
+        // transparent; the bg layer below paints the room image (with
+        // independent zoom). Bottom-anchor pairs with Live2D's
+        // bottom-anchor so the floor stays put across resizes.
         background: 'transparent',
+        position: 'relative',
+        // Without overflow:hidden, a zoom > 1 background layer would
+        // visually leak outside the window edges.
+        overflow: 'hidden',
       }}
     >
+      {showBackground && backgroundUrl && (
+        <div
+          aria-hidden
+          style={{
+            position: 'absolute',
+            inset: 0,
+            backgroundImage: `url("${backgroundUrl}")`,
+            // Always `cover` here — zoom is applied via transform below
+            // so we don't have to fight CSS background-size semantics
+            // (which can't express "cover × multiplier" directly).
+            backgroundSize: 'cover',
+            backgroundPosition: 'center bottom',
+            backgroundRepeat: 'no-repeat',
+            backgroundColor: '#000',
+            transform: `scale(${zoom})`,
+            transformOrigin: 'center bottom',
+            pointerEvents: 'none',
+            zIndex: 0,
+          }}
+        />
+      )}
       {/* Status bar — replaces a plain title bar with live model / persona /
           TTS indicators. Whole strip is drag-to-move (frameless window has
           no built-in chrome to grab); individual items inside are no-drag
@@ -861,6 +915,9 @@ export default function App() {
           fontSize: 11,
           color: '#444',
           userSelect: 'none',
+          // Render above the bg layer.
+          position: 'relative',
+          zIndex: 1,
         }}
       >
         <div
@@ -906,6 +963,42 @@ export default function App() {
           />
         </div>
         <div style={{ ...noDragRegion, display: 'flex', gap: 6, alignItems: 'center' }}>
+          {/* Background-mode toggle. Persists immediately (no Settings round-
+              trip) so the user can flip it in 1 click. The icon flips:
+              ◐ when bg is shown (suggesting "make me transparent"),
+              ◯ when transparent (suggesting "give me a room back"). */}
+          <button
+            onClick={() => {
+              if (!config) return
+              void window.api.config.set({
+                ...config,
+                window: {
+                  ...config.window,
+                  transparentBackground: !config.window.transparentBackground,
+                },
+              })
+            }}
+            title={
+              config?.window.transparentBackground
+                ? '切换到房间背景'
+                : '切换到透明背景'
+            }
+            style={{
+              width: 26,
+              height: 22,
+              border: 'none',
+              borderRadius: 6,
+              background: 'rgba(0,0,0,0.18)',
+              color: '#444',
+              fontSize: 14,
+              lineHeight: '22px',
+              cursor: 'pointer',
+              padding: 0,
+              fontWeight: 600,
+            }}
+          >
+            {config?.window.transparentBackground ? '◯' : '◐'}
+          </button>
           <button
             onClick={() => setSettingsOpen(true)}
             title="设置"
@@ -948,7 +1041,7 @@ export default function App() {
 
       {/* Live2D stage — fills the bulk of the window, transparent BG so the
           desktop shows through everywhere except where the character renders. */}
-      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+      <div style={{ flex: 1, minHeight: 0, position: 'relative', zIndex: 1 }}>
         {config && modelUrl && (
           <Live2DCanvas
             ref={live2dRef}
@@ -971,10 +1064,16 @@ export default function App() {
           }}
         >
           <button onClick={() => live2dRef.current?.randomExpression()}>随机表情</button>
-          <button onClick={() => live2dRef.current?.clearExpression()}>清</button>
+          <button onClick={() => live2dRef.current?.clearExpression()}>回默认</button>
           <button onClick={() => live2dRef.current?.randomMotion()}>随机动作</button>
           <button onClick={() => live2dRef.current?.resetPosition()}>复位</button>
         </div>
+
+        {/* Affinity badge — floats top-right of the Live2D area so the
+            user can see relationship state at a glance even when the
+            sidebar is collapsed. Updates live via the affinity:changed
+            broadcast. */}
+        <Live2DAffinityBadge />
       </div>
 
       {/* Chat panel — translucent card at the bottom, no-drag so the input
@@ -994,6 +1093,13 @@ export default function App() {
           flexDirection: 'column',
           fontFamily: 'system-ui, sans-serif',
           overflow: 'hidden',
+          // Render above the bg layer (which has zIndex: 0). Without
+          // this, the chat panel — being a sibling in normal flow with
+          // no explicit z-index — can wind up below the bg's stacking
+          // context once `transform: scale()` is applied, swallowing
+          // clicks in the rightmost region.
+          position: 'relative',
+          zIndex: 1,
         }}
       >
         {/* Resize strip — lives INSIDE the chat panel's top so its 6px height
@@ -1396,6 +1502,82 @@ export default function App() {
  * clickable when an onClick is passed (we use that to deep-link into the
  * matching Settings tab). Text truncates with ellipsis on narrow windows.
  */
+/**
+ * Floating affinity readout pinned top-right of the Live2D pane. Shows
+ * the current score + tier label; hover tooltip surfaces the last
+ * judge reason. Listens to the affinity:changed broadcast so the chip
+ * updates the moment the engine writes a new score (no settings round-
+ * trip required).
+ */
+function Live2DAffinityBadge() {
+  const [info, setInfo] = useState<{
+    score: number
+    tierLabel: string
+    reason: string | null
+  } | null>(null)
+  const reload = async (): Promise<void> => {
+    const rec = await window.api.affinity.get()
+    if (!rec) return
+    setInfo({
+      score: rec.score,
+      tierLabel: tierLabelForScore(rec.score),
+      reason: rec.lastReason,
+    })
+  }
+  useEffect(() => {
+    void reload()
+    const offCh = window.api.affinity.onChanged((i) =>
+      setInfo({
+        score: i.score,
+        tierLabel: i.tier.zhLabel,
+        reason: i.reason,
+      }),
+    )
+    const offSw = window.api.affinity.onPersonaSwitched(() => void reload())
+    return () => {
+      offCh()
+      offSw()
+    }
+  }, [])
+  if (!info) return null
+  return (
+    <div
+      title={info.reason ?? '还没有判定记录'}
+      style={{
+        position: 'absolute',
+        top: 4,
+        // Clear of the sidebar collapsed-strip (which sits at right:0,
+        // width: 18, zIndex: 2) — without this margin the affinity
+        // chip's last 10px get covered by the strip.
+        right: 24,
+        padding: '3px 8px',
+        borderRadius: 999,
+        background: 'rgba(0,0,0,0.45)',
+        backdropFilter: 'blur(6px)',
+        color: '#fff',
+        fontSize: 11,
+        fontFamily: 'system-ui, sans-serif',
+        display: 'inline-flex',
+        gap: 4,
+        alignItems: 'center',
+        pointerEvents: 'auto',
+        userSelect: 'none',
+      }}
+    >
+      <span style={{ color: '#f6a4b3' }}>❤️</span>
+      <span>{info.score}</span>
+      <span style={{ color: '#bbb', fontSize: 10 }}>· {info.tierLabel}</span>
+    </div>
+  )
+}
+
+function tierLabelForScore(score: number): string {
+  if (score >= 81) return '默契'
+  if (score >= 51) return '亲近'
+  if (score >= 21) return '熟络'
+  return '生疏'
+}
+
 function StatusPill({
   dot,
   label,

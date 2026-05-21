@@ -41,6 +41,15 @@ export interface DailyPromptContext {
    * undefined → cold greeting.
    */
   recentExchange?: { speaker: 'user' | 'assistant'; text: string }[]
+  /**
+   * Optional: pre-built affinity-tier block (from shared/affinity.ts
+   * `buildTierPromptBlock`). When provided, gets injected between the
+   * persona prompt and the task block so daily/proactive remarks adapt
+   * to relationship tier (生疏 keeps distance; 默契 uses callbacks).
+   * Without it, all prompts behave as if 生疏 — wrong once relationship
+   * has built up.
+   */
+  tierBlock?: string
 }
 
 /**
@@ -72,6 +81,70 @@ function timeOfDayMood(date: Date = new Date()): string {
  * `validLabels`, or the literal string `中性` for no detectable emotion.
  * Anything else is parsed as 中性.
  */
+/**
+ * Combined classifier — picks an emotion label AND judges whether the
+ * just-finished exchange should move the user's affinity score with this
+ * persona. One LLM call replaces what used to be two (emotion + judge),
+ * halving the side-task latency / cost per turn.
+ *
+ * Output is JSON; the parser is tolerant of fence-wrapped, embedded, or
+ * bare forms. Parse failure → fall back to emotion-only regex extract,
+ * affinity_delta=0 (neutral on uncertainty, never makes things worse).
+ *
+ * `affinity_delta` is a small integer in [-2, 2]:
+ *   +2 user warmly engaged / dropped genuine emotion / shared something personal
+ *   +1 nice/friendly turn (small positive)
+ *    0 routine / neutral exchange
+ *   -1 user dismissive / cold / impatient
+ *   -2 user rude / hostile (rare)
+ */
+export function buildCombinedClassifierPrompt(args: {
+  /** Last user message (drives affinity judgement). */
+  userText: string
+  /** Just-spoken assistant reply (drives emotion judgement). */
+  assistantText: string
+  /** Persona context — small models classify better with character flavor. */
+  persona: { name: string; systemPrompt: string }
+  /** Allowed emotion labels (excluding 中性, which is always allowed). */
+  validLabels: readonly string[]
+  /** Current affinity score 0-100 — sometimes helps the judge calibrate
+   *  ("she's already very close — only big moments should move it"). */
+  currentAffinity: number
+  /** Tier label for context. */
+  tierLabel: string
+}): string {
+  return (
+    `你是这次对话的旁观者。任务：\n` +
+    `1. 判断${args.persona.name}刚才那句话里**她**的情绪。\n` +
+    `2. 判断**用户**这一轮的态度让${args.persona.name}对用户的好感度该如何变化。\n` +
+    `\n` +
+    `# 情绪候选（只能选其一，或选 中性）\n` +
+    args.validLabels.map((e) => `- ${e}`).join('\n') +
+    `\n- 中性（看不出明显情绪）\n` +
+    `\n` +
+    `# 好感度变化（affinity_delta，整数 -2 到 +2）\n` +
+    `+2  用户非常温暖 / 分享了私人事 / 真情流露 / 主动关心\n` +
+    `+1  友善 / 鼓励 / 表达感谢 / 自然亲切的玩笑\n` +
+    ` 0  例行公事 / 中性问答 / 工作任务\n` +
+    `-1  冷淡 / 不耐烦 / 敷衍\n` +
+    `-2  粗鲁 / 嘲讽 / 恶意\n` +
+    `当前好感度 ${args.currentAffinity}（${args.tierLabel}）。**保守倾向 0**：能 0 就 0，只在用户真的表达了情感或敌意时给非零。\n` +
+    `\n` +
+    `# 规则\n` +
+    `- 看用户的态度，不看话题。"早上好"本身不该 +2；用户记得了她说过的事、主动关心、自然撒娇 → +1/+2。\n` +
+    `- 用户单纯让她做事（"提醒我五分钟后喝水"）= 0。\n` +
+    `- 不确定 → 0。\n` +
+    `- 情绪偏保守：不明显选 中性。\n` +
+    `\n` +
+    `# 输入\n` +
+    `用户上一句：「${args.userText}」\n` +
+    `${args.persona.name}回复：「${args.assistantText}」\n` +
+    `\n` +
+    `# 输出（只输出 JSON，不要解释）\n` +
+    `{"emotion": "<情绪标签或中性>", "affinity_delta": -2..2, "reason": "中文一句话，不超过 25 字"}\n`
+  )
+}
+
 export function buildEmotionPrompt(args: {
   /** Just-spoken assistant reply. */
   text: string
@@ -156,9 +229,11 @@ export function buildGreetingPrompt(ctx: DailyPromptContext): string {
       `（"昨天聊的 X，后来怎么样了？"）。如果只是寒暄、问候，就当作没看到，不要刻意提。\n`
   }
 
+  const tier = ctx.tierBlock ? `${ctx.tierBlock}\n\n` : ''
   return (
     ctx.persona.systemPrompt +
     '\n\n' +
+    tier +
     `# 此刻的任务\n` +
     `用户刚刚打开应用，你"醒过来了"，主动招呼一句。\n` +
     `当前时间：${ctx.now}。\n` +
@@ -197,9 +272,11 @@ export function buildGoodbyePrompt(ctx: DailyPromptContext): string {
   const nameLine = ctx.userName
     ? `已知用户的名字是「${ctx.userName}」。可以自然地用名字称呼。\n`
     : ''
+  const tier = ctx.tierBlock ? `${ctx.tierBlock}\n\n` : ''
   return (
     ctx.persona.systemPrompt +
     '\n\n' +
+    tier +
     `# 此刻的任务\n` +
     `用户正在关闭应用、要离开了。说一句温柔的告别。\n` +
     `当前时间：${ctx.now}。${lateHint}\n` +
@@ -236,6 +313,10 @@ export function buildProactiveRemarkPrompt(args: {
    *  similar screen content + low temperature → the maid says the
    *  exact same sentence over and over. */
   recentSelfRemarks?: string[]
+  /** Affinity-tier prompt block from shared/affinity.ts. When omitted,
+   *  proactive falls back to "stranger" defaults — which usually reads
+   *  as her being too cold for users who actually have a relationship. */
+  tierBlock?: string
 }): string {
   const triggerLines = args.triggers.map((t) => `${t.kind}: ${t.note}`).join('\n')
   const mood = timeOfDayMood()
@@ -248,13 +329,19 @@ export function buildProactiveRemarkPrompt(args: {
     : ''
   const selfHistoryBlock =
     args.recentSelfRemarks && args.recentSelfRemarks.length > 0
-      ? `\n# 你最近自己说过的话（不要复读，也不要换一种说法说同一件事）\n` +
-        args.recentSelfRemarks.map((r) => `- ${r}`).join('\n') +
-        `\n如果这次只能说同样的话，就 should_speak=false。\n`
+      ? `\n# 你最近自己说过的话（**核心规则**：不要复读，也不要换皮说同一件事）\n` +
+        args.recentSelfRemarks.map((r, i) => `${i + 1}. ${r}`).join('\n') +
+        `\n判断标准：\n` +
+        `- 如果你想说的话和上面任何一条**主题、情感落点或核心信息相同**（哪怕措辞完全不同），should_speak=false。\n` +
+        `- "陪伴"、"夜深了"、"早安"、"在吗"、"主人辛苦了" 这类常见关心，**一个时段只说一次**。\n` +
+        `- 必须有 NEW 的角度（屏幕内容变了 / 时间跨过了一个时段 / 用户做了新动作）才再说话。\n` +
+        `- 拿不准 → false。\n`
       : ''
+  const tier = args.tierBlock ? `${args.tierBlock}\n\n` : ''
   return (
     args.persona.systemPrompt +
     '\n\n' +
+    tier +
     `# 此刻的状态\n` +
     `你现在在后台运行的"主动模式"。系统根据触发条件判断你可能该说点什么了。\n` +
     `当前时间：${args.now}。\n` +
@@ -264,10 +351,12 @@ export function buildProactiveRemarkPrompt(args: {
     selfHistoryBlock +
     `\n` +
     `# 判断标准\n` +
-    `- 用户应该专注做事时（凌晨在敲代码、刚发完很长一段话）→ should_speak=false\n` +
-    `- 用户长时间不动、可能在摸鱼/走神 → 可以关心一句\n` +
-    `- 单纯定时器到点，但用户刚刚才发完话 → false（别打扰）\n` +
-    `- 不确定 → false（宁可沉默）\n` +
+    `用户装这个程序就是想要陪伴的。**默认倾向 should_speak=true**，除非有明确不打扰的理由。\n` +
+    `- 用户刚刚才发完话（触发原因会标 minSilence）→ false（给点空气，别立刻接茬）\n` +
+    `- 用户正在做需要专注语音/对话的事（开会 / 视频通话 / 录音）→ false\n` +
+    `- 屏幕里有明显的隐私信息（密码框 / 银行 / 私人聊天）→ false（看见但不评论）\n` +
+    `- 其他情况（敲代码 / 看文档 / 浏览网页 / 摸鱼 / 走神 / 屏幕未变 / 时间是凌晨 / 工作日深夜）→ true，挑一个自然角度说点什么\n` +
+    `- 不确定 → **true**（陪伴优先于沉默；说错小话比从不开口好得多）\n` +
     `\n` +
     `# 输出（只输出 JSON，不要解释）\n` +
     `{"should_speak": true|false, "reason": "内部说明，不会展示给用户", "comment": "如果 should_speak=true 时要说的话；用你这个角色的语气和称呼；不超过 30 字；不要 emoji、markdown、引号"}\n` +

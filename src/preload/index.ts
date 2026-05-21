@@ -114,6 +114,114 @@ const api = {
     setIgnoreMouseEvents(ignore: boolean): Promise<void> {
       return ipcRenderer.invoke('window:setIgnoreMouseEvents', ignore) as Promise<void>
     },
+    /** Reports whether the configured global hotkey is currently registered. */
+    getHotkeyStatus(): Promise<{
+      registered: boolean
+      accelerator: string
+      error: string | null
+    }> {
+      return ipcRenderer.invoke('window:getHotkeyStatus') as Promise<{
+        registered: boolean
+        accelerator: string
+        error: string | null
+      }>
+    },
+  },
+
+  affinity: {
+    /** Current affinity for the active (or specified) persona. Returns null
+     *  before memory init. */
+    get(personaId?: string): Promise<{
+      personaId: string
+      score: number
+      lastUpdated: string
+      lastReason: string | null
+    } | null> {
+      return ipcRenderer.invoke('affinity:get', personaId) as Promise<{
+        personaId: string
+        score: number
+        lastUpdated: string
+        lastReason: string | null
+      } | null>
+    },
+    /** All personas (built-in + custom) with their affinity + episode count.
+     *  Drives the Settings 人物 tab chip annotations. */
+    listAll(): Promise<
+      Array<{
+        personaId: string
+        score: number
+        lastUpdated: string
+        lastReason: string | null
+        episodeCount: number
+      }>
+    > {
+      return ipcRenderer.invoke('affinity:listAll') as Promise<
+        Array<{
+          personaId: string
+          score: number
+          lastUpdated: string
+          lastReason: string | null
+          episodeCount: number
+        }>
+      >
+    },
+    /** Subscribe to score changes. Fires on every successful judge update. */
+    onChanged(
+      cb: (info: {
+        personaId: string
+        score: number
+        tier: { tier: string; zhLabel: string; min: number; max: number }
+        reason: string
+      }) => void,
+    ): () => void {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        info: {
+          personaId: string
+          score: number
+          tier: { tier: string; zhLabel: string; min: number; max: number }
+          reason: string
+        },
+      ): void => cb(info)
+      ipcRenderer.on('affinity:changed', handler)
+      return () => {
+        ipcRenderer.off('affinity:changed', handler)
+      }
+    },
+    /** Subscribe to persona-switch events (config change). The sidebar
+     *  uses this to re-fetch the affinity for the new active persona. */
+    onPersonaSwitched(cb: (info: { personaId: string }) => void): () => void {
+      const handler = (_: Electron.IpcRendererEvent, info: { personaId: string }): void =>
+        cb(info)
+      ipcRenderer.on('persona:switched', handler)
+      return () => {
+        ipcRenderer.off('persona:switched', handler)
+      }
+    },
+  },
+
+  persona: {
+    /** Delete a persona's entire bucket (episodes + facts + affinity).
+     *  Returns total rows removed. The renderer should NOT call this while
+     *  the persona is active; switch first. */
+    delete(personaId: string): Promise<number> {
+      return ipcRenderer.invoke('persona:delete', personaId) as Promise<number>
+    },
+  },
+
+  background: {
+    /** Open a native picker; main copies the chosen file under userData and
+     *  returns the basename to write into config.customBackgrounds[personaId].
+     *  Null = user cancelled. */
+    import(personaId: string): Promise<{ basename: string } | null> {
+      return ipcRenderer.invoke('background:import', personaId) as Promise<{
+        basename: string
+      } | null>
+    },
+    /** Remove the on-disk copy. Idempotent; doesn't throw on missing file. */
+    delete(basename: string): Promise<{ ok: true }> {
+      return ipcRenderer.invoke('background:delete', basename) as Promise<{ ok: true }>
+    },
   },
 
   proactive: {
@@ -258,6 +366,12 @@ const api = {
     },
     listRecent(limit: number, sessionId?: string): Promise<Episode[]> {
       return ipcRenderer.invoke('memory:listRecent', limit, sessionId) as Promise<Episode[]>
+    },
+    /** Recent episodes for a specific persona, regardless of active.
+     *  Used by Settings 人物 tab to preview history when a chip is
+     *  focused but not yet saved. */
+    listRecentFor(personaId: string, limit: number = 200): Promise<Episode[]> {
+      return ipcRenderer.invoke('memory:listRecentFor', personaId, limit) as Promise<Episode[]>
     },
     listSessions(): Promise<SessionSummary[]> {
       return ipcRenderer.invoke('memory:listSessions') as Promise<SessionSummary[]>

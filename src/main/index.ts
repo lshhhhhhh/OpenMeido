@@ -35,6 +35,15 @@ import {
   noteUserActivity,
 } from './proactive-host.js'
 import { initNotifListener } from './notif-host.js'
+import { initHotkey, applyHotkey, getHotkeyStatus } from './hotkey-host.js'
+import { recentEmotionEvents } from './emotion-events.js'
+import { initAffinity, refreshCachedScore } from './affinity-host.js'
+import {
+  importCustomBackground,
+  registerBackgroundScheme,
+  registerBackgroundProtocol,
+  deleteCustomBackground,
+} from './background-host.js'
 import {
   initLive2DModels,
   listModels as live2dListModels,
@@ -90,6 +99,7 @@ protocol.registerSchemesAsPrivileged([
     },
   },
 ])
+registerBackgroundScheme()
 
 // Load .env from project root. Available since Node 20.12 / 21.7,
 // which Electron 33 (Node 20.18) ships with. Optional — falls back to
@@ -151,7 +161,12 @@ function createWindow(): void {
     const size = win.getSize()
     const rawW = size[0] ?? cfg.window.width
     const h = size[1] ?? cfg.window.height
-    const w = rawW - (sidebarOpenInMain ? SIDEBAR_WIDTH : 0)
+    // Clamp w to the minimum the Zod schema allows. Without this, a user
+    // who resizes the window very narrow while sidebar is open could
+    // produce w < 260, which fails configSchema.parse inside setConfig
+    // → the whole config write throws silently → subsequent sidebar
+    // toggles desync from the actual window state ("stuck" sidebar).
+    const w = Math.max(260, rawW - (sidebarOpenInMain ? SIDEBAR_WIDTH : 0))
     const current = getConfig()
     if (current.window.width !== w || current.window.height !== h) {
       setConfig({ ...current, window: { ...current.window, width: w, height: h } })
@@ -194,12 +209,33 @@ function applyStartAtLogin(startAtLogin: boolean): void {
 
 // Apply live config changes to the running window where possible. width/height
 // already persist via the resize listener above, so we don't push them back.
+let lastPersona: string = getConfig().persona.preset
+
 onConfigChange((next) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setAlwaysOnTop(next.window.alwaysOnTop)
     mainWindow.webContents.setZoomFactor(next.ui.fontScale)
   }
   applyStartAtLogin(next.window.startAtLogin)
+  applyHotkey(next.window.summonHotkey)
+
+  // Persona switch handling: when the user picks a different 人物 in
+  // Settings, treat it as meeting a different character. Mint a fresh
+  // session id (so the new persona doesn't continue the previous
+  // persona's chat thread on its first turn), refresh the affinity
+  // cache for prompt assembly, and broadcast to the renderer so the
+  // sidebar score updates.
+  if (next.persona.preset !== lastPersona) {
+    lastPersona = next.persona.preset
+    const memory = getMemoryService()
+    if (memory) {
+      memory.newSession()
+    }
+    void refreshCachedScore(next.persona.preset)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('persona:switched', { personaId: next.persona.preset })
+    }
+  }
 })
 
 // ---- Chat IPC ----
@@ -228,6 +264,42 @@ ipcMain.handle('window:setIgnoreMouseEvents', (_event, ignore: boolean) => {
   // mousemove to the renderer once click-through is on, and we can never
   // re-evaluate whether the cursor moved back onto a UI region.
   mainWindow.setIgnoreMouseEvents(ignore, { forward: true })
+})
+
+ipcMain.handle('window:getHotkeyStatus', () => getHotkeyStatus())
+
+// ---- Affinity / persona-scoped helpers ----
+ipcMain.handle('affinity:get', async (_event, personaId?: string) => {
+  const adapter = getMemoryAdapter()
+  if (!adapter) return null
+  const pid = personaId || getConfig().persona.preset
+  return adapter.getAffinity(pid)
+})
+ipcMain.handle('affinity:listAll', async () => {
+  const adapter = getMemoryAdapter()
+  if (!adapter) return []
+  const cfg = getConfig()
+  const ids = ['maid', 'imouto', 'ojou', ...cfg.persona.customs.map((c) => c.id)]
+  const out = []
+  for (const pid of ids) {
+    const rec = await adapter.getAffinity(pid)
+    const count = await adapter.count(pid)
+    out.push({ ...rec, episodeCount: count })
+  }
+  return out
+})
+ipcMain.handle('persona:delete', async (_event, personaId: string) => {
+  const adapter = getMemoryAdapter()
+  if (!adapter) return 0
+  return adapter.deletePersona(personaId)
+})
+
+ipcMain.handle('background:import', async (_event, personaId: string) => {
+  return importCustomBackground(personaId)
+})
+ipcMain.handle('background:delete', async (_event, basenameToRemove: string) => {
+  await deleteCustomBackground(basenameToRemove)
+  return { ok: true as const }
 })
 
 // ---- TTS ----
@@ -377,6 +449,14 @@ ipcMain.handle('memory:listSessions', async () => {
   if (!svc) return []
   return svc.listSessions()
 })
+ipcMain.handle(
+  'memory:listRecentFor',
+  async (_event, personaId: string, limit: number = 200) => {
+    const svc = getMemoryService()
+    if (!svc) return []
+    return svc.listRecentFor(personaId, limit)
+  },
+)
 ipcMain.handle('memory:clear', async () => {
   const svc = getMemoryService()
   if (!svc) return 0
@@ -419,10 +499,8 @@ ipcMain.handle('memory:reflectNow', async () => {
 
 ipcMain.handle('memory:recentToolActivity', async (_event, limit: number = 20) => {
   const adapter = getMemoryAdapter()
-  if (!adapter) return []
   // Pull more episodes than the requested cap because each row contributes
   // 0-N tool entries; we trim after flattening.
-  const episodes = await adapter.recent(Math.max(limit * 2, 30), null)
   const out: Array<{
     episodeId: number
     ts: string
@@ -430,28 +508,53 @@ ipcMain.handle('memory:recentToolActivity', async (_event, limit: number = 20) =
     toolName: string
     summary: string
   }> = []
-  for (const e of episodes) {
-    if (!e.toolParts || e.toolParts.length === 0) continue
-    for (const p of e.toolParts) {
-      if (p.type === 'tool-call') {
-        out.push({
-          episodeId: e.id,
-          ts: e.ts,
-          kind: 'call',
-          toolName: p.toolName,
-          summary: summarizeToolPayload(p.input),
-        })
-      } else if (p.type === 'tool-result') {
-        out.push({
-          episodeId: e.id,
-          ts: e.ts,
-          kind: 'result',
-          toolName: p.toolName,
-          summary: summarizeToolPayload(p.output),
-        })
+  if (adapter) {
+    const episodes = await adapter.recent(getConfig().persona.preset, Math.max(limit * 2, 30), null)
+    for (const e of episodes) {
+      if (!e.toolParts || e.toolParts.length === 0) continue
+      for (const p of e.toolParts) {
+        if (p.type === 'tool-call') {
+          out.push({
+            episodeId: e.id,
+            ts: e.ts,
+            kind: 'call',
+            toolName: p.toolName,
+            summary: summarizeToolPayload(p.input),
+          })
+        } else if (p.type === 'tool-result') {
+          out.push({
+            episodeId: e.id,
+            ts: e.ts,
+            kind: 'result',
+            toolName: p.toolName,
+            summary: summarizeToolPayload(p.output),
+          })
+        }
       }
     }
   }
+  // Fold in emotion events so the user can see her non-verbal reactions
+  // (expressions / motions) alongside tool work. Emotion events have no
+  // backing episode — they fire AFTER the chat loop via a separate LLM
+  // call — so we synthesize episodeId=0 and reuse the existing
+  // setLive2DExpression label that the sidebar already translates to "换表情".
+  //
+  // Payload shape mirrors the historical setLive2DExpression tool input
+  // (`{expression: '<emotion>'}`) so toolDetailZh's existing handler
+  // renders the user-facing label rather than the model-specific
+  // expression filename.
+  for (const ev of recentEmotionEvents(limit * 2)) {
+    out.push({
+      episodeId: 0,
+      ts: ev.ts,
+      kind: 'call',
+      toolName: 'setLive2DExpression',
+      summary: JSON.stringify({ expression: ev.emotion }),
+    })
+  }
+  // Sort ascending by ts then trim from the end so we keep the newest;
+  // the existing renderer expects newest-first (reverse at end).
+  out.sort((a, b) => a.ts.localeCompare(b.ts))
   return out.slice(-limit).reverse()
 })
 
@@ -536,13 +639,37 @@ const SIDEBAR_WIDTH = 260
 let sidebarOpenInMain = false
 
 ipcMain.handle('sidebar:setOpen', async (_event, open: boolean) => {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  if (open === sidebarOpenInMain) return // idempotent
+  if (!mainWindow || mainWindow.isDestroyed()) return sidebarOpenInMain
+  if (open === sidebarOpenInMain) return sidebarOpenInMain // idempotent
   const size = mainWindow.getSize()
   const w = size[0] ?? 800
   const h = size[1] ?? 600
   sidebarOpenInMain = open
-  mainWindow.setSize(w + (open ? SIDEBAR_WIDTH : -SIDEBAR_WIDTH), h)
+  if (open) {
+    // Lock the window minimum width so the user can't drag-resize narrower
+    // than sidebar + meaningful content. Without this lock, a user could
+    // resize down to ~260, the sidebar would cover the entire visible
+    // area, and the app would feel "stuck" (no maid, no chat reachable).
+    mainWindow.setMinimumSize(260 + SIDEBAR_WIDTH, 400)
+    mainWindow.setSize(w + SIDEBAR_WIDTH, h)
+  } else {
+    // Restore the bare minimum (the BrowserWindow constructor's 260,400).
+    // Sequence matters: shrink the window FIRST while min-size is still
+    // permissive, THEN tighten min-size. Setting min-size first would
+    // refuse the shrink.
+    mainWindow.setSize(Math.max(260, w - SIDEBAR_WIDTH), h)
+    mainWindow.setMinimumSize(260, 400)
+  }
+  // Broadcast the resolved state so any renderer that drifted out of
+  // sync (e.g. via an HMR restart that wiped its useState) can
+  // reconcile. The handler also returns the value for the caller's
+  // direct await.
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('sidebar:state', sidebarOpenInMain)
+    }
+  }
+  return sidebarOpenInMain
 })
 ipcMain.handle('memory:newSession', () => {
   const svc = getMemoryService()
@@ -562,6 +689,7 @@ void app.whenReady().then(async () => {
   // createWindow so the renderer's first fetch succeeds.
   await initLive2DModels()
   registerLive2DProtocol()
+  registerBackgroundProtocol()
   // Eager-seed demos.json — readDemos creates it on first read, but doing
   // so up-front means the user can find the file immediately after install
   // instead of having to press the hotkey once to "materialize" it.
@@ -579,6 +707,7 @@ void app.whenReady().then(async () => {
   await initTasks()
   initProactive(onConfigChange)
   initNotifListener()
+  initAffinity(getConfig().persona.preset)
   // Wire the goodbye-on-close hook BEFORE creating the window — that way
   // the very first quit attempt (whether from window close, Cmd-Q, etc.)
   // is intercepted and gets the farewell line.
@@ -587,6 +716,8 @@ void app.whenReady().then(async () => {
   // Runs every boot so the user's choice survives uninstall/reinstall
   // (the registry entry would be orphaned otherwise).
   applyStartAtLogin(getConfig().window.startAtLogin)
+  initHotkey(() => mainWindow)
+  applyHotkey(getConfig().window.summonHotkey)
   createWindow()
   // Fire-and-forget the greeting — it self-waits for the renderer to be
   // ready, so we don't block window creation behind an LLM round-trip.

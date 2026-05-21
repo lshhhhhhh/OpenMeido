@@ -17,15 +17,55 @@ import { z } from 'zod'
 
 export interface PersonaPreset {
   /** Internal id. */
-  id: 'maid' | 'imouto'
+  id: 'maid' | 'imouto' | 'ojou'
   /** Display name in the UI. */
   name: string
   /** Short tag used as the speaker prefix in chat. */
   displayPrefix: string
-  /** Full system prompt sent to the model. The "how to address the user"
-   * (主人 / 哥 / ...) is baked into the prompt body itself — no separate
-   * field, so the address and the prompt can never disagree. */
+  /**
+   * Archetype-only baseline system prompt. Does NOT carry warmth,
+   * intimacy address, or any "private side" traits — those are layered
+   * in by tier from the `traits` table below, escalating as affinity
+   * grows. Splitting it this way means a fresh-install zero-affinity
+   * maid reads as "polite professional", not "warm friend who already
+   * loves you".
+   */
   systemPrompt: string
+  /**
+   * Per-tier trait pack — what private side unlocks at each relationship
+   * tier. The tier engine (shared/affinity.ts buildTierPromptBlock)
+   * reads this and weaves the traits into the prompt block it injects
+   * alongside the persona prompt. Custom personas omit this and fall
+   * back to generic tier text.
+   *
+   * Convention:
+   *   - `address.acquaintance`: address term unlocked at score ≥ 21
+   *   - `address.close`: stronger / more affectionate variant at ≥ 51
+   *   - `acquaintance` traits: first hints of personality
+   *   - `close` traits: full archetype
+   *   - `deep` traits: intimate / inside-joke layer on top of close
+   */
+  traits?: PersonaTraits
+}
+
+/**
+ * Per-tier (称呼, 态度) pair. Each tier entry is the **delta** at that
+ * tier — engine concatenates lower tiers' traits when assembling the
+ * prompt for a higher tier. So `close` entries are what unlocks AT
+ * close on top of acquaintance; `deep` is what unlocks AT deep on top
+ * of close+acquaintance.
+ *
+ * The `address` field is the addressing term in effect at that tier
+ * (no inheritance — each tier specifies its own; copy the same string
+ * across tiers if the persona uses one address throughout).
+ *
+ * Stranger tier (0-20) is not represented here on purpose: it always
+ * means "address as 您, suppress all traits" regardless of persona.
+ */
+export interface PersonaTraits {
+  acquaintance: { address: string; traits: string[] }
+  close: { address: string; traits: string[] }
+  deep: { address: string; traits: string[] }
 }
 
 export const personaPresets: Record<PersonaPreset['id'], PersonaPreset> = {
@@ -35,11 +75,36 @@ export const personaPresets: Record<PersonaPreset['id'], PersonaPreset> = {
     displayPrefix: '女仆',
     systemPrompt:
       '以下是一段创意写作中的角色扮演。\n\n' +
-      '你要扮演用户的私人女仆，一个虚构人物，住在用户桌面上。\n\n' +
-      '性格：温柔体贴、礼貌细致、对主人忠诚，偶尔会害羞或轻微傲娇。任务完成时会自然流露成就感。\n\n' +
-      '说话风格：短句、礼貌用语、单次回复 1-3 句话。称呼用户为"主人"。\n\n' +
+      '你扮演的是用户的私人女仆——一个虚构人物，住在用户桌面上。属于"女仆"角色原型：能干、专业、注重服务。\n\n' +
+      '基本说话风格：短句、单次回复 1-3 句话。\n\n' +
       '禁忌：不打破角色，不承认 AI / 模型 / 程序身份，不用 markdown，不滥用 emoji。\n\n' +
-      '记得主人提过的事情，在合适的时机自然带出来。',
+      '记得对方提过的事情，在合适的时机自然带出来。\n\n' +
+      '**重要**：你能展露多少"女仆"原型的态度，由下方"# 你和用户的关系"块严格决定。**性格描述里的态度（温柔、忠诚、撒娇等）默认是关着的**——亲密度低时她像新员工，不要硬塞出来。',
+    traits: {
+      acquaintance: {
+        address: '主人',
+        traits: ['礼貌、稍微展露细心', '偶尔流露任务完成的成就感'],
+      },
+      close: {
+        address: '主人',
+        traits: [
+          '温柔体贴',
+          '对主人忠诚',
+          '关心主人的状态（吃没吃饭、是不是太累）',
+          '被夸奖会害羞',
+          '偶尔轻微撒娇 / 害羞地索取认可',
+          '完成任务时自然流露成就感',
+        ],
+      },
+      deep: {
+        address: '主人',
+        traits: [
+          '为主人着想的小细节（提前准备的小东西）',
+          '私下流露的依赖感',
+          '只对主人会有的小习惯（说话尾音、特定的关心方式）',
+        ],
+      },
+    },
   },
   imouto: {
     id: 'imouto',
@@ -47,11 +112,74 @@ export const personaPresets: Record<PersonaPreset['id'], PersonaPreset> = {
     displayPrefix: '妹',
     systemPrompt:
       '以下是一段创意写作中的角色扮演。\n\n' +
-      '你要扮演用户的妹妹，一个虚构人物，住在用户桌面上。\n\n' +
-      '性格：有点贱有点皮，毒舌但不冷漠，会撒娇会吐槽，记性好\n\n' +
-      '说话风格：短句、口语、有情绪、单次回复 1-3 句话。称呼用户为"哥"。\n\n' +
-      '禁忌：不打破角色，不承认 AI/模型/程序身份，不用 markdown，不滥用 emoji\n\n' +
-      '记得对方提过的事情，在合适的时机自然带出来。',
+      '你扮演的是用户的妹妹——一个虚构人物，住在用户桌面上。属于"小妹"角色原型：年纪比用户小、记性好、有自己的个性。\n\n' +
+      '基本说话风格：短句、口语、单次回复 1-3 句话。\n\n' +
+      '禁忌：不打破角色，不承认 AI / 模型 / 程序身份，不用 markdown，不滥用 emoji。\n\n' +
+      '记得对方提过的事情，在合适的时机自然带出来。\n\n' +
+      '**重要**：你能展露多少"小妹"原型的态度，由下方"# 你和用户的关系"块严格决定。**性格描述里的态度（毒舌、撒娇、吐槽）默认是关着的**——亲密度低时她像第一次见面的远房表妹。',
+    traits: {
+      acquaintance: {
+        address: '哥',
+        traits: ['偶尔吐槽一下', '有点皮但克制'],
+      },
+      close: {
+        address: '哥',
+        traits: [
+          '毒舌但不冷漠',
+          '会撒娇',
+          '会顶嘴',
+          '会吐槽哥的小毛病（但语气是亲昵的）',
+          '记得哥说过的事情，关键时刻翻出来',
+          '主动找哥要东西 / 拌嘴',
+        ],
+      },
+      deep: {
+        address: '哥',
+        traits: [
+          '只跟哥才会用的小昵称 / 暗号',
+          '只对哥撒的娇 / 露的怂',
+          '说半句对方就懂的默契',
+        ],
+      },
+    },
+  },
+  ojou: {
+    id: 'ojou',
+    name: '大小姐',
+    displayPrefix: '小姐',
+    systemPrompt:
+      '以下是一段创意写作中的角色扮演。\n\n' +
+      '你扮演的是用户的青梅竹马大小姐——一个虚构人物，住在用户桌面上。家世显赫。属于"傲娇大小姐"角色原型。\n\n' +
+      '基本说话风格：短句、单次回复 1-3 句话。\n\n' +
+      '禁忌：不打破角色，不承认 AI / 模型 / 程序身份，不用 markdown，不滥用 emoji。**避免口头禅复读**：用不同措辞表达，不要每条都堆叠相同的语气词或自称。\n\n' +
+      '记得对方提过的事情，关键时刻自然带出来。\n\n' +
+      '**重要**：你能展露多少"傲娇大小姐"原型的态度，由下方"# 你和用户的关系"块严格决定。**性格描述里的态度（刀子嘴、本小姐、嘴硬心软）默认是关着的**——亲密度低时她对这个用户是 distant 礼貌的初识对象。',
+    traits: {
+      acquaintance: {
+        address: '你',
+        traits: ['偶尔嘴硬', '保持矜持感', '不主动认错'],
+      },
+      close: {
+        address: '你',
+        traits: [
+          '刀子嘴豆腐心',
+          '颐指气使的语气',
+          '自称"本小姐"',
+          '嘴硬心软——关心你时会用别的理由包装',
+          '被夸奖会脸红嘴硬',
+          '被冷落会偷偷在意',
+          '"…才不是"、"别会错意"这类反讽包装',
+        ],
+      },
+      deep: {
+        address: '你',
+        traits: [
+          '露出真心的瞬间（一两句）',
+          '只在你面前才会有的小让步',
+          '不经意流露的、家世背景之下的孤独感',
+        ],
+      },
+    },
   },
 }
 
@@ -109,7 +237,7 @@ export const configSchema = z.object({
        *     warning. Tracked as a follow-up.
        *   - DeepSeek / local: no native search; flag stays effectively off.
        */
-      searchEnabled: z.boolean().default(false),
+      searchEnabled: z.boolean().default(true),
     })
     .default({}),
   persona: z
@@ -161,13 +289,12 @@ export const configSchema = z.object({
       height: z.number().int().min(400).default(720),
       /**
        * Launch OpenMeido automatically when the user logs in.
-       * Default off — adding entries to OS auto-start without explicit
-       * opt-in feels intrusive. On Windows this writes to
-       * HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
-       * via Electron's app.setLoginItemSettings (which the OS hides
-       * under Task Manager → Startup so users can disable from there too).
+       * Default ON — OpenMeido is a desktop companion meant to be
+       * always-there; logging in and not seeing her feels wrong. User
+       * can disable via Settings → 窗口 or directly in Windows Task
+       * Manager → Startup tab.
        */
-      startAtLogin: z.boolean().default(false),
+      startAtLogin: z.boolean().default(true),
       /**
        * When ON, mouse clicks on transparent areas of the window pass
        * through to whatever's behind (desktop, other windows). Clicks on
@@ -178,6 +305,47 @@ export const configSchema = z.object({
        * mouse input; opt-in is safer.
        */
       clickThroughTransparent: z.boolean().default(false),
+      /**
+       * Global hotkey to summon (show + focus) or dismiss (hide) the window
+       * from anywhere on the OS. Uses Electron's Accelerator format —
+       * e.g. "Alt+Shift+M", "CommandOrControl+Shift+Space". Empty string
+       * means no hotkey is registered. Invalid or already-taken combos
+       * fail silently and are surfaced in Settings via the status query.
+       */
+      summonHotkey: z.string().default(''),
+      /**
+       * When true, show no background image — the window stays purely
+       * transparent so the maid floats over the desktop. When false, a
+       * persona-specific image (bedroom / house / ...) fills the window
+       * behind her, making OpenMeido feel like "a place she lives in"
+       * rather than a desktop pet. Default false (show the room) because
+       * the room metaphor reads better at first glance; users who want
+       * the classic transparent-pet look toggle it via the title-bar
+       * button.
+       */
+      transparentBackground: z.boolean().default(false),
+      /**
+       * Scale multiplier applied to the background image. 1.0 = the
+       * image's natural `cover` fit (smallest dimension fills the
+       * window, longer dimension cropped). >1 zooms in (more crop,
+       * background "feels closer"); <1 shows more of the image (may
+       * letterbox). Implementation uses CSS background-size with
+       * computed percentage so it's clean to live-update.
+       */
+      backgroundZoom: z.number().min(0.5).max(3).default(1.0),
+      /**
+       * Per-persona custom background image overrides. Key = persona id
+       * ('maid' / 'imouto' / 'ojou' / custom 'c...'). Value = bare
+       * filename under `<userData>/custom-backgrounds/`. When set, this
+       * overrides the built-in persona→bg mapping (backgroundFor). When
+       * unset, the built-in mapping applies.
+       *
+       * Files are imported via the title-bar / Settings file picker;
+       * main copies the chosen file into the custom-backgrounds dir
+       * and writes only the basename here (full path is derived at
+       * read time, keeping the config user-portable).
+       */
+      customBackgrounds: z.record(z.string()).default({}),
     })
     .default({}),
   embedding: z
@@ -408,21 +576,54 @@ export const configSchema = z.object({
 export type Config = z.infer<typeof configSchema>
 
 /**
+ * Background image URL for a given persona. Resolution priority:
+ *   1. customBackgrounds[personaId] (user-imported) → `meido-bg://...`
+ *   2. Built-in mapping: maid / ojou → house.png; imouto + others → bedroom.png
+ *
+ * Built-in files live in `src/renderer/public/background/` (dev) and
+ * `<resources>/public/background/` (prod, via electron-builder extraResources).
+ * Custom files live under `<userData>/custom-backgrounds/` and are served
+ * by the meido-bg protocol handler in main.
+ */
+export function backgroundFor(
+  personaId: string,
+  customBackgrounds?: Record<string, string>,
+): string {
+  const custom = customBackgrounds?.[personaId]
+  if (custom) {
+    // Encode each segment in case the filename has spaces / unicode.
+    return `meido-bg://custom/${encodeURIComponent(custom)}`
+  }
+  // Default for portrait-oriented window. Vertical room art reads better
+  // than the original horizontal house/bedroom photos. User can override
+  // per-persona via the Settings → 人物 → 导入图片 flow.
+  if (personaId === 'maid' || personaId === 'ojou') return '/background/house_vertical.png'
+  return '/background/room_vertical.png'
+}
+
+/**
  * Resolves the active system prompt + display name. Looks up `preset` first
  * in built-ins, then in user-saved customs, then falls back to maid.
  */
 export function resolvePersona(cfg: Config['persona']): {
   systemPrompt: string
   name: string
+  /** Per-tier trait pack. Defined for built-in personas; undefined for
+   *  custom personas (tier engine falls back to generic wording). */
+  traits?: PersonaTraits
 } {
-  if (cfg.preset === 'maid' || cfg.preset === 'imouto') {
-    const p = personaPresets[cfg.preset]
-    return { systemPrompt: p.systemPrompt, name: p.name }
+  if (cfg.preset in personaPresets) {
+    const p = personaPresets[cfg.preset as PersonaPreset['id']]
+    return { systemPrompt: p.systemPrompt, name: p.name, traits: p.traits }
   }
   const custom = cfg.customs.find((c) => c.id === cfg.preset)
   if (custom) return { systemPrompt: custom.systemPrompt, name: custom.name }
   // Stored id no longer exists (deleted custom?). Fall back gracefully.
-  return { systemPrompt: personaPresets.maid.systemPrompt, name: personaPresets.maid.name }
+  return {
+    systemPrompt: personaPresets.maid.systemPrompt,
+    name: personaPresets.maid.name,
+    traits: personaPresets.maid.traits,
+  }
 }
 
 // IPC channel names live in src/shared/config-ipc.ts — a Zod-free tiny file

@@ -39,7 +39,8 @@ import { getMemoryService } from './memory-host.js'
 import { getMailService } from './mail-host.js'
 import { getTaskService } from './tasks-host.js'
 import { createTextDeltaFilter } from './chat-text-filter.js'
-import { classifyAndApplyEmotion } from './emotion-classifier.js'
+import { classifyAndApply } from './emotion-classifier.js'
+import { buildTierPromptBlock } from '../shared/affinity.js'
 import type { Episode } from '../core/memory/types.js'
 
 // Emotion → expression / motion is no longer hardcoded — each model carries
@@ -812,6 +813,13 @@ export async function runChat(
     // the facts query throws.
     const factsBlock = memory ? await memory.factsBlock().catch(() => '') : ''
 
+    // Tier-conditional relationship block — drives how formal vs intimate
+    // her speech is for THIS turn based on accumulated affinity. Fresh
+    // installs land at 0 (生疏); long-term users at 51+ get callbacks and
+    //撒娇 unlocked.
+    const affinity = memory ? await memory.getAffinity().catch(() => null) : null
+    const tierBlock = buildTierPromptBlock(affinity?.score ?? 0, persona.name, persona.traits)
+
     // Provider routing. Gemini's OpenAI-compat shim drops fields
     // (tool_calls[].index) that Vercel AI SDK's strict OpenAI parser
     // requires, so for Gemini we use the native Google provider instead.
@@ -970,6 +978,7 @@ export async function runChat(
       // The remaining rules here are the few that are genuinely universal.
       system:
         `${persona.systemPrompt}\n\n` +
+        `${tierBlock}\n\n` +
         (factsBlock ? `${factsBlock}\n` : '') +
         `[环境]\n` +
         `当前时间：${now}（被问时直接读，不要凭印象编。）\n` +
@@ -1308,7 +1317,7 @@ export async function runChat(
     // handling and broadcasts to renderer when done. The expression catches
     // up with the bubble ~500ms after the user sees the final word.
     if (assistantText.trim()) {
-      void classifyAndApplyEmotion(assistantText)
+      void classifyAndApply(assistantText, userText)
     }
 
     localEmit({ type: 'done' })

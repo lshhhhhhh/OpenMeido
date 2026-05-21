@@ -22,6 +22,8 @@ import { getConfig } from './config.js'
 import { runExtraction, runExtractionWithImages } from './chat-host.js'
 import { getMemoryService } from './memory-host.js'
 import { captureAllScreensPng } from './screen-host.js'
+import { classifyAndApplyEmotion } from './emotion-classifier.js'
+import { buildTierPromptBlock } from '../shared/affinity.js'
 import { resolvePersona } from '../shared/config.js'
 import { buildProactiveRemarkPrompt } from '../shared/daily-prompts.js'
 import { formatLocalNow } from '../shared/time-format.js'
@@ -43,7 +45,33 @@ const RECENT_SELF_MAX_CHARS_PER = 80
  * assistant turns with non-empty text. Tool-call wrapper rows are
  * skipped. Each line is truncated so the prompt stays small.
  */
+/**
+ * Source-of-truth in-memory ring of the last few proactive remarks the
+ * host emitted THIS process. Always populated regardless of whether
+ * memory storage worked — guarantees the don't-repeat block in the
+ * prompt has data. Persistence via memory.addEpisode is a separate path
+ * for cross-session recall; this ring is for in-session anti-repeat.
+ */
+const recentSelfRing: string[] = []
+function pushSelfRemark(line: string): void {
+  if (!line.trim()) return
+  recentSelfRing.push(line.trim())
+  if (recentSelfRing.length > RECENT_SELF_LIMIT) {
+    recentSelfRing.splice(0, recentSelfRing.length - RECENT_SELF_LIMIT)
+  }
+}
+
 async function getRecentSelfRemarks(memory: MemoryService): Promise<string[]> {
+  // Prefer the in-memory ring — it's always-populated AND reflects only
+  // proactive output (not chat replies), which is what we want the model
+  // to compare against when deciding "did I just say this?".
+  // Memory.listRecent is a fallback in case the ring is empty (boot from
+  // a long-running prior session etc.).
+  if (recentSelfRing.length > 0) {
+    return recentSelfRing.map((t) =>
+      t.length > RECENT_SELF_MAX_CHARS_PER ? t.slice(0, RECENT_SELF_MAX_CHARS_PER) + '…' : t,
+    )
+  }
   try {
     const episodes = await memory.listRecent(20)
     const assistantOnly = episodes
@@ -163,6 +191,14 @@ async function evaluate(): Promise<void> {
   const recentSelfRemarks = memoryForCtx
     ? await getRecentSelfRemarks(memoryForCtx)
     : []
+  // Affinity tier — without this proactive runs in "stranger" mode even
+  // at high affinity, which reads as her never warming up no matter
+  // how long the user uses OpenMeido. Single fetch per evaluation;
+  // cheap (single SELECT against persona_affinity by PK).
+  const affinity = memoryForCtx
+    ? await memoryForCtx.getAffinity().catch(() => null)
+    : null
+  const tierBlock = buildTierPromptBlock(affinity?.score ?? 0, persona.name, persona.traits)
   // Creative temperature: 0.2 is fine for JSON gate decisions but
   // produces deterministic repetition on the `comment` field. Bump to
   // 0.7 so similar triggers yield varied phrasing.
@@ -187,6 +223,7 @@ async function evaluate(): Promise<void> {
         userName,
         hasScreenshot: images.length > 0,
         recentSelfRemarks,
+        tierBlock,
       })
       raw =
         images.length > 0
@@ -201,6 +238,7 @@ async function evaluate(): Promise<void> {
         triggers: triggers.map((t) => ({ kind: t.kind, note: t.note })),
         userName,
         recentSelfRemarks,
+        tierBlock,
       })
       raw = await runExtraction(prompt, { temperature: creativeTemp })
     }
@@ -220,6 +258,10 @@ async function evaluate(): Promise<void> {
   // see it (otherwise the model would forget what it spontaneously said).
   const memory = getMemoryService()
   if (memory) void memory.addEpisode('assistant', decision.comment)
+  // Also push to the in-process anti-repeat ring — this is the source
+  // of truth for "what did I just say?" and is consulted on the next
+  // evaluation cycle.
+  pushSelfRemark(decision.comment)
   noteAssistantActivity()
 
   // Broadcast to renderers so the chat panel appends a maid bubble.
@@ -232,6 +274,12 @@ async function evaluate(): Promise<void> {
       })
     }
   }
+
+  // Animate her face/body for the spontaneous line too — without this,
+  // proactive remarks were rendered with the held expression from the
+  // previous turn (or neutral). Fire-and-forget; classifier owns its
+  // own error handling.
+  void classifyAndApplyEmotion(decision.comment)
 }
 
 export function startProactive(): void {

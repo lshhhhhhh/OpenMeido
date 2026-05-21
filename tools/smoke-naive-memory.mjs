@@ -36,7 +36,7 @@ async function main() {
   }
 
   const dir = mkdtempSync(join(tmpdir(), 'openmeido-naive-'))
-  const adapter = openSqliteMemory(dir, 512)
+  const adapter = openSqliteMemory(dir, 512, 'maid')
 
   let naive = true
   let embedCalls = 0
@@ -54,6 +54,7 @@ async function main() {
     adapter,
     getConfig: () => ({
       memory: { enabled: true, recentN: 10, topK: 3 },
+      persona: { preset: 'maid', customs: [] },
     }),
     embed: async (text) => (useReal ? realEmbed(text) : failingEmbed(text)),
     isNaiveMode: () => naive,
@@ -65,7 +66,7 @@ async function main() {
   const id1 = await svc.addEpisode('user', '今天天气真好')
   check('addEpisode returned a row id (not null)', typeof id1 === 'number' && id1 > 0)
   check('embed was NOT called', embedCalls === 0)
-  const all = await adapter.recent(10)
+  const all = await adapter.recent('maid', 10)
   check(`row was persisted (got ${all.length})`, all.length === 1)
   check('persisted row has correct text', all[0]?.text === '今天天气真好')
 
@@ -121,7 +122,7 @@ async function main() {
   ]
   const id3 = await svc.addEpisode('assistant', 'looking', toolParts)
   check('addEpisode with tool_parts returned id', typeof id3 === 'number' && id3 > 0)
-  const allAfter = await adapter.recent(10)
+  const allAfter = await adapter.recent('maid', 10)
   const row = allAfter.find((r) => r.id === id3)
   check(
     'persisted row has tool_parts',

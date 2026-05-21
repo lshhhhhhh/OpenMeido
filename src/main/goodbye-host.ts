@@ -22,6 +22,7 @@ import { getConfig } from './config.js'
 import { resolvePersona } from '../shared/config.js'
 import { buildGoodbyePrompt } from '../shared/daily-prompts.js'
 import { formatLocalNow } from '../shared/time-format.js'
+import { buildTierPromptBlock } from '../shared/affinity.js'
 
 let kickedOffOnce = false
 
@@ -46,12 +47,15 @@ async function persistGoodbye(): Promise<void> {
   const memory = getMemoryService()
   if (!memory) return
   const userName = await memory.getUserName().catch(() => null)
+  const affinity = await memory.getAffinity().catch(() => null)
+  const tierBlock = buildTierPromptBlock(affinity?.score ?? 0, persona.name, persona.traits)
 
   let line = ''
   try {
-    const raw = await runExtraction(buildGoodbyePrompt({ persona, now, userName }), {
-      temperature: 0.7,
-    })
+    const raw = await runExtraction(
+      buildGoodbyePrompt({ persona, now, userName, tierBlock }),
+      { temperature: 0.7 },
+    )
     line = raw.trim()
   } catch {
     /* LLM unreachable — just skip; next greeting will open cold */

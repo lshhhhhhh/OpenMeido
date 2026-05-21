@@ -15,6 +15,8 @@ import { BrowserWindow } from 'electron'
 import { runExtraction } from './chat-host.js'
 import { getMemoryService } from './memory-host.js'
 import { noteAssistantActivity } from './proactive-host.js'
+import { classifyAndApplyEmotion } from './emotion-classifier.js'
+import { buildTierPromptBlock } from '../shared/affinity.js'
 import { getConfig } from './config.js'
 import { resolvePersona } from '../shared/config.js'
 import { buildGreetingPrompt } from '../shared/daily-prompts.js'
@@ -128,11 +130,16 @@ export async function greetOnLaunch(): Promise<void> {
   const memory = getMemoryService()
   const userName = memory ? await memory.getUserName().catch(() => null) : null
   const recentExchange = memory ? await getRecentExchange(memory) : []
+  // Affinity tier block — without this the greeting plays "stranger
+  // defaults" even for long-term users, so morning hellos to someone
+  // at affinity 70 feel as cold as day-one.
+  const affinity = memory ? await memory.getAffinity().catch(() => null) : null
+  const tierBlock = buildTierPromptBlock(affinity?.score ?? 0, persona.name, persona.traits)
 
   let line = ''
   try {
     const raw = await runExtraction(
-      buildGreetingPrompt({ persona, now, userName, recentExchange }),
+      buildGreetingPrompt({ persona, now, userName, recentExchange, tierBlock }),
       // High creative temperature — with the same persona + same userName
       // + same time-of-day window, anything < 0.9 still produces a near-
       // verbatim greeting from launch to launch. The other lever was the
@@ -170,5 +177,9 @@ export async function greetOnLaunch(): Promise<void> {
       })
     }
   }
+  // Animate the greeting line — without this the maid would appear with
+  // her neutral / previously-held face during the most emotionally salient
+  // moment of the session (the very first reaction the user sees).
+  void classifyAndApplyEmotion(line)
   console.log(`[greeting] ${line}`)
 }

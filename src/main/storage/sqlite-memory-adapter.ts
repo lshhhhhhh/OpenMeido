@@ -6,6 +6,12 @@
  * provide their own adapter (IndexedDB + JS cosine, or sql.js WASM with
  * the WASM build of sqlite-vec).
  *
+ * Persona scope: episodes + facts both carry a `persona_id` column. Every
+ * read/write filters on it so a 大小姐 query never returns a 女仆 episode.
+ * The companion vec0 table doesn't have persona_id (vec0 doesn't support
+ * metadata columns); cross-persona leakage is prevented by JOINing with
+ * episodes and filtering there.
+ *
  * Two non-obvious sqlite-vec details that bit us during the initial
  * implementation:
  *
@@ -21,7 +27,7 @@ import Database from 'better-sqlite3'
 import { mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
-import type { MemoryAdapter } from '../../core/memory/adapter.js'
+import type { AffinityRecord, MemoryAdapter } from '../../core/memory/adapter.js'
 import type {
   Episode,
   EpisodeImage,
@@ -43,11 +49,6 @@ interface EpisodeRow {
   imagesDataRaw?: string | null
 }
 
-/**
- * Parse the tool_data JSON column safely. Returns undefined for null /
- * empty / malformed values so consumers don't have to defend against junk
- * leaked from a manual DB edit.
- */
 function parseToolData(raw: string | null | undefined): Episode['toolParts'] {
   if (!raw) return undefined
   try {
@@ -59,7 +60,6 @@ function parseToolData(raw: string | null | undefined): Episode['toolParts'] {
   }
 }
 
-/** Same idea as parseToolData but for the images_data column. */
 function parseImagesData(raw: string | null | undefined): EpisodeImage[] | undefined {
   if (!raw) return undefined
   try {
@@ -83,18 +83,6 @@ function rowToEpisode(r: EpisodeRow): Episode {
   }
 }
 
-/**
- * Resolve the sqlite-vec native extension binary. The sqlite-vec npm package's
- * own loader uses `import.meta.resolve` which doesn't reliably point at the
- * `app.asar.unpacked/` copy in production Electron builds (returns paths
- * inside the asar which dlopen can't read). We resolve manually instead:
- *
- *   1. Dev: `node_modules/sqlite-vec-<os>-<arch>/vec0.<ext>` next to the project.
- *   2. Prod: `<resourcesPath>/app.asar.unpacked/node_modules/...`.
- *
- * Throws with a clear message if neither location has the file — that's the
- * surface that bubbles up to the Settings → Memory error display.
- */
 function resolveSqliteVecExtension(): string {
   const ext = process.platform === 'win32' ? 'dll' : process.platform === 'darwin' ? 'dylib' : 'so'
   const os = process.platform === 'win32' ? 'windows' : process.platform
@@ -115,46 +103,47 @@ function resolveSqliteVecExtension(): string {
   )
 }
 
-export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
+/**
+ * `migrateActivePersona` is the persona id we backfill existing episode +
+ * fact rows with. The host (memory-host.ts) reads it from the current
+ * config so users who were chatting with `imouto` don't suddenly find
+ * their history under `maid`. First-time installs pass 'maid' and no
+ * rows exist yet, so the value is moot.
+ */
+export function openSqliteMemory(
+  dataDir: string,
+  dim: number,
+  migrateActivePersona: string,
+): MemoryAdapter {
   mkdirSync(dataDir, { recursive: true })
   const db = new Database(join(dataDir, 'memory.sqlite'))
 
   db.pragma('journal_mode = WAL')
   db.pragma('synchronous = NORMAL')
   db.pragma('foreign_keys = ON')
-  // Load sqlite-vec ourselves — see resolveSqliteVecExtension for why we
-  // can't trust the package's built-in loader in production.
   db.loadExtension(resolveSqliteVecExtension())
 
+  // Tables only — indexes go AFTER the column-migration step, so that
+  // we never try to CREATE INDEX on a column that the upgrading user's
+  // table doesn't have yet. (CREATE TABLE IF NOT EXISTS is a no-op when
+  // the table exists with the old shape, so persona_id won't be on it
+  // until the ALTER TABLE block runs below.)
   db.exec(`
     CREATE TABLE IF NOT EXISTS episodes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       ts TEXT NOT NULL,
-      -- 'tool' was added when we started persisting agent-loop tool results.
-      -- The CHECK is permissive; old DBs that pre-date it just won't have
-      -- 'tool' rows (we never wrote any), so the migration is invisible.
       speaker TEXT NOT NULL CHECK (speaker IN ('user', 'assistant', 'tool')),
       text TEXT NOT NULL,
       session_id TEXT,
-      -- JSON: for 'assistant' rows, the ToolCallPart[] this turn emitted
-      -- (id + name + args). For 'tool' rows, the ToolResultPart[] returned
-      -- (id + name + result). NULL for plain text turns and for 'user' rows.
       tool_data TEXT,
+      images_data TEXT,
+      persona_id TEXT NOT NULL DEFAULT 'maid',
       archived INTEGER DEFAULT 0
     );
-
-    -- Migrate older DBs that pre-date the tool_data column. PRAGMA
-    -- table_info doesn't fail if the column already exists, but ALTER
-    -- TABLE ADD COLUMN does — wrap it in a try/catch outside this exec
-    -- string. See the runtime check below.
 
     CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts);
     CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
 
-    -- L3 facts: LLM-distilled stable knowledge. supersededBy points to the
-    -- row that replaced this one (NULL = currently active). We never DELETE
-    -- a fact on contradiction — supersession keeps the history queryable
-    -- so the user (or the model) can audit why a fact changed.
     CREATE TABLE IF NOT EXISTS facts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       key TEXT NOT NULL,
@@ -163,36 +152,54 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       source_episode_ids TEXT NOT NULL DEFAULT '[]',
-      superseded_by INTEGER REFERENCES facts(id)
+      superseded_by INTEGER REFERENCES facts(id),
+      persona_id TEXT NOT NULL DEFAULT 'maid'
     );
 
-    -- Partial index on (key) WHERE active. Active-fact lookups dominate
-    -- (every chat turn injects them into the system prompt) so the index
-    -- size is dominated by the live set, not history.
     CREATE INDEX IF NOT EXISTS idx_facts_key_active
       ON facts(key) WHERE superseded_by IS NULL;
+
+    CREATE TABLE IF NOT EXISTS persona_affinity (
+      persona_id TEXT PRIMARY KEY,
+      score INTEGER NOT NULL DEFAULT 0,
+      last_updated TEXT NOT NULL,
+      last_reason TEXT
+    );
   `)
 
-  // Schema migration: tool_data column was added later. ALTER TABLE on an
-  // existing column would error, so check via PRAGMA first.
-  const cols = db.prepare("PRAGMA table_info(episodes)").all() as { name: string }[]
-  if (!cols.some((c) => c.name === 'tool_data')) {
+  // ---- Backward-compat migrations ----
+  // Pattern: PRAGMA table_info to detect missing columns, then ALTER TABLE
+  // ADD COLUMN. ALTER would error if the column exists; the PRAGMA guard
+  // makes the migration idempotent across launches.
+
+  const episodeCols = db
+    .prepare("PRAGMA table_info(episodes)")
+    .all() as { name: string }[]
+  if (!episodeCols.some((c) => c.name === 'tool_data')) {
     db.exec('ALTER TABLE episodes ADD COLUMN tool_data TEXT')
     console.log('[memory] migrated: added episodes.tool_data column')
   }
-  // Same pattern for the images_data column (added 2026-05 for the
-  // multi-turn image-recall feature). JSON array of {mimeType, base64}.
-  if (!cols.some((c) => c.name === 'images_data')) {
+  if (!episodeCols.some((c) => c.name === 'images_data')) {
     db.exec('ALTER TABLE episodes ADD COLUMN images_data TEXT')
     console.log('[memory] migrated: added episodes.images_data column')
   }
+  if (!episodeCols.some((c) => c.name === 'persona_id')) {
+    // New install (which would have created the table with persona_id
+    // already, falling into the CREATE branch) skips this. Existing users
+    // get the column added with a default, then we backfill every
+    // existing row with the persona they were actively using at upgrade
+    // time. Without the backfill, default 'maid' would dump everyone's
+    // history into maid even if they were chatting as imouto.
+    db.exec("ALTER TABLE episodes ADD COLUMN persona_id TEXT NOT NULL DEFAULT 'maid'")
+    db.prepare('UPDATE episodes SET persona_id = ?').run(migrateActivePersona)
+    db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_persona ON episodes(persona_id)')
+    console.log(
+      `[memory] migrated: added episodes.persona_id, backfilled to '${migrateActivePersona}'`,
+    )
+  }
 
   // Older DBs were created with `speaker IN ('user', 'assistant')` — that
-  // CHECK constraint rejects the 'tool' speaker we now write. SQLite has no
-  // way to widen a CHECK constraint in place, so we rebuild the table when
-  // we detect the old form. The companion episodes_vec table references
-  // episodes only by integer id (no SQL foreign key), so a rebuild that
-  // preserves ids leaves recall intact.
+  // CHECK constraint rejects the 'tool' speaker we now write.
   const tableSql = db
     .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='episodes'")
     .get() as { sql?: string } | undefined
@@ -207,25 +214,43 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
           text TEXT NOT NULL,
           session_id TEXT,
           tool_data TEXT,
+          images_data TEXT,
+          persona_id TEXT NOT NULL DEFAULT 'maid',
           archived INTEGER DEFAULT 0
         );
-        INSERT INTO episodes_new (id, ts, speaker, text, session_id, tool_data, archived)
-          SELECT id, ts, speaker, text, session_id, tool_data, archived FROM episodes;
+      `)
+      // Use prepared statement for the data move — db.exec doesn't accept
+      // parameter binding, and we want to backfill persona_id via the
+      // app-controlled migrateActivePersona without string interpolation.
+      db.prepare(
+        `INSERT INTO episodes_new (id, ts, speaker, text, session_id, tool_data, images_data, persona_id, archived)
+         SELECT id, ts, speaker, text, session_id, tool_data, images_data,
+                COALESCE(persona_id, ?), archived
+         FROM episodes`,
+      ).run(migrateActivePersona)
+      db.exec(`
         DROP TABLE episodes;
         ALTER TABLE episodes_new RENAME TO episodes;
         CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts);
         CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
+        CREATE INDEX IF NOT EXISTS idx_episodes_persona ON episodes(persona_id);
       `)
     })
     rebuild()
   }
 
-  // vec0 locks `dim` at CREATE time. Inspect any pre-existing episodes_vec
-  // table; if its dim doesn't match the requested one (e.g. user migrated
-  // from cloud 1536-dim embeddings to local bge 512-dim), drop and
-  // recreate. The companion episodes table is left alone — those rows
-  // simply won't be recallable until they're re-embedded, but they remain
-  // visible in the Memory inspector.
+  const factCols = db.prepare("PRAGMA table_info(facts)").all() as { name: string }[]
+  if (!factCols.some((c) => c.name === 'persona_id')) {
+    db.exec("ALTER TABLE facts ADD COLUMN persona_id TEXT NOT NULL DEFAULT 'maid'")
+    db.prepare('UPDATE facts SET persona_id = ?').run(migrateActivePersona)
+    db.exec('CREATE INDEX IF NOT EXISTS idx_facts_persona ON facts(persona_id)')
+    console.log(
+      `[memory] migrated: added facts.persona_id, backfilled to '${migrateActivePersona}'`,
+    )
+  }
+
+  // ---- Vec0 setup (unchanged from pre-persona schema; episode JOIN
+  // applies the persona filter at query time) ----
   const existing = db
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'episodes_vec'")
     .get() as { sql?: string } | undefined
@@ -234,8 +259,7 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
     const existingDim = m && m[1] ? Number(m[1]) : NaN
     if (existingDim && existingDim !== dim) {
       console.warn(
-        `[memory] embedding dim changed (${existingDim} -> ${dim}); dropping vec0 table. ` +
-          'Existing episodes remain but won\'t participate in semantic recall until re-embedded.',
+        `[memory] embedding dim changed (${existingDim} -> ${dim}); dropping vec0 table.`,
       )
       db.exec('DROP TABLE episodes_vec')
     }
@@ -247,39 +271,32 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
     );
   `)
 
-  // Prepared statements — better-sqlite3 caches them after first compile.
+  // ---- Prepared statements ----
   const insertEpisode = db.prepare<
-    [string, Speaker, string, string | null, string | null, string | null]
+    [string, string, Speaker, string, string | null, string | null, string | null]
   >(
-    'INSERT INTO episodes (ts, speaker, text, session_id, tool_data, images_data) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT INTO episodes (persona_id, ts, speaker, text, session_id, tool_data, images_data) VALUES (?, ?, ?, ?, ?, ?, ?)',
   )
   const insertVec = db.prepare<[bigint, Buffer]>(
     'INSERT INTO episodes_vec (episode_id, embedding) VALUES (?, ?)',
   )
-  const selectRecent = db.prepare<[number]>(
+  const selectRecent = db.prepare<[string, number]>(
     `SELECT id, ts, speaker, text, session_id AS sessionId,
             tool_data AS toolDataRaw, images_data AS imagesDataRaw
      FROM episodes
-     WHERE archived = 0
+     WHERE archived = 0 AND persona_id = ?
      ORDER BY id DESC
      LIMIT ?`,
   )
-  // COALESCE so the 'legacy' bucket id matches rows with session_id IS NULL.
-  const selectRecentInSession = db.prepare<[string, number]>(
+  const selectRecentInSession = db.prepare<[string, string, number]>(
     `SELECT id, ts, speaker, text, session_id AS sessionId,
             tool_data AS toolDataRaw, images_data AS imagesDataRaw
      FROM episodes
-     WHERE archived = 0 AND COALESCE(session_id, 'legacy') = ?
+     WHERE archived = 0 AND persona_id = ? AND COALESCE(session_id, 'legacy') = ?
      ORDER BY id DESC
      LIMIT ?`,
   )
-  /**
-   * Per-session summary. Episodes written before the session-id tracking
-   * existed have session_id = NULL — we COALESCE them into a synthetic
-   * 'legacy' bucket so the user can still see those chats in the picker.
-   * The correlated subquery pulls the first user message for the preview.
-   */
-  const selectSessions = db.prepare(
+  const selectSessions = db.prepare<[string]>(
     `SELECT
         COALESCE(session_id, 'legacy') AS id,
         COUNT(*) AS count,
@@ -287,17 +304,18 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
         MAX(ts) AS lastTs,
         COALESCE(
           (SELECT text FROM episodes e2
-           WHERE COALESCE(e2.session_id, 'legacy') = COALESCE(e.session_id, 'legacy')
+           WHERE e2.persona_id = e.persona_id
+             AND COALESCE(e2.session_id, 'legacy') = COALESCE(e.session_id, 'legacy')
              AND e2.speaker = 'user'
            ORDER BY e2.id ASC LIMIT 1),
           ''
         ) AS preview
      FROM episodes e
-     WHERE archived = 0
+     WHERE archived = 0 AND persona_id = ?
      GROUP BY COALESCE(session_id, 'legacy')
      ORDER BY MAX(ts) DESC`,
   )
-  const selectByKnn = db.prepare<[Buffer, number]>(
+  const selectByKnn = db.prepare<[Buffer, number, string]>(
     `SELECT e.id, e.ts, e.speaker, e.text, e.session_id AS sessionId,
             e.tool_data AS toolDataRaw, e.images_data AS imagesDataRaw,
             vc.distance
@@ -309,21 +327,23 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
        LIMIT ?
      ) vc
      JOIN episodes e ON e.id = vc.episode_id
-     WHERE e.archived = 0
+     WHERE e.archived = 0 AND e.persona_id = ?
      ORDER BY vc.distance`,
   )
-  const countEpisodes = db.prepare('SELECT COUNT(*) AS c FROM episodes WHERE archived = 0')
+  const countEpisodes = db.prepare<[string]>(
+    'SELECT COUNT(*) AS c FROM episodes WHERE archived = 0 AND persona_id = ?',
+  )
 
-  // ---- L3 facts prepared statements ----
-  const selectActiveByKey = db.prepare<[string]>(
+  // ---- L3 facts prepared statements (persona-scoped) ----
+  const selectActiveByKey = db.prepare<[string, string]>(
     `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
             source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy
      FROM facts
-     WHERE key = ? AND superseded_by IS NULL`,
+     WHERE persona_id = ? AND key = ? AND superseded_by IS NULL`,
   )
-  const insertFact = db.prepare<[string, string, number, string, string, string]>(
-    `INSERT INTO facts (key, value, confidence, created_at, updated_at, source_episode_ids)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+  const insertFact = db.prepare<[string, string, string, number, string, string, string]>(
+    `INSERT INTO facts (persona_id, key, value, confidence, created_at, updated_at, source_episode_ids)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   )
   const bumpFact = db.prepare<[number, string, number]>(
     `UPDATE facts SET confidence = ?, updated_at = ? WHERE id = ?`,
@@ -336,20 +356,33 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
             source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy
      FROM facts WHERE id = ?`,
   )
-  const selectActiveFacts = db.prepare<[number]>(
+  const selectActiveFacts = db.prepare<[string, number]>(
     `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
             source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy
      FROM facts
-     WHERE superseded_by IS NULL
+     WHERE persona_id = ? AND superseded_by IS NULL
      ORDER BY updated_at DESC
      LIMIT ?`,
   )
-  const selectFactHistory = db.prepare<[string]>(
+  const selectFactHistory = db.prepare<[string, string]>(
     `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
             source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy
      FROM facts
-     WHERE key = ?
+     WHERE persona_id = ? AND key = ?
      ORDER BY id ASC`,
+  )
+
+  // ---- Affinity prepared statements ----
+  const selectAffinity = db.prepare<[string]>(
+    'SELECT persona_id AS personaId, score, last_updated AS lastUpdated, last_reason AS lastReason FROM persona_affinity WHERE persona_id = ?',
+  )
+  const upsertAffinity = db.prepare<[string, number, string, string | null]>(
+    `INSERT INTO persona_affinity (persona_id, score, last_updated, last_reason)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(persona_id) DO UPDATE SET
+       score = excluded.score,
+       last_updated = excluded.last_updated,
+       last_reason = excluded.last_reason`,
   )
 
   interface FactRow {
@@ -375,6 +408,7 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
 
   const addTxn = db.transaction(
     (
+      personaId: string,
       speaker: Speaker,
       text: string,
       sessionId: string | null,
@@ -383,15 +417,8 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
       imagesData: string | null,
     ): number => {
       const ts = new Date().toISOString()
-      const row = insertEpisode.run(ts, speaker, text, sessionId, toolData, imagesData)
+      const row = insertEpisode.run(personaId, ts, speaker, text, sessionId, toolData, imagesData)
       const episodeId = Number(row.lastInsertRowid)
-      // Naive mode passes an empty Float32Array — we still persist the
-      // episode (so chat history survives), but skip the vec0 insert.
-      // Subsequent searchByEmbedding queries return only rows that DO
-      // have vectors, which is the correct behavior: an un-embedded row
-      // can't appear in semantic recall regardless. After the user
-      // downloads the model, future episodes get embedded normally;
-      // naive-era ones remain non-recallable (acceptable trade-off).
       if (embedding.length > 0) {
         insertVec.run(BigInt(episodeId), Buffer.from(embedding.buffer))
       }
@@ -405,35 +432,38 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
   }
 
   return {
-    async addEpisode(speaker, text, embedding, sessionId = null, toolParts, images) {
+    async addEpisode(personaId, speaker, text, embedding, sessionId = null, toolParts, images) {
       ensureOpen()
       const toolData = toolParts && toolParts.length > 0 ? JSON.stringify(toolParts) : null
       const imagesData = images && images.length > 0 ? JSON.stringify(images) : null
-      return addTxn(speaker, text, sessionId, embedding, toolData, imagesData)
+      return addTxn(personaId, speaker, text, sessionId, embedding, toolData, imagesData)
     },
 
-    async recent(n, sessionId) {
+    async recent(personaId, n, sessionId) {
       ensureOpen()
       if (n <= 0) return []
       const rows = sessionId
-        ? (selectRecentInSession.all(sessionId, n) as EpisodeRow[])
-        : (selectRecent.all(n) as EpisodeRow[])
+        ? (selectRecentInSession.all(personaId, sessionId, n) as EpisodeRow[])
+        : (selectRecent.all(personaId, n) as EpisodeRow[])
       return rows.reverse().map(rowToEpisode)
     },
 
-    async listSessions() {
+    async listSessions(personaId) {
       ensureOpen()
-      return selectSessions.all() as SessionSummary[]
+      return selectSessions.all(personaId) as SessionSummary[]
     },
 
-    async searchByEmbedding(queryEmbedding, k, excludeIds = new Set()) {
+    async searchByEmbedding(personaId, queryEmbedding, k, excludeIds = new Set()) {
       ensureOpen()
       if (k <= 0) return []
-      // Overfetch so we still get k after filtering excluded ids.
-      const limit = k + excludeIds.size + 4
+      // Overfetch — KNN doesn't pre-filter by persona, so a 大小姐 with 10
+      // recent episodes might have several of its top-K nearest in 女仆's
+      // pool; we filter those out post-JOIN and need extra headroom.
+      const limit = k + excludeIds.size + 16
       const rows = selectByKnn.all(
         Buffer.from(queryEmbedding.buffer),
         limit,
+        personaId,
       ) as (EpisodeRow & { distance: number })[]
       const filtered: Episode[] = []
       for (const r of rows) {
@@ -444,63 +474,61 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
       return filtered
     },
 
-    async count() {
+    async count(personaId) {
       ensureOpen()
-      const row = countEpisodes.get() as { c: number }
+      const row = countEpisodes.get(personaId) as { c: number }
       return row.c
     },
 
-    async clear() {
+    async clear(personaId) {
       ensureOpen()
-      // Delete in a transaction so the two tables stay in sync. vec0 has no
-      // ON DELETE CASCADE hook, so we have to clear it explicitly.
       const wipe = db.transaction(() => {
-        const result = db.prepare('DELETE FROM episodes').run()
-        db.prepare('DELETE FROM episodes_vec').run()
+        const ids = db
+          .prepare<[string]>('SELECT id FROM episodes WHERE persona_id = ?')
+          .all(personaId) as { id: number }[]
+        if (ids.length === 0) return 0
+        const delVec = db.prepare('DELETE FROM episodes_vec WHERE episode_id = ?')
+        for (const { id } of ids) delVec.run(BigInt(id))
+        const result = db.prepare<[string]>('DELETE FROM episodes WHERE persona_id = ?').run(personaId)
         return Number(result.changes)
       })
       return wipe()
     },
 
-    async deleteSession(sessionId: string) {
+    async deleteSession(personaId: string, sessionId: string) {
       ensureOpen()
-      // Pull the doomed ids first so we can drop their vec rows too.
       const wipe = db.transaction(() => {
         const ids = db
-          .prepare<[string]>(
-            "SELECT id FROM episodes WHERE COALESCE(session_id, 'legacy') = ?",
+          .prepare<[string, string]>(
+            "SELECT id FROM episodes WHERE persona_id = ? AND COALESCE(session_id, 'legacy') = ?",
           )
-          .all(sessionId) as { id: number }[]
+          .all(personaId, sessionId) as { id: number }[]
         if (ids.length === 0) return 0
         const delVec = db.prepare('DELETE FROM episodes_vec WHERE episode_id = ?')
         for (const { id } of ids) delVec.run(BigInt(id))
         const result = db
-          .prepare<[string]>("DELETE FROM episodes WHERE COALESCE(session_id, 'legacy') = ?")
-          .run(sessionId)
+          .prepare<[string, string]>(
+            "DELETE FROM episodes WHERE persona_id = ? AND COALESCE(session_id, 'legacy') = ?",
+          )
+          .run(personaId, sessionId)
         return Number(result.changes)
       })
       return wipe()
     },
 
-    async upsertFact(input: NewFact) {
+    async upsertFact(personaId, input: NewFact) {
       ensureOpen()
       const now = new Date().toISOString()
       const sourceIds = JSON.stringify(input.sourceEpisodeIds ?? [])
       const inputConf = input.confidence ?? 1.0
-      const existing = selectActiveByKey.get(input.key) as FactRow | undefined
+      const existing = selectActiveByKey.get(personaId, input.key) as FactRow | undefined
       const txn = db.transaction((): Fact => {
         if (existing && existing.value === input.value) {
-          // Same key + same value → reinforce. Confidence drifts toward 1.0
-          // by averaging the incoming confidence with the existing one — a
-          // simple way to make stable facts converge without ever exceeding 1.
           const newConf = Math.min(1.0, (existing.confidence + inputConf) / 2 + 0.05)
           bumpFact.run(newConf, now, existing.id)
           return rowToFact({ ...existing, confidence: newConf, updatedAt: now })
         }
-        // Either no active row yet, or value differs (contradiction). In
-        // both cases we insert a NEW row, then point the old active row
-        // (if any) at the new one as its supersedor.
-        const ins = insertFact.run(input.key, input.value, inputConf, now, now, sourceIds)
+        const ins = insertFact.run(personaId, input.key, input.value, inputConf, now, now, sourceIds)
         const newId = Number(ins.lastInsertRowid)
         if (existing) supersedeFact.run(newId, existing.id)
         return rowToFact(selectFactById.get(newId) as FactRow)
@@ -508,20 +536,58 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
       return txn()
     },
 
-    async listActiveFacts(limit = 200) {
+    async listActiveFacts(personaId, limit = 200) {
       ensureOpen()
-      return (selectActiveFacts.all(limit) as FactRow[]).map(rowToFact)
+      return (selectActiveFacts.all(personaId, limit) as FactRow[]).map(rowToFact)
     },
 
-    async listFactHistory(key: string) {
+    async listFactHistory(personaId, key: string) {
       ensureOpen()
-      return (selectFactHistory.all(key) as FactRow[]).map(rowToFact)
+      return (selectFactHistory.all(personaId, key) as FactRow[]).map(rowToFact)
     },
 
-    async clearFacts() {
+    async clearFacts(personaId) {
       ensureOpen()
-      const result = db.prepare('DELETE FROM facts').run()
+      const result = db
+        .prepare<[string]>('DELETE FROM facts WHERE persona_id = ?')
+        .run(personaId)
       return Number(result.changes)
+    },
+
+    async getAffinity(personaId) {
+      ensureOpen()
+      const row = selectAffinity.get(personaId) as AffinityRecord | undefined
+      if (row) return row
+      return {
+        personaId,
+        score: 0,
+        lastUpdated: new Date(0).toISOString(),
+        lastReason: null,
+      }
+    },
+
+    async setAffinity(personaId, score, reason) {
+      ensureOpen()
+      upsertAffinity.run(personaId, score, new Date().toISOString(), reason ?? null)
+    },
+
+    async deletePersona(personaId) {
+      ensureOpen()
+      const txn = db.transaction(() => {
+        // Episodes (cascades to vec rows)
+        const ids = db
+          .prepare<[string]>('SELECT id FROM episodes WHERE persona_id = ?')
+          .all(personaId) as { id: number }[]
+        const delVec = db.prepare('DELETE FROM episodes_vec WHERE episode_id = ?')
+        for (const { id } of ids) delVec.run(BigInt(id))
+        const epDel = db.prepare<[string]>('DELETE FROM episodes WHERE persona_id = ?').run(personaId)
+        const factDel = db.prepare<[string]>('DELETE FROM facts WHERE persona_id = ?').run(personaId)
+        const affDel = db
+          .prepare<[string]>('DELETE FROM persona_affinity WHERE persona_id = ?')
+          .run(personaId)
+        return Number(epDel.changes) + Number(factDel.changes) + Number(affDel.changes)
+      })
+      return txn()
     },
 
     close() {
@@ -532,10 +598,6 @@ export function openSqliteMemory(dataDir: string, dim: number): MemoryAdapter {
   }
 }
 
-/**
- * Tolerant parser for the source_episode_ids JSON column. Defaults to []
- * on any shape error — a malformed JSON should never crash a chat turn.
- */
 function safeParseIntArray(s: string | null): number[] {
   if (!s) return []
   try {

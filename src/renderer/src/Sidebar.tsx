@@ -105,6 +105,15 @@ function toolDetailZh(toolName: string, summary: string): string {
   }
 }
 
+/** Match shared/affinity.ts tier breakpoints. Duplicated rather than
+ *  imported so the renderer bundle doesn't pull a Node-typed module. */
+function tierLabelFor(score: number): string {
+  if (score >= 81) return '默契'
+  if (score >= 51) return '亲近'
+  if (score >= 21) return '熟络'
+  return '生疏'
+}
+
 function relativeTime(iso: string, now = Date.now()): string {
   const t = new Date(iso).getTime()
   if (!Number.isFinite(t)) return iso
@@ -198,6 +207,11 @@ export function Sidebar({
   const [tasks, setTasks] = useState<Task[]>([])
   const [activity, setActivity] = useState<ToolActivity[]>([])
   const [newTaskText, setNewTaskText] = useState('')
+  const [affinity, setAffinity] = useState<{
+    score: number
+    tierLabel: string
+    reason: string | null
+  } | null>(null)
 
   const reloadTasks = async (): Promise<void> => {
     setTasks((await window.api.tasks.listAll(5)) as Task[])
@@ -205,13 +219,33 @@ export function Sidebar({
   const reloadActivity = async (): Promise<void> => {
     setActivity((await window.api.memory.recentToolActivity(15)) as ToolActivity[])
   }
+  const reloadAffinity = async (): Promise<void> => {
+    const rec = await window.api.affinity.get()
+    if (!rec) return
+    setAffinity({
+      score: rec.score,
+      tierLabel: tierLabelFor(rec.score),
+      reason: rec.lastReason,
+    })
+  }
 
   useEffect(() => {
     void reloadTasks()
     void reloadActivity()
+    void reloadAffinity()
     const offTasks = window.api.tasks.onChanged(() => void reloadTasks())
+    const offAff = window.api.affinity.onChanged((info) =>
+      setAffinity({
+        score: info.score,
+        tierLabel: info.tier.zhLabel,
+        reason: info.reason,
+      }),
+    )
+    const offSwitch = window.api.affinity.onPersonaSwitched(() => void reloadAffinity())
     return () => {
       offTasks()
+      offAff()
+      offSwitch()
     }
   }, [])
 
@@ -278,6 +312,10 @@ export function Sidebar({
           right: 0,
           top: 28,
           bottom: 0,
+          // Above the chat panel (z:1) and bg layer (z:0) so the strip
+          // remains clickable across its full height — without this,
+          // the chat panel covers the bottom segment of the strip.
+          zIndex: 2,
         }}
       >
         ▶ 侧栏
@@ -294,6 +332,11 @@ export function Sidebar({
         top: 28,
         bottom: 0,
         width: 260,
+        // Same zIndex bump as the collapsed strip — keeps the OPENED
+        // sidebar above the chat panel (z:1) and the Live2D pane.
+        // Without this the open sidebar receives clicks but they tunnel
+        // through to the Live2D pane behind it.
+        zIndex: 2,
         display: 'flex',
         flexDirection: 'row',
         fontFamily: 'system-ui, sans-serif',
@@ -314,6 +357,64 @@ export function Sidebar({
           overflowY: 'auto',
         }}
       >
+        {/* ===== Affinity bar (relationship state with active persona) ===== */}
+        {affinity && (
+          <div
+            title={affinity.reason ?? '还没有判定记录'}
+            style={{
+              padding: '8px 10px',
+              borderBottom: '1px solid rgba(0,0,0,0.06)',
+              fontSize: 11,
+              color: '#333',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                marginBottom: 4,
+                fontWeight: 500,
+              }}
+            >
+              <span>❤️ 好感度</span>
+              <span style={{ color: '#888' }}>
+                {affinity.score} · {affinity.tierLabel}
+              </span>
+            </div>
+            <div
+              style={{
+                height: 4,
+                borderRadius: 2,
+                background: 'rgba(0,0,0,0.08)',
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  width: `${Math.max(2, affinity.score)}%`,
+                  height: '100%',
+                  background: 'linear-gradient(90deg, #f6a4b3, #d4768a)',
+                  transition: 'width 400ms ease',
+                }}
+              />
+            </div>
+            {affinity.reason && (
+              <div
+                style={{
+                  marginTop: 4,
+                  fontSize: 10,
+                  color: '#999',
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {affinity.reason}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ===== Unified tasks (reminders + TODOs) ===== */}
         <Section title="📝 待办" badge={active.length} defaultOpen>
           {/* Quick-add input */}

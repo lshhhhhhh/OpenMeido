@@ -59,17 +59,22 @@ export async function initMemory(): Promise<void> {
   try {
     // dim is locked to bge-small-zh-v1.5's native 512. The adapter handles
     // migration if an older 1536-dim schema is on disk.
-    adapter = openSqliteMemory(app.getPath('userData'), LOCAL_EMBED_DIM)
+    //
+    // The active-persona arg is used ONLY by the schema migration to
+    // backfill persona_id on existing rows for upgrading users. Day-to-day
+    // queries take persona as a method arg, so a persona switch after
+    // boot takes effect immediately without re-opening the adapter.
+    adapter = openSqliteMemory(app.getPath('userData'), LOCAL_EMBED_DIM, cfg.persona.preset)
     // L3 reflection uses the same LLM backend the user already configured
     // for chat. Wrap the chat-host extraction helper as a ReflectionExtractor
     // so the memory service stays platform-agnostic.
     const reflectExtractor: ReflectionExtractor = async (prompt) => runExtraction(prompt)
 
-    // Resume the most-recently-active session so chat history carries across
-    // app restarts. Skip the synthetic 'legacy' bucket — that's for old rows
-    // with NULL session_id, not a real session to write new turns into.
-    // better-sqlite3 is synchronous, so awaiting here costs ~1ms.
-    const recent = await adapter.listSessions()
+    // Resume the most-recently-active session for the current persona so
+    // chat history carries across app restarts. Skip the synthetic 'legacy'
+    // bucket — that's for old rows with NULL session_id, not a real session
+    // to write new turns into.
+    const recent = await adapter.listSessions(cfg.persona.preset)
     const resumeId = recent.find((s) => s.id !== 'legacy')?.id
 
     // Decide initial mode based on whether the model is reachable on disk.
@@ -103,6 +108,25 @@ export async function initMemory(): Promise<void> {
             resumeId ? ` · resumed session ${resumeId.slice(0, 8)}…` : ' · new session'
           }`,
       )
+      // Try the remote fallback in the background — transformers.js will
+      // pull from huggingface.co / hf-mirror.com. If that succeeds, exit
+      // naive mode automatically so users on networks that CAN reach HF
+      // don't keep seeing the "model not installed" banner forever.
+      // Reachability failures (offline, GFW without mirror) leave
+      // naive mode on, which is the intended behavior.
+      void import('./local-embed.js').then(async (m) => {
+        try {
+          // getExtractor would auto-fallback to remote; we just call embedLocal
+          // once with a trivial input to trigger that path.
+          await m.embedLocal('warmup')
+          if (naiveMode) {
+            naiveMode = false
+            console.log('[memory] remote embed reachable — exiting naive mode')
+          }
+        } catch (err) {
+          console.warn('[memory] remote embed unreachable, staying naive:', err)
+        }
+      })
     } else {
       console.log(
         `[memory] ready (sqlite, local bge-small-zh, dim=${LOCAL_EMBED_DIM})${
