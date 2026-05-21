@@ -83,6 +83,11 @@ export const COLD_START_DAMPING = 0.5
 /** How many turns are "cold start". After this many lifetime turns with
  *  this persona, deltas land at full strength. */
 export const COLD_START_TURN_COUNT = 20
+/** Score ceiling for passive presence accrual. Above this, time-on-app
+ *  alone doesn't move the score — past Lv.3 requires real interaction
+ *  to advance. Prevents users from grinding to deep tier just by
+ *  leaving the window open. */
+export const PRESENCE_SCORE_CEILING = 40
 
 /**
  * Build the instruction block that gets appended to the persona system

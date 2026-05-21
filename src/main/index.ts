@@ -39,6 +39,7 @@ import { initHotkey, applyHotkey, getHotkeyStatus } from './hotkey-host.js'
 import { recentEmotionEvents } from './emotion-events.js'
 import { initAffinity, refreshCachedScore } from './affinity-host.js'
 import { initWeeklyReview } from './weekly-review-host.js'
+import { initPresence } from './presence-host.js'
 import {
   importCustomBackground,
   registerBackgroundScheme,
@@ -694,6 +695,7 @@ void app.whenReady().then(async () => {
   initNotifListener()
   initAffinity(getConfig().persona.preset)
   initWeeklyReview()
+  initPresence(() => mainWindow)
   // Wire the goodbye-on-close hook BEFORE creating the window — that way
   // the very first quit attempt (whether from window close, Cmd-Q, etc.)
   // is intercepted and gets the farewell line.
