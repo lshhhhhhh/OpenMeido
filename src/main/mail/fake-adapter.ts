@@ -380,7 +380,7 @@ export function createFakeMailAdapter(): MailAdapter {
       )
       const filtered = o.onlyUnread ? inbox.filter((m) => m.unread) : inbox
       const sliced = filtered.slice(0, o.limit)
-      return sliced.map((m) => summaryOf(m, o.includeParents !== false))
+      return sliced.map((m) => summaryOf(m, o.includeParents === true))
     },
 
     async readMessage(id: string): Promise<MailMessage | null> {

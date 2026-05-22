@@ -76,10 +76,28 @@ export interface Episode {
 }
 
 /**
+ * Fact category — two parallel memory tracks that share a table but
+ * never mix in extraction or UI surfacing.
+ *
+ *   'personal' — relationship-line memory: name, pets, hobbies, family,
+ *                anything about the user's life that persists for months
+ *                or years. Reflected from conversational episodes.
+ *                Surfaced in Settings → 人物 → 记忆.
+ *
+ *   'work'     — productivity-line memory: project codes, ticket status,
+ *                recent email topics. Reflected from tool-using episodes.
+ *                Stale within days/weeks. Injected into chat context for
+ *                continuity (so the user can ask "any update on Project-A1?"
+ *                next day) but NOT shown in the memory UI to avoid the
+ *                stale-data trap.
+ */
+export type FactCategory = 'personal' | 'work'
+
+/**
  * L3 fact — LLM-distilled stable knowledge about the user. Lives in its
  * own table so we can inject the full set into every system prompt cheaply,
  * without vector retrieval. Mutable: when a new fact contradicts an old
- * one (same key), the new row supersedes the old via `supersededBy`.
+ * one (same key + category), the new row supersedes the old via `supersededBy`.
  */
 export interface Fact {
   id: number
@@ -88,6 +106,7 @@ export interface Fact {
   confidence: number
   createdAt: string
   updatedAt: string
+  category: FactCategory
   /** JSON array of episode ids this fact was distilled from. */
   sourceEpisodeIds: number[]
   /** If set, this fact has been superseded by fact with this id (i.e. inactive). */

@@ -32,11 +32,16 @@ type Capability =
   | { kind: 'depends'; hint: string }
 
 function textCapability(baseUrl: string, currentModel: string): Capability {
-  const perf = performanceModel(baseUrl)
-  if (perf) return { kind: 'have', model: perf }
+  // 文字对话用的就是用户当前选定的 model。perf tier 只是 OpenMeido 给该
+  // backend 的默认推荐，用户可以在 "换一个 ▾" 里改成别的——能力矩阵
+  // 应该反映"实际在用什么"，不是"我们建议用什么"。
+  if (currentModel) return { kind: 'have', model: currentModel }
   if (baseUrl.includes('127.0.0.1') || baseUrl.includes('localhost'))
-    return { kind: 'depends', hint: currentModel || '取决于 LM Studio 当前加载的模型' }
-  return { kind: 'have', model: currentModel }
+    return { kind: 'depends', hint: '取决于 LM Studio 当前加载的模型' }
+  const perf = performanceModel(baseUrl)
+  return perf
+    ? { kind: 'have', model: perf }
+    : { kind: 'none', hint: '未配置模型' }
 }
 
 function visionCapability(baseUrl: string, currentModel: string): Capability {
@@ -2569,6 +2574,18 @@ function FactsPanel() {
       {lastReflect && (
         <div style={{ color: '#9c9', fontSize: 11, marginBottom: 6 }}>{lastReflect}</div>
       )}
+      <div
+        style={{
+          fontSize: 10,
+          color: '#777',
+          marginBottom: 8,
+          lineHeight: 1.5,
+          fontStyle: 'italic',
+        }}
+      >
+        只显示日常 / 关系记忆。工作相关的内容（项目、邮件、ticket）走单独的内部
+        通道，不在此处展示，避免和稳定的个人事实混淆。
+      </div>
       {facts.length === 0 ? (
         <div style={{ color: '#777', fontSize: 12, padding: 8 }}>
           还没有提取到稳定事实。聊几句关于你自己的事，下次反射就会有。

@@ -75,9 +75,13 @@ export interface ListInboxOptions {
   /** If true, only messages with the \Seen flag missing. */
   onlyUnread?: boolean
   /**
-   * email-with-context: when true (default), reply items get their parent
-   * attached from the Sent folder. Adds ~50-100ms per reply since each
-   * lookup is an extra IMAP search + envelope fetch. Set false to skip.
+   * email-with-context: when true, reply items get their parent attached
+   * from the Sent folder. Adds ~500-2000ms per reply since each lookup
+   * is an extra IMAP search + envelope fetch on the Sent mailbox, run
+   * SEQUENTIALLY. **Default false** (was true historically — measured to
+   * be the dominant cost on summary requests). Callers that genuinely
+   * need paired "they said / you had said" context (e.g. "回复这封信，
+   * 我之前怎么说的来着") set this true explicitly.
    */
   includeParents?: boolean
   /**

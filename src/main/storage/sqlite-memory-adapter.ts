@@ -259,6 +259,17 @@ export function openSqliteMemory(
       `[memory] migrated: added facts.persona_id, backfilled to '${migrateActivePersona}'`,
     )
   }
+  // Dual-track memory (v0.0.29): facts get a category — 'personal' or
+  // 'work'. Old rows are all relationship-line memory, so default 'personal'.
+  if (!factCols.some((c) => c.name === 'category')) {
+    db.exec(
+      "ALTER TABLE facts ADD COLUMN category TEXT NOT NULL DEFAULT 'personal'",
+    )
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_facts_category_active ON facts(persona_id, category) WHERE superseded_by IS NULL",
+    )
+    console.log('[memory] migrated: added facts.category (default personal)')
+  }
 
   // persona_affinity new columns for milestone + weekly review (v0.0.26).
   // Seed last_milestone to the band the user is currently at — so we
@@ -386,16 +397,23 @@ export function openSqliteMemory(
     'SELECT COUNT(*) AS c FROM episodes WHERE archived = 0 AND persona_id = ?',
   )
 
-  // ---- L3 facts prepared statements (persona-scoped) ----
-  const selectActiveByKey = db.prepare<[string, string]>(
+  // ---- L3 facts prepared statements (persona-scoped, category-aware) ----
+  // Same-key supersession is scoped per CATEGORY: a 'work' fact for key
+  // X never supersedes a 'personal' fact for the same key. Letting them
+  // collide would let work memory eat personal memory whenever they
+  // share a key (rare but conceivable, e.g. `user.role`).
+  const selectActiveByKey = db.prepare<[string, string, string]>(
     `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
-            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy
+            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy,
+            category
      FROM facts
-     WHERE persona_id = ? AND key = ? AND superseded_by IS NULL`,
+     WHERE persona_id = ? AND key = ? AND category = ? AND superseded_by IS NULL`,
   )
-  const insertFact = db.prepare<[string, string, string, number, string, string, string]>(
-    `INSERT INTO facts (persona_id, key, value, confidence, created_at, updated_at, source_episode_ids)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  const insertFact = db.prepare<
+    [string, string, string, number, string, string, string, string]
+  >(
+    `INSERT INTO facts (persona_id, key, value, confidence, created_at, updated_at, source_episode_ids, category)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   )
   const bumpFact = db.prepare<[number, string, number]>(
     `UPDATE facts SET confidence = ?, updated_at = ? WHERE id = ?`,
@@ -405,20 +423,23 @@ export function openSqliteMemory(
   )
   const selectFactById = db.prepare<[number]>(
     `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
-            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy
+            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy,
+            category
      FROM facts WHERE id = ?`,
   )
-  const selectActiveFacts = db.prepare<[string, number]>(
+  const selectActiveFacts = db.prepare<[string, string, number]>(
     `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
-            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy
+            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy,
+            category
      FROM facts
-     WHERE persona_id = ? AND superseded_by IS NULL
+     WHERE persona_id = ? AND category = ? AND superseded_by IS NULL
      ORDER BY updated_at DESC
      LIMIT ?`,
   )
   const selectFactHistory = db.prepare<[string, string]>(
     `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
-            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy
+            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy,
+            category
      FROM facts
      WHERE persona_id = ? AND key = ?
      ORDER BY id ASC`,
@@ -475,6 +496,7 @@ export function openSqliteMemory(
     updatedAt: string
     sourceEpisodeIdsJson: string
     supersededBy: number | null
+    category: string
   }
   const rowToFact = (r: FactRow): Fact => ({
     id: r.id,
@@ -483,6 +505,7 @@ export function openSqliteMemory(
     confidence: r.confidence,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
+    category: (r.category === 'work' ? 'work' : 'personal'),
     sourceEpisodeIds: safeParseIntArray(r.sourceEpisodeIdsJson),
     supersededBy: r.supersededBy,
   })
@@ -597,19 +620,30 @@ export function openSqliteMemory(
       return wipe()
     },
 
-    async upsertFact(personaId, input: NewFact) {
+    async upsertFact(personaId, input: NewFact, category = 'personal') {
       ensureOpen()
       const now = new Date().toISOString()
       const sourceIds = JSON.stringify(input.sourceEpisodeIds ?? [])
       const inputConf = input.confidence ?? 1.0
-      const existing = selectActiveByKey.get(personaId, input.key) as FactRow | undefined
+      const existing = selectActiveByKey.get(personaId, input.key, category) as
+        | FactRow
+        | undefined
       const txn = db.transaction((): Fact => {
         if (existing && existing.value === input.value) {
           const newConf = Math.min(1.0, (existing.confidence + inputConf) / 2 + 0.05)
           bumpFact.run(newConf, now, existing.id)
           return rowToFact({ ...existing, confidence: newConf, updatedAt: now })
         }
-        const ins = insertFact.run(personaId, input.key, input.value, inputConf, now, now, sourceIds)
+        const ins = insertFact.run(
+          personaId,
+          input.key,
+          input.value,
+          inputConf,
+          now,
+          now,
+          sourceIds,
+          category,
+        )
         const newId = Number(ins.lastInsertRowid)
         if (existing) supersedeFact.run(newId, existing.id)
         return rowToFact(selectFactById.get(newId) as FactRow)
@@ -617,9 +651,9 @@ export function openSqliteMemory(
       return txn()
     },
 
-    async listActiveFacts(personaId, limit = 200) {
+    async listActiveFacts(personaId, limit = 200, category = 'personal') {
       ensureOpen()
-      return (selectActiveFacts.all(personaId, limit) as FactRow[]).map(rowToFact)
+      return (selectActiveFacts.all(personaId, category, limit) as FactRow[]).map(rowToFact)
     },
 
     async listFactHistory(personaId, key: string) {

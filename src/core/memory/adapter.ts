@@ -19,6 +19,7 @@ import type {
   Episode,
   EpisodeImage,
   Fact,
+  FactCategory,
   NewFact,
   SessionSummary,
   Speaker,
@@ -103,11 +104,23 @@ export interface MemoryAdapter {
    * Upsert a fact for `key` under this persona. Same key but a different
    * persona is a different fact — facts about the user can drift per-relationship
    * (e.g. she only knows your work nickname after you mentioned it to her).
+   * `category` defaults to 'personal' (relationship-line memory). Pass
+   * 'work' for productivity-line facts; the two are isolated even when
+   * they share a key.
    */
-  upsertFact(personaId: string, input: NewFact): Promise<Fact>
+  upsertFact(
+    personaId: string,
+    input: NewFact,
+    category?: FactCategory,
+  ): Promise<Fact>
 
-  /** All facts currently active under this persona, newest first. */
-  listActiveFacts(personaId: string, limit?: number): Promise<Fact[]>
+  /** All facts currently active under this persona, newest first.
+   *  `category` defaults to 'personal'. */
+  listActiveFacts(
+    personaId: string,
+    limit?: number,
+    category?: FactCategory,
+  ): Promise<Fact[]>
 
   /** Full history of facts for a key under this persona, oldest first. */
   listFactHistory(personaId: string, key: string): Promise<Fact[]>

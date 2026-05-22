@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>报表</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      --bg: #1e1f29;
+      --panel: #262732;
+      --border: #3a3b48;
+      --text: #e8e8ee;
+      --muted: #888;
+      --accent: #7ab8ff;
+      --header-bg: #2d2e3c;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 13px;
+      overflow: hidden;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex: 0 0 auto;
+    }
+    h1 {
+      font-size: 14px;
+      font-weight: 600;
+      margin: 0;
+      color: var(--text);
+    }
+    .meta {
+      font-size: 11px;
+      color: var(--muted);
+      margin-left: 8px;
+      font-weight: normal;
+    }
+    .actions {
+      display: flex;
+      gap: 6px;
+    }
+    button {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    button:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    button.copied { color: #7c7; border-color: #7c7; }
+    .table-wrap {
+      flex: 1;
+      overflow: auto;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 12px;
+    }
+    thead {
+      position: sticky;
+      top: 0;
+      background: var(--header-bg);
+      z-index: 1;
+    }
+    th {
+      text-align: left;
+      padding: 8px 10px;
+      font-weight: 600;
+      border-bottom: 2px solid var(--border);
+      color: var(--text);
+      white-space: nowrap;
+    }
+    td {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      line-height: 1.5;
+      max-width: 380px;
+      word-break: break-word;
+    }
+    tr:nth-child(even) td {
+      background: rgba(255,255,255,0.015);
+    }
+    tr:hover td {
+      background: rgba(122,184,255,0.05);
+    }
+    .empty {
+      padding: 40px;
+      text-align: center;
+      color: var(--muted);
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1 id="title">报表</h1>
+      <span id="meta" class="meta"></span>
+    </div>
+    <div class="actions">
+      <button id="copy" title="复制为 TSV（粘到 Excel / 表格）">📋 复制</button>
+      <button id="csv" title="下载为 CSV 文件">💾 CSV</button>
+    </div>
+  </header>
+  <div class="table-wrap">
+    <table id="tbl">
+      <thead><tr id="thead-row"></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div id="empty" class="empty" style="display:none">没有可显示的数据。</div>
+  </div>
+
+<script>
+  /**
+   * Pure-vanilla table renderer. Receives data via URL hash:
+   *   #data=<base64-encoded JSON of {title, columns, rows}>
+   *
+   * Kept dependency-free so this page loads instantly without the
+   * full renderer bundle (Pixi, React, Live2D etc.) that the main
+   * companion window pulls in.
+   */
+  function decodeData() {
+    const hash = window.location.hash || ''
+    const m = hash.match(/data=([^&]+)/)
+    if (!m) return null
+    try {
+      const json = decodeURIComponent(escape(atob(decodeURIComponent(m[1]))))
+      return JSON.parse(json)
+    } catch (err) {
+      console.error('decode failed:', err)
+      return null
+    }
+  }
+
+  function render(data) {
+    if (!data || !Array.isArray(data.columns) || !Array.isArray(data.rows)) {
+      document.getElementById('empty').style.display = 'block'
+      document.getElementById('tbl').style.display = 'none'
+      return
+    }
+    document.title = data.title ? `报表: ${data.title}` : '报表'
+    document.getElementById('title').textContent = data.title || '报表'
+    document.getElementById('meta').textContent = `${data.rows.length} 行 · ${data.columns.length} 列`
+
+    const theadRow = document.getElementById('thead-row')
+    for (const col of data.columns) {
+      const th = document.createElement('th')
+      th.textContent = col
+      theadRow.appendChild(th)
+    }
+
+    // Build a case- and whitespace-insensitive key map for each row so
+    // mild model sloppiness ("Subject" vs "subject", "发件人" vs "发件人 ")
+    // doesn't render every cell as empty. The strict exact-match lookup
+    // still wins when present.
+    //
+    // Catastrophic-mismatch fallback: when columns and row keys share
+    // ZERO overlap (e.g. columns=[序号,发件人,...] but row keys are
+    // English snake_case like [y_val,sender_info,...]), use POSITIONAL
+    // alignment — columns[i] ↔ row's i-th value in insertion order.
+    // Modern JS engines preserve object insertion order so this maps
+    // sensibly to whatever the model output. Ugly but unblocks users
+    // when the LLM ignores our "key 必须 = column 名" rule.
+    // rows is an array-of-arrays — purely positional. row[i]
+    // corresponds to columns[i]. No key matching, no fallback needed.
+    // (Switched from {key: value} objects in v0.0.29 — the key-naming
+    // contract was unreliable: models would output English keys
+    // against Chinese column names, or shove escape chars into keys,
+    // and the table would render empty / jumbled. Positional is
+    // foolproof: there are no keys to get wrong.)
+    const tbody = document.getElementById('tbody')
+    for (const row of data.rows) {
+      const tr = document.createElement('tr')
+      for (let i = 0; i < data.columns.length; i++) {
+        const td = document.createElement('td')
+        const v = Array.isArray(row) ? row[i] : undefined
+        td.textContent =
+          v === undefined || v === null || v === ''
+            ? '—'
+            : typeof v === 'object'
+              ? JSON.stringify(v)
+              : String(v)
+        tr.appendChild(td)
+      }
+      tbody.appendChild(tr)
+    }
+  }
+
+  function toTSV(data) {
+    const head = data.columns.join('\t')
+    const body = data.rows
+      .map((r) =>
+        data.columns
+          .map((c) => {
+            const v = r[c]
+            const s = v === undefined || v === null ? '' : String(v)
+            // TSV: replace tabs/newlines so each row stays one line.
+            return s.replace(/\t/g, ' ').replace(/\r?\n/g, ' ')
+          })
+          .join('\t'),
+      )
+      .join('\n')
+    return head + '\n' + body
+  }
+
+  function toCSV(data) {
+    const esc = (v) => {
+      const s = v === undefined || v === null ? '' : String(v)
+      if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"'
+      return s
+    }
+    const head = data.columns.map(esc).join(',')
+    const body = data.rows
+      .map((r) => data.columns.map((c) => esc(r[c])).join(','))
+      .join('\n')
+    return head + '\n' + body
+  }
+
+  function download(filename, content) {
+    const blob = new Blob(['﻿' + content], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  function safeFilename(s) {
+    return (s || 'report').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)
+  }
+
+  // Wrap the DOM-clearing render so we can re-call it on hash changes
+  // (Electron's loadURL with same path + new hash counts as a same-doc
+  // navigation; the script does NOT re-execute, so without this listener
+  // a "refine this table" follow-up would leave the old DOM in place
+  // and the user sees no visual change).
+  let data
+  const fullRender = () => {
+    const empty = document.getElementById('empty')
+    const tbl = document.getElementById('tbl')
+    const theadRow = document.getElementById('thead-row')
+    const tbody = document.getElementById('tbody')
+    theadRow.innerHTML = ''
+    tbody.innerHTML = ''
+    empty.style.display = 'none'
+    tbl.style.display = ''
+    data = decodeData()
+    render(data)
+  }
+  fullRender()
+  window.addEventListener('hashchange', () => {
+    console.log('[table.html] hashchange — re-rendering')
+    fullRender()
+  })
+
+  document.getElementById('copy').addEventListener('click', async (e) => {
+    if (!data) return
+    try {
+      await navigator.clipboard.writeText(toTSV(data))
+      const btn = e.currentTarget
+      const orig = btn.textContent
+      btn.classList.add('copied')
+      btn.textContent = '✓ 已复制'
+      setTimeout(() => {
+        btn.classList.remove('copied')
+        btn.textContent = orig
+      }, 1500)
+    } catch (err) {
+      console.error('copy failed:', err)
+    }
+  })
+
+  document.getElementById('csv').addEventListener('click', () => {
+    if (!data) return
+    download(safeFilename(data.title) + '.csv', toCSV(data))
+  })
+
+  // Esc closes the window — small UX nicety since this is a satellite
+  // window users open many of and want to dismiss quickly.
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') window.close()
+  })
+</script>
+</body>
+</html>

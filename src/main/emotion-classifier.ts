@@ -60,6 +60,11 @@ export async function classifyAndApply(
      *  upstream (e.g. main chat baked a `<emo>` tag the chat loop
      *  consumed). Affinity still runs. */
     skipEmotion?: boolean
+    /** Skip the affinity judgment + write. Set this for work turns
+     *  (email summary, file read, task add) where judging "user warmth"
+     *  from a tool request would be noise. The classifier still runs
+     *  for emotion unless skipEmotion is also true. */
+    skipAffinity?: boolean
   } = {},
 ): Promise<void> {
   const trimmed = assistantText.trim()
@@ -101,10 +106,11 @@ export async function classifyAndApply(
       modelName: cfg.live2d.activeModel,
     })
   }
-  // Affinity only when we have user context (chat path). Greeting /
-  // proactive emit assistant text with no preceding user turn — judging
-  // affinity off a one-sided utterance would be noise.
-  if (userText.trim() && result.affinityDelta !== 0) {
+  // Affinity only when we have user context (chat path) AND this isn't
+  // a work-mode turn. Greeting / proactive emit assistant text with no
+  // preceding user turn; tool-using turns are productivity tasks. In
+  // both cases judging warmth would be noise.
+  if (!opts.skipAffinity && userText.trim() && result.affinityDelta !== 0) {
     void applyJudgement(personaId, result.affinityDelta, result.reason)
   }
   console.log(

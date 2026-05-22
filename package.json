@@ -1,6 +1,6 @@
 {
   "name": "openmeido",
-  "version": "0.0.28",
+  "version": "0.0.29",
   "description": "Productivity assistant + Live2D companion for non-programmers",
   "author": "lsh <laishaoheng1996@gmail.com>",
   "main": "./out/main/index.js",
@@ -28,6 +28,10 @@
     "test:affinity-guardrails": "node --import tsx tools/smoke-affinity-guardrails.mjs",
     "test:combined-classifier": "node --env-file=.env --import tsx tools/smoke-combined-classifier.mjs",
     "test:baked-emotion": "node --env-file=.env --import tsx tools/smoke-baked-emotion.mjs",
+    "test:memory-split": "node --env-file=.env --import tsx tools/smoke-memory-split.mjs",
+    "test:table-window": "electron tools/smoke-table-window.mjs",
+    "test:list-inbox": "electron tools/smoke-list-inbox.mjs",
+    "test:table-e2e": "electron tools/smoke-table-e2e.mjs",
     "test:tier-conversation": "node --env-file=.env --import tsx tools/smoke-tier-conversation.mjs",
     "test:elaborate": "node --env-file=.env --import tsx tools/smoke-elaborate-proactive.mjs",
     "test:email-draft": "node --env-file=.env --import tsx tools/smoke-email-draft.mjs",

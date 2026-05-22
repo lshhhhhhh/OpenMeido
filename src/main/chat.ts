@@ -38,6 +38,7 @@ import { getConfig, resolveApiKey } from './config.js'
 import { getMemoryService } from './memory-host.js'
 import { getMailService } from './mail-host.js'
 import { getTaskService } from './tasks-host.js'
+import { openTableWindow } from './table-host.js'
 import { createTextDeltaFilter } from './chat-text-filter.js'
 import { classifyAndApply } from './emotion-classifier.js'
 import { applyEmotion } from './emotion-apply.js'
@@ -64,6 +65,7 @@ import type { Episode } from '../core/memory/types.js'
  * reflection prompt looks at the recent episode window, not at the counter.
  */
 const REFLECTION_EVERY_N_TURNS = 5
+const WORK_REFLECTION_EVERY_N_TURNS = 3
 
 /**
  * One-shot text cleaner for persistence — strips `<think>` blocks and stray
@@ -117,16 +119,40 @@ async function applyBakedEmotion(emotion: Emotion, _personaId: string): Promise<
 }
 
 let turnsSinceReflection = 0
-function maybeTriggerReflection(memory: { reflectOnce(): Promise<number> }): void {
+let workTurnsSinceReflection = 0
+function maybeTriggerReflection(
+  memory: {
+    reflectOnce(): Promise<number>
+    reflectProductivityOnce(): Promise<number>
+  },
+  wasToolTurn: boolean,
+): void {
+  // Two counters, two tracks. A chat turn ticks the personal counter; a
+  // tool turn ticks the work counter. They never cross-fire — preserves
+  // the strict isolation between relationship-line and productivity-line
+  // memory promised by the dual-track design.
+  if (wasToolTurn) {
+    workTurnsSinceReflection += 1
+    if (workTurnsSinceReflection >= WORK_REFLECTION_EVERY_N_TURNS) {
+      workTurnsSinceReflection = 0
+      void memory
+        .reflectProductivityOnce()
+        .then((n) => {
+          if (n > 0) console.log(`[memory] work reflection upserted ${n} fact(s)`)
+        })
+        .catch((err) => console.warn('[memory] work reflection threw:', err))
+    }
+    return
+  }
   turnsSinceReflection += 1
   if (turnsSinceReflection < REFLECTION_EVERY_N_TURNS) return
   turnsSinceReflection = 0
   void memory
     .reflectOnce()
     .then((n) => {
-      if (n > 0) console.log(`[memory] reflection upserted ${n} fact(s)`)
+      if (n > 0) console.log(`[memory] personal reflection upserted ${n} fact(s)`)
     })
-    .catch((err) => console.warn('[memory] reflection threw:', err))
+    .catch((err) => console.warn('[memory] personal reflection threw:', err))
 }
 
 // setLive2DExpression tool was removed in favor of post-reply emotion
@@ -333,15 +359,25 @@ const listRecentEmails = tool({
           'If the user named a folder, ALWAYS call listMailFolders first and pass the exact ' +
           'matched path here — do not guess strings like "工作" without listing first.',
       ),
+    includeParents: z
+      .boolean()
+      .describe(
+        'If true, fetch each reply\'s parent message from Sent. **Expensive**: ' +
+          '500-2000ms per reply (sequential IMAP search). Default false. Only set true ' +
+          'when user genuinely needs paired "they said / I had said" context — e.g. ' +
+          'drafting a follow-up reply where the user wants to know what they previously said. ' +
+          'NEVER set true for a generic summary / table request.',
+      ),
   }),
-  execute: async ({ limit, onlyUnread, folder }) => {
+  execute: async ({ limit, onlyUnread, folder, includeParents }) => {
     const mail = getMailService()
     if (!mail) return { error: '邮箱未配置或未启用，请在设置里开启邮箱并填写 IMAP 信息。' }
     try {
-      const items = await mail.listInbox({
+      const items = await listInboxCached(mail, {
         limit,
         onlyUnread,
         folder: folder && folder.trim() ? folder : undefined,
+        includeParents,
       })
       return { items, folder: folder || 'INBOX' }
     } catch (err) {
@@ -349,6 +385,53 @@ const listRecentEmails = tool({
     }
   },
 })
+
+/**
+ * **B. listInbox short-TTL cache.** Repeated table iterations
+ * ("再加一列时间", "隐藏 Uber Eats", "按时间倒序") would otherwise
+ * re-fetch from IMAP every call. The model's window of N most-recent
+ * emails doesn't change second-to-second; a 60s cache absorbs the
+ * burst of follow-up tool calls during one editing session.
+ *
+ * Cache key includes every parameter that affects the result — folder,
+ * limit, onlyUnread, includeParents — so changing any of them bypasses
+ * the stale entry naturally.
+ */
+const LIST_INBOX_CACHE_TTL_MS = 60_000
+interface CachedListing {
+  ts: number
+  items: Awaited<ReturnType<NonNullable<ReturnType<typeof getMailService>>['listInbox']>>
+}
+const listInboxCache = new Map<string, CachedListing>()
+async function listInboxCached(
+  mail: NonNullable<ReturnType<typeof getMailService>>,
+  o: {
+    limit: number
+    onlyUnread: boolean
+    folder?: string
+    includeParents?: boolean
+  },
+): Promise<CachedListing['items']> {
+  const key = JSON.stringify([
+    o.folder ?? 'INBOX',
+    o.limit,
+    o.onlyUnread,
+    o.includeParents === true,
+  ])
+  const now = Date.now()
+  const hit = listInboxCache.get(key)
+  if (hit && now - hit.ts < LIST_INBOX_CACHE_TTL_MS) {
+    console.log(`[mail] listInbox cache HIT (${(now - hit.ts) / 1000}s old) key=${key}`)
+    return hit.items
+  }
+  const items = await mail.listInbox(o)
+  listInboxCache.set(key, { ts: now, items })
+  // Evict stale entries opportunistically so the map doesn't grow.
+  for (const [k, v] of listInboxCache) {
+    if (now - v.ts > LIST_INBOX_CACHE_TTL_MS) listInboxCache.delete(k)
+  }
+  return items
+}
 
 const readEmail = tool({
   description:
@@ -566,6 +649,95 @@ const draftEmailReply = tool({
       note:
         '草稿已经放进聊天里。简短跟用户说一句"主人/哥/你 看看上面的草稿，要改一版告诉我哪里"。' +
         '不要在你的回复里把草稿正文重复一遍——卡片已经显示了。',
+    }
+  },
+})
+
+const presentTable = tool({
+  description:
+    '把结构化数据以独立窗口的表格形式呈现给用户。**何时调用**：用户要求"列表 / 表格 / 汇总 / 制表"类输出，或一次性返回多条带相同结构的信息（邮件汇总、待办清单、文件清单等）。\n' +
+    '\n' +
+    '**典型场景**：\n' +
+    '- "总结最近 10 个邮件" / "把邮件做成表格" → 读完后调一次本工具\n' +
+    '- "再加一列发送时间" / "隐藏 Uber Eats 相关的" / "按时间排序" → **重新**调一次，传更新后的 columns/rows，默认替换当前窗口\n' +
+    '- "另开一份对比" → `newWindow: true`\n' +
+    '\n' +
+    '**邮件汇总专项规则**：\n' +
+    '1. **同线程折叠**：来回讨论同一主题的邮件合并为一行。10 封邮件可能合成 3-10 行。\n' +
+    '2. **每行字段建议**：序号 / 发件人 / 主题 / 最新进展 / 时间 / 背景信息（早期来回的简短摘要，≤50 字）。\n' +
+    '3. **合并标注**：合并了多封时，在背景信息里写明"共 N 封来回"。\n' +
+    '4. **重要标记**：在"最新进展"列开头用 **重要**: / **加急**: 等前缀。\n' +
+    '\n' +
+    '**rows 是"数组的数组"**（不是对象数组），每个 row 是一个数组，**第 i 个值对应 columns 的第 i 列**。这种结构纯按位置对齐，不需要写 key 名——避免了"中英文 key 对不上"那一类的渲染翻车。\n' +
+    '\n' +
+    '示例：columns=["序号","发件人","主题"]，rows=[[1,"alice@x","项目进度"], [2,"bob@y","请假申请"]]\n' +
+    '\n' +
+    '**约束**：\n' +
+    '- 每个 row 的长度**必须**等于 columns.length；缺失字段用空字符串 "" 占位\n' +
+    '- 值用简短中文，单元格不要超过 80 字\n' +
+    '- 一次调用传完整数据，不要分多次（空 rows 会被拒绝）\n' +
+    '\n' +
+    '调用后简短一句"表格已开"即可，**不要**用文字复述表格内容。',
+  inputSchema: z.object({
+    title: z
+      .string()
+      .describe('表格标题，例："最近邮件汇总"。'),
+    columns: z
+      .array(z.string())
+      .min(1)
+      .describe('列名数组，按显示顺序。'),
+    rows: z
+      .array(
+        z.array(
+          z.union([z.string(), z.number(), z.null()]),
+        ),
+      )
+      .describe(
+        '数组的数组。每个 row 是一个数组，**长度必须 = columns.length**，第 i 个元素对应 columns[i] 那一列。例：columns=["序号","发件人"] → rows=[[1,"alice"],[2,"bob"]]。',
+      ),
+    newWindow: z
+      .boolean()
+      .optional()
+      .describe('true = 新开窗口；默认 false = 替换当前窗口。'),
+  }),
+  execute: async ({ title, columns, rows, newWindow }) => {
+    console.log(
+      `[presentTable] called title="${title}" cols=${columns.length} rows=${rows.length} newWindow=${Boolean(newWindow)}`,
+    )
+
+    // Position-based schema means there's no key matching to fail. The
+    // only structural error possible is row length not matching column
+    // count — surface that as a tool error so the model retries with
+    // correctly-shaped rows.
+    const badRow = rows.findIndex((r) => r.length !== columns.length)
+    if (badRow !== -1) {
+      const r = rows[badRow]!
+      console.warn(
+        `[presentTable] row ${badRow} has ${r.length} values, expected ${columns.length}`,
+      )
+      return {
+        error:
+          `第 ${badRow + 1} 行长度是 ${r.length}，应该是 ${columns.length}（等于 columns 长度）。` +
+          `每个 row 必须是和 columns 等长的数组，第 i 个元素对应 columns[i]。` +
+          `缺失字段用空字符串 "" 占位，不要省略元素。请重新调 presentTable。`,
+      }
+    }
+
+    try {
+      openTableWindow({ title, columns, rows }, { newWindow: Boolean(newWindow) })
+      console.log(`[presentTable] openTableWindow returned ok`)
+      return {
+        ok: true,
+        title,
+        columnCount: columns.length,
+        rowCount: rows.length,
+        opened: newWindow ? 'new-window' : 'updated-or-new',
+      }
+    } catch (err) {
+      console.warn('[presentTable] failed:', err)
+      return {
+        error: err instanceof Error ? err.message : String(err),
+      }
     }
   },
 })
@@ -1034,6 +1206,9 @@ export async function runChat(
 ): Promise<void> {
   const localEmit = (body: ChatEventBody): void => emit({ messageId, ...body })
   _activeEmit = localEmit
+  console.log(
+    `[chat] runChat entry messageId=${messageId} userText="${userText.slice(0, 60)}" imageCount=${images?.length ?? 0}`,
+  )
 
   try {
     const cfg = getConfig()
@@ -1064,9 +1239,14 @@ export async function runChat(
     // Pull context BEFORE the model call so the retrieved messages can be
     // interleaved. retrieve() awaits embedding for the query, so this is
     // the one place where we do wait.
+    const tRetrieve = Date.now()
+    console.log('[chat] retrieving context (embed + recent + recalled)...')
     const { recent, recalled } = memory
       ? await memory.retrieve(userText)
       : { recent: [], recalled: [] }
+    console.log(
+      `[chat] retrieve done in ${Date.now() - tRetrieve}ms recent=${recent.length} recalled=${recalled.length}`,
+    )
     const historyMessages = episodesToMessages(
       [...recalled, ...recent],
       cfg.memory.imageRecallTurns,
@@ -1228,6 +1408,9 @@ export async function runChat(
     // unreachable. mail-host.ts also reads OPENMEIDO_FAKE_MAIL; the two must
     // agree, hence the same env-var check here.
     const mailEnabled = cfg.mail.enabled || process.env.OPENMEIDO_FAKE_MAIL === '1'
+    console.log(
+      `[chat] streamText about to fire · model="${modelId}" temp=${resolveTemperature(modelId, 0.6) ?? 'omit'} mailEnabled=${mailEnabled}`,
+    )
     // 0.6 is our desired temperature for chat (persona variety without
     // wrecking tool-calling reliability). resolveTemperature applies any
     // model-specific override: OpenAI gpt-5 reasoning → omit; Kimi → pin
@@ -1258,7 +1441,7 @@ export async function runChat(
         `# 你能做的（仅限工具列表里的事）\n` +
         `加/查/完成待办、读剪贴板、读用户给的网页 URL、读用户给的文件、` +
         (mailEnabled ? `看邮件列表和邮件内容、` : ``) +
-        `看用户主动发来的截图。**就这些**。\n` +
+        `看用户主动发来的截图、把多条结构化数据用 presentTable 工具开一个独立表格窗口。**就这些**。\n` +
         // Web-search hint only when the backend ACTUALLY has search wired
         // (Gemini grounding + GLM web_search; Kimi search isn't supported
         // because their builtin_function tool type doesn't survive the
@@ -1287,6 +1470,22 @@ export async function runChat(
         `**调用工具时不要在前面说话**——不要"好的我去查"、"我看一下"、"稍等"这种铺垫。直接调工具。所有工具都跑完、有了最终结果，再开口说话——这一次就要把答案说完整、说清楚。\n` +
         `**多工具并行**：能并行就并行（在同一个回复里返回多个 tool_call）。尤其是用户让你总结、汇总多封邮件这种场景，**一定**在拿到列表后同一回复里同时发起多封邮件的正文读取调用，不要一封一封串行处理。串行处理会撞步数上限，最后说不出总结。\n` +
         `\n` +
+        `# 多条结构化输出 → 必须用 presentTable\n` +
+        `**触发**：用户要求"总结 / 汇总 / 列表 / 列出 / 一览 / 做成表格"且涉及**多条同质数据**（多封邮件、多个待办、多份文件……）。\n` +
+        `**铁律**：拿到数据后**最后一步必须调 presentTable**——不要把表格内容用文字 / markdown 输出。文字版本对用户没有价值：横滚不便、不能复制粘 Excel、塞满聊天框。\n` +
+        `**正确流程示例**："总结最近 10 个邮件"：\n` +
+        `  1. listRecentEmails(limit=10, includeParents=false, onlyUnread=false, folder="")\n` +
+        `  2. **直接基于 snippet 制表**——每封邮件已经带 200 字 snippet，对汇总表格**足够用**。**不要再调 readEmail**，除非 snippet 末尾被截断且 "最新进展" 真的看不出来（最多 1-2 封，绝不批量读 5+ 封）。\n` +
+        `  3. **调 presentTable**：columns=["序号","发件人","主题","最新进展","时间","背景信息"]，rows 是**数组的数组**（每行就是一个数组，长度必须等于 columns 长度，第 i 个元素对应 columns[i]）。例：`+
+          `rows=[[1,"alice@x","项目","已完成","5/20","共3封"], [2,"bob@y","请假","待审批","5/19",""]]\n` +
+        `  4. 文字回复只说一句"已开"或后续问题，**不要复述表格**\n` +
+        `\n` +
+        `**严禁幻觉**：**只有在你这一轮真的调用过 presentTable 之后**才能说"表格已开 / 已经为您打开 / 屏幕上已经展示"。如果你**没有调 presentTable**，就**不要**说类似的话——那是撒谎。如果你只是聊到表格、用户问"刚才那个表格"，没有要求重新生成，就直接回答问题，**不要说"已开"**。规则简单：说"已开"前先看你这次回复有没有真正的 presentTable tool_call。\n` +
+        `\n` +
+        `**为什么不该批量 readEmail**：10 封邮件全文 ~50KB 会撑爆 context，让你的 presentTable 输出又慢又容易出错。snippet 200 字对每封邮件的"最新进展"一栏完全够用。读全文只在用户**明确要求引用具体内容**时才做（"那封说价格的具体多少钱？"这种）。\n` +
+        `**错误流程**：拿完数据用文字 / "1. xxx\\n2. yyy" / markdown 表格输出——禁止。\n` +
+        `**用户后续微调**（"加一列时间"、"隐藏 X"、"按时间排序"、"按 Y 合并"）：**再调一次 presentTable**，传入更新后的 columns / rows。默认会替换当前表格窗口。\n` +
+        `\n` +
         `# 表情标签（最终回复结尾必须输出）\n` +
         `**最终回复**（不再调工具的那一次）说完正文后，在文本最末尾追加一个表情标签 \`<emo>X</emo>\`，X 从下面 8 个里选一个，对应**你这句话此刻的情绪**：\n` +
         `开心 / 害羞 / 无语 / 难过 / 慌张 / 震惊 / 尴尬 / 得意\n` +
@@ -1313,6 +1512,7 @@ export async function runChat(
         readClipboard,
         readWebPage,
         readFile: readFileTool,
+        presentTable,
         ...(cfg.mail.enabled
           ? { listMailFolders, listRecentEmails, readEmail, draftEmailReply }
           : {}),
@@ -1386,7 +1586,15 @@ export async function runChat(
       void evt
     }
 
+    const tStreamStart = Date.now()
+    let firstChunkLogged = false
     for await (const part of result.fullStream) {
+      if (!firstChunkLogged) {
+        firstChunkLogged = true
+        console.log(
+          `[chat] first stream chunk after ${Date.now() - tStreamStart}ms · type=${part.type}`,
+        )
+      }
       // v6 renamed text-delta's payload (textDelta → text) and tool-call /
       // tool-result fields (args → input, result → output).
       switch (part.type) {
@@ -1585,12 +1793,16 @@ export async function runChat(
       }
     }
 
-    // L3 reflection: every Nth turn, distill facts from the recent window.
-    // Fire-and-forget — the user's reply has already been streamed, so
-    // making them wait for reflection would add unnecessary latency. If
-    // the LLM call fails, the next trigger will try again.
+    // Work / companion split. If this turn invoked any tool (email
+    // summary, file read, addTask, etc.) we treat it as a productivity
+    // task. Affinity judgment is gated; reflection routes to the
+    // appropriate track (personal vs work facts).
+    const wasToolTurn = captures.some((c) => c.calls.length > 0)
+
+    // L3 reflection: fires the right track based on turn type. Fire-
+    // and-forget — the user's reply has already been streamed.
     if (memory) {
-      maybeTriggerReflection(memory)
+      maybeTriggerReflection(memory, wasToolTurn)
     }
 
     // Emotion — model bakes its own self-classification at the reply's
@@ -1606,11 +1818,14 @@ export async function runChat(
       )
     }
 
-    // Affinity classifier — fire-and-forget. Always runs (even when a
-    // baked emotion was applied) because affinity is its own task; pass
-    // skipEmotion so it doesn't redundantly call setExpression.
+    // Affinity classifier — fire-and-forget. Skips affinity update when
+    // this was a tool turn (see above); emotion still applies unless a
+    // baked tag already handled it.
     if (assistantText.trim()) {
-      void classifyAndApply(assistantText, userText, { skipEmotion: bakedEmotion !== null })
+      void classifyAndApply(assistantText, userText, {
+        skipEmotion: bakedEmotion !== null,
+        skipAffinity: wasToolTurn,
+      })
     }
 
     localEmit({ type: 'done' })

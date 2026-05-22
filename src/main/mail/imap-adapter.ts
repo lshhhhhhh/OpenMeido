@@ -101,6 +101,28 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
       .slice(0, SNIPPET_LEN)
   }
 
+  /** Look up a body part from imapflow's response Map. When the fetch
+   *  asks for `{key:'TEXT', start:0, maxLength:1024}` the IMAP server
+   *  responds with `BODY[TEXT]<0>` and imapflow's parser stores it
+   *  under the lowercased key with the offset suffix preserved (e.g.
+   *  `text<0>`), NOT under the bare `TEXT` we requested. To handle
+   *  both partial and full fetches with one helper, we scan for any
+   *  entry whose key starts with the lowercased part name. */
+  function getBodyPart(
+    bodyParts: Map<string, Buffer> | undefined,
+    partKey: string,
+  ): Buffer | undefined {
+    if (!bodyParts) return undefined
+    const direct = bodyParts.get(partKey)
+    if (direct) return direct
+    const target = partKey.toLowerCase()
+    for (const [k, v] of bodyParts) {
+      const lk = k.toLowerCase()
+      if (lk === target || lk.startsWith(target + '<')) return v
+    }
+    return undefined
+  }
+
   /**
    * Locate the user's Sent mailbox. Different servers name it differently
    * ("Sent", "Sent Items", "[Gmail]/Sent Mail", "已发送邮件", ...) so we
@@ -305,12 +327,20 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
         if (recent.length === 0) return [] as MailSummary[]
 
         const out: MailSummary[] = []
+        // **C. Partial body fetch.** Pre-2026-05 this was `bodyParts:
+        // ['TEXT']` — server streamed the FULL message body of every
+        // listed email, even though snippet uses only the first ~200
+        // chars. On a 10-email listing with average ~5KB bodies, that's
+        // ~50KB of network for nothing. Now we ask for the first 1024
+        // bytes of TEXT only; extractSnippet still trims to ~200 chars.
+        // imapflow's bodyParts accepts either a string id or an object
+        // {key, start, maxLength} per its API (see node_modules/imapflow).
         for await (const msg of c.fetch(
           recent,
           {
             envelope: true,
             flags: true,
-            bodyParts: ['TEXT'],
+            bodyParts: [{ key: 'TEXT', start: 0, maxLength: 1024 }] as unknown as string[],
             // Pull these two headers so we can correlate replies → parents
             // without re-fetching. Cheap (one extra RFC822 line each).
             headers: ['in-reply-to'],
@@ -322,7 +352,7 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
           const fromStr = from
             ? `${from.name ? `${from.name} ` : ''}<${from.address ?? ''}>`.trim()
             : ''
-          const snippet = extractSnippet(msg.bodyParts?.get('TEXT'))
+          const snippet = extractSnippet(getBodyPart(msg.bodyParts, 'TEXT'))
           // headers in imapflow comes back as a Buffer of the raw RFC822
           // lines. We parse out In-Reply-To with a regex; full-fledged
           // header parsing is overkill for a single line.
@@ -347,10 +377,13 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
       })
 
       // Phase 2 (email-with-context): look up each reply's parent in Sent.
-      // Default ON — user wanted summarizing 10 emails to actually pull in
-      // the ~30 messages of context (10 + their parents). Caller can pass
-      // includeParents:false to skip (e.g. for a "fast list" UI later).
-      if (results.length === 0 || o.includeParents === false) return results
+      // Default OFF (changed 2026-05): per-reply Sent search was the
+      // dominant cost on "总结 10 封邮件" — 500ms-2s per reply, run
+      // serially. Most table / summary use cases don't need paired
+      // "they said / I had said" context — the snippet alone is enough.
+      // Callers explicitly opt in (`includeParents: true`) when paired
+      // context actually matters (e.g. drafting a reply).
+      if (results.length === 0 || o.includeParents !== true) return results
       const needsParent = results.filter((r) => r.inReplyTo)
       if (needsParent.length === 0) return results
       try {
@@ -373,10 +406,16 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
               }
               const parentUid = uids[uids.length - 1]
               if (parentUid === undefined) continue
-              // Fetch envelope + body for the parent summary.
+              // Fetch envelope + partial body for the parent summary —
+              // matches the byte-range optimization on Phase 1.
               const pmsg = await c.fetchOne(
                 String(parentUid),
-                { envelope: true, bodyParts: ['TEXT'] },
+                {
+                  envelope: true,
+                  bodyParts: [
+                    { key: 'TEXT', start: 0, maxLength: 1024 },
+                  ] as unknown as string[],
+                },
                 { uid: true },
               )
               if (!pmsg) {
@@ -388,7 +427,7 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
               const fromStr = from
                 ? `${from.name ? `${from.name} ` : ''}<${from.address ?? ''}>`.trim()
                 : ''
-              const psnippet = extractSnippet(pmsg.bodyParts?.get('TEXT'))
+              const psnippet = extractSnippet(getBodyPart(pmsg.bodyParts, 'TEXT'))
               item.parent = {
                 id: `sent:${parentUid}`,
                 from: fromStr,

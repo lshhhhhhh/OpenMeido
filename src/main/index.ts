@@ -171,24 +171,39 @@ function createWindow(): void {
   })
 
   // Persist the user's manual resize so next launch opens at the same size.
-  // We subtract the sidebar's contribution (when open) so the "natural" width
-  // is what gets saved — otherwise opening the sidebar and then quitting
-  // would lock in a permanently-wider window on next launch.
+  // Two guards prevent drift:
+  //   1. **Boot-event suppression**: Windows DWM nudges transparent +
+  //      frameless windows by a few px on creation (border / shadow
+  //      math). Listening to that initial event would save the nudged
+  //      value back, and each launch would drift further. We ignore
+  //      every resize within the first 2s of window creation — by then
+  //      Windows has settled.
+  //   2. **Debounce**: rapid resize fires ~60/s while dragging. Only
+  //      save 500ms after the user stops, so the disk write doesn't
+  //      thrash and a fast drag doesn't capture intermediate sizes.
+  //
+  // We subtract the sidebar's contribution (when open) so the "natural"
+  // width is what gets saved.
+  const bootAt = Date.now()
+  const BOOT_QUIET_MS = 2000
+  const DEBOUNCE_MS = 500
+  let saveTimer: NodeJS.Timeout | null = null
   win.on('resize', () => {
     if (win.isDestroyed()) return
-    const size = win.getSize()
-    const rawW = size[0] ?? cfg.window.width
-    const h = size[1] ?? cfg.window.height
-    // Clamp w to the minimum the Zod schema allows. Without this, a user
-    // who resizes the window very narrow while sidebar is open could
-    // produce w < 260, which fails configSchema.parse inside setConfig
-    // → the whole config write throws silently → subsequent sidebar
-    // toggles desync from the actual window state ("stuck" sidebar).
-    const w = Math.max(260, rawW - (sidebarOpenInMain ? SIDEBAR_WIDTH : 0))
-    const current = getConfig()
-    if (current.window.width !== w || current.window.height !== h) {
-      setConfig({ ...current, window: { ...current.window, width: w, height: h } })
-    }
+    if (Date.now() - bootAt < BOOT_QUIET_MS) return
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = setTimeout(() => {
+      if (win.isDestroyed()) return
+      const size = win.getSize()
+      const rawW = size[0] ?? cfg.window.width
+      const h = size[1] ?? cfg.window.height
+      // Clamp w to the minimum the Zod schema allows.
+      const w = Math.max(260, rawW - (sidebarOpenInMain ? SIDEBAR_WIDTH : 0))
+      const current = getConfig()
+      if (current.window.width !== w || current.window.height !== h) {
+        setConfig({ ...current, window: { ...current.window, width: w, height: h } })
+      }
+    }, DEBOUNCE_MS)
   })
 
   mainWindow = win
@@ -698,6 +713,11 @@ ipcMain.handle('memory:reflectNow', async () => {
   const svc = getMemoryService()
   if (!svc) return 0
   return svc.reflectOnce()
+})
+ipcMain.handle('memory:reflectWorkNow', async () => {
+  const svc = getMemoryService()
+  if (!svc) return 0
+  return svc.reflectProductivityOnce()
 })
 
 ipcMain.handle('memory:recentToolActivity', async (_event, limit: number = 20) => {

@@ -38,7 +38,7 @@ export interface ReflectionOptions {
 const DEFAULT_WINDOW = 12
 const DEFAULT_RETRIES = 3
 
-const PROMPT_HEADER = `你是桌面伴侣的记忆整理助手。从下面这段最近对话里，提取关于**用户**的稳定事实，输出 JSON。
+const PERSONAL_PROMPT_HEADER = `你是桌面伴侣的记忆整理助手。从下面这段最近对话里，提取关于**用户**的稳定事实，输出 JSON。
 
 规则：
 1. 只提取关于用户本身的客观事实，不要主观判断（×"用户脾气好"，○"用户养了一只猫"）。
@@ -59,15 +59,54 @@ const PROMPT_HEADER = `你是桌面伴侣的记忆整理助手。从下面这段
 
 `
 
+const WORK_PROMPT_HEADER = `你是桌面伴侣的工作上下文整理助手。从下面这段最近的工作交互（用户的任务请求 + 助手的工具调用 + 结果 + 总结）里，提取**当前在跟进的工作项目 / 任务 / 邮件主题**，输出 JSON。
+
+规则：
+1. 提取**短中期**会用到的工作上下文：项目代号、ticket 状态、最近邮件主题、相关人物、正在追踪的问题。这种信息几天到几周内会变。
+2. 不要提取与工作无关的事实（× 用户养了一只猫；○ 用户在跟进 Project-A1）。
+3. 不要提取关于用户本身的稳定属性（× user.profile.name；○ project.Project-A1.status）。
+4. key 用点分层级的全小写英文，按类别组织：
+   - 项目状态：project.<id>.status / project.<id>.context
+   - 邮件话题：email.<topic>.summary / email.from.<sender>.recent
+   - 任务追踪：task.<id>.status / task.<id>.next_step
+5. value 用简短的中文短语（不超过 30 字）。
+6. confidence ∈ [0.0, 1.0]：信息明确 → 0.9-1.0；推断 → 0.5-0.8；不确定 → 不要输出。
+7. 如果工作内容没有值得记下的（纯查询、读完就忘的），输出空数组 []。
+
+输出格式（**只输出 JSON，不要解释**）：
+[
+  {"key": "project.Project-A1.status", "value": "等待 alice 验收，加急", "confidence": 0.9},
+  {"key": "email.from.alice.recent", "value": "SpecX/SpecY 验收", "confidence": 0.85}
+]
+
+或者：{"facts": [ ... 同样格式 ... ]}
+
+`
+
 /**
  * Build the full reflection prompt for a given episode window.
+ * `kind` selects between the personal (relationship facts) and work
+ * (productivity facts) prompt heads — see the two constants above.
  * Exported so callers can preview it (e.g., for debug logging).
  */
-export function buildReflectionPrompt(episodes: Episode[]): string {
-  const block = episodes
-    .map((e) => `[${e.speaker === 'user' ? '用户' : '妹妹'}] ${e.text}`)
-    .join('\n')
-  return `${PROMPT_HEADER}\n最近对话：\n${block}\n`
+export function buildReflectionPrompt(
+  episodes: Episode[],
+  kind: 'personal' | 'work' = 'personal',
+): string {
+  const renderEpisode = (e: Episode): string => {
+    const who =
+      e.speaker === 'user' ? '用户' : e.speaker === 'tool' ? '工具结果' : '助手'
+    const toolHint =
+      e.toolParts && e.toolParts.length > 0
+        ? ` [工具: ${e.toolParts
+            .map((p) => ('toolName' in p ? p.toolName : '?'))
+            .join(',')}]`
+        : ''
+    return `[${who}${toolHint}] ${e.text}`
+  }
+  const block = episodes.map(renderEpisode).join('\n')
+  const header = kind === 'work' ? WORK_PROMPT_HEADER : PERSONAL_PROMPT_HEADER
+  return `${header}\n最近${kind === 'work' ? '工作交互' : '对话'}：\n${block}\n`
 }
 
 /**
@@ -131,13 +170,13 @@ export function parseReflectionResponse(raw: string): NewFact[] | null {
 export async function reflect(
   episodes: Episode[],
   extract: ReflectionExtractor,
-  opts: ReflectionOptions = {},
+  opts: ReflectionOptions & { kind?: 'personal' | 'work' } = {},
 ): Promise<NewFact[] | null> {
   const windowSize = opts.windowSize ?? DEFAULT_WINDOW
   const maxRetries = opts.maxRetries ?? DEFAULT_RETRIES
   const window = episodes.slice(-windowSize)
   if (window.length === 0) return []
-  const prompt = buildReflectionPrompt(window)
+  const prompt = buildReflectionPrompt(window, opts.kind ?? 'personal')
   let lastErr: unknown
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -165,9 +204,10 @@ export async function reflect(
 export function renderFactsBlock(
   facts: { key: string; value: string; confidence: number }[],
   minConfidence = 0.5,
+  header = '[关于用户的已知事实]',
 ): string {
   const usable = facts.filter((f) => f.confidence >= minConfidence)
   if (usable.length === 0) return ''
   const lines = usable.map((f) => `- ${f.key}: ${f.value}`).join('\n')
-  return `[关于用户的已知事实]\n${lines}\n`
+  return `${header}\n${lines}\n`
 }

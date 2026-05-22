@@ -1921,6 +1921,13 @@ function MessageBubble({
   // Speaker button: only on assistant bubbles, only when TTS is enabled,
   // and only when the message has text (skip empty placeholder bubbles).
   const showSpeaker = !isUser && ttsEnabled && message.text.trim().length > 0
+  // Work-turn marker. An assistant bubble with non-empty toolCalls is the
+  // result of a productivity turn — the chat backend's `wasToolTurn`
+  // gate applies, so this exchange does NOT move affinity and is filtered
+  // out of long-term reflection. Surfacing a small 💼 next to the bubble
+  // makes that boundary visible to the user (so they don't worry their
+  // work chatter is "training her" the way personal chat is).
+  const isWorkTurn = !isUser && (message.toolCalls?.length ?? 0) > 0
   // Strip markdown formatting from assistant text before display — the
   // model sometimes emits `**bold**` / `- bullets` / `# headers` and we
   // don't render markdown, so those would show as raw asterisks/hashes.
@@ -1976,13 +1983,33 @@ function MessageBubble({
               border: 'none',
               background: 'transparent',
               cursor: 'pointer',
-              fontSize: 12,
+              // Bumped from 12/0.5 — at 12px + 50% opacity on a
+              // rgba(0,0,0,0.05) bubble the speaker emoji was almost
+              // invisible. 14px + 90% opacity lands "obviously a button"
+              // without dominating the bubble.
+              fontSize: 14,
               verticalAlign: 'middle',
-              opacity: speaking ? 1 : 0.5,
+              opacity: speaking ? 1 : 0.9,
             }}
           >
             {speaking ? '⏹' : '🔊'}
           </button>
+        )}
+        {isWorkTurn && (
+          <span
+            title="工作内容 · 不计入好感度 / 长期记忆"
+            style={{
+              marginLeft: 4,
+              fontSize: 14,
+              opacity: 0.75,
+              cursor: 'help',
+              verticalAlign: 'middle',
+              userSelect: 'none',
+            }}
+            aria-label="work-turn"
+          >
+            💼
+          </span>
         )}
         {message.toolCalls && message.toolCalls.length > 0 && (
           <div style={{ marginTop: 4, fontSize: 10, color: '#888' }}>

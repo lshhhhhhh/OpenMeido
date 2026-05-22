@@ -59,6 +59,10 @@ export interface MemoryService {
   getUserName(): Promise<string | null>
   factsBlock(minConfidence?: number): Promise<string>
   reflectOnce(): Promise<number>
+  /** Productivity-track reflection — extracts work context (project
+   *  codes, email topics) from tool-using episodes. Writes to facts
+   *  table with category='work'. */
+  reflectProductivityOnce(): Promise<number>
   clearFacts(): Promise<number>
   /** Manual override for a single fact — used by the Settings UI 🗑.
    *  Deletes the row and its full supersession chain for the same key. */
@@ -222,11 +226,14 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     },
 
     async listFacts(limit = 200) {
-      return adapter.listActiveFacts(persona(), limit)
+      // UI surface — personal only. Work memory is internal context for
+      // the chat model; surfacing it in the 记忆 panel would clutter
+      // with stale ticket numbers (see types.ts FactCategory comment).
+      return adapter.listActiveFacts(persona(), limit, 'personal')
     },
 
     async listFactsFor(personaId, limit = 200) {
-      return adapter.listActiveFacts(personaId, limit)
+      return adapter.listActiveFacts(personaId, limit, 'personal')
     },
 
     async countFor(personaId) {
@@ -254,8 +261,16 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
     async factsBlock(minConfidence) {
       try {
-        const facts = await adapter.listActiveFacts(persona(), 200)
-        return renderFactsBlock(facts, minConfidence)
+        // Inject BOTH tracks into the chat model's system prompt — the
+        // model needs the user's personal context (name, pets) AND
+        // their current work context (active projects, recent emails)
+        // to feel continuous across turns. Two separate blocks so the
+        // model can tell them apart.
+        const personal = await adapter.listActiveFacts(persona(), 200, 'personal')
+        const work = await adapter.listActiveFacts(persona(), 50, 'work')
+        const personalBlock = renderFactsBlock(personal, minConfidence)
+        const workBlock = renderFactsBlock(work, minConfidence, '[最近工作上下文]')
+        return [personalBlock, workBlock].filter((b) => b).join('\n')
       } catch (err) {
         reportError('factsBlock', err)
         return ''
@@ -263,19 +278,27 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     },
 
     async reflectOnce() {
+      // Personal reflection: extracts stable user facts from the
+      // conversational episodes (chat only, no tool turns).
       if (!reflectExtractor) return 0
       if (reflecting) return 0
       reflecting = true
       try {
         const cfg = getConfig()
         const window = Math.max(cfg.memory.recentN, 12)
-        const recent = await adapter.recent(persona(), window)
-        const facts = await reflect(recent, reflectExtractor)
+        const raw = await adapter.recent(persona(), window * 3)
+        const conversational = raw.filter(
+          (e) =>
+            e.speaker !== 'tool' &&
+            (!e.toolParts || e.toolParts.length === 0),
+        )
+        const recent = conversational.slice(-window)
+        const facts = await reflect(recent, reflectExtractor, { kind: 'personal' })
         if (!facts || facts.length === 0) return 0
         let upserted = 0
         for (const f of facts) {
           try {
-            await adapter.upsertFact(persona(), f)
+            await adapter.upsertFact(persona(), f, 'personal')
             upserted += 1
           } catch (err) {
             reportError('upsertFact', err)
@@ -284,6 +307,64 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
         return upserted
       } catch (err) {
         reportError('reflectOnce', err)
+        return 0
+      } finally {
+        reflecting = false
+      }
+    },
+
+    /**
+     * Productivity reflection: extracts short/medium-term work context
+     * (project codes, ticket status, email topics) from tool-using
+     * episodes. Runs separately from personal reflection so a single
+     * call doesn't have to juggle two extraction styles. Writes to
+     * facts table with category='work'.
+     */
+    async reflectProductivityOnce() {
+      if (!reflectExtractor) return 0
+      if (reflecting) return 0
+      reflecting = true
+      try {
+        const cfg = getConfig()
+        const window = Math.max(cfg.memory.recentN, 12)
+        const raw = await adapter.recent(persona(), window * 3)
+        // Inverse of personal filter: keep tool rows + assistant rows
+        // that carried tool calls. Their text + tool data IS the work
+        // context. Also include the user message that triggered the
+        // tool (which is the assistant's immediately-prior user row);
+        // simplest heuristic: include user rows too — they're cheap
+        // signal ("总结邮件" tells the LLM what to look for).
+        const workish = raw.filter(
+          (e) =>
+            e.speaker === 'tool' ||
+            (e.toolParts && e.toolParts.length > 0) ||
+            e.speaker === 'user',
+        )
+        const recent = workish.slice(-window)
+        if (recent.length === 0) return 0
+        // Only proceed if there's at least one tool-touching episode
+        // in the window — otherwise we'd be running a work-reflection
+        // pass over pure conversation, which yields garbage.
+        const hasToolContent = recent.some(
+          (e) =>
+            e.speaker === 'tool' ||
+            (e.toolParts && e.toolParts.length > 0),
+        )
+        if (!hasToolContent) return 0
+        const facts = await reflect(recent, reflectExtractor, { kind: 'work' })
+        if (!facts || facts.length === 0) return 0
+        let upserted = 0
+        for (const f of facts) {
+          try {
+            await adapter.upsertFact(persona(), f, 'work')
+            upserted += 1
+          } catch (err) {
+            reportError('upsertFact', err)
+          }
+        }
+        return upserted
+      } catch (err) {
+        reportError('reflectProductivityOnce', err)
         return 0
       } finally {
         reflecting = false
