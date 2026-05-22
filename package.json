@@ -16,6 +16,7 @@
     "test:reflection-parse": "node --import tsx tools/smoke-reflection-parse.mjs",
     "test:openai-compat-body": "node --import tsx tools/smoke-openai-compat-body.mjs",
     "test:mime-snippet": "node --import tsx tools/smoke-mime-snippet.mjs",
+    "test:memory-negation-e2e": "electron tools/smoke-memory-negation-e2e.mjs",
     "test:notif-parse": "node --import tsx tools/smoke-notif-parse.mjs",
     "test:text-filter": "node --import tsx tools/smoke-text-filter.mjs",
     "test:task-adapter": "electron tools/smoke-task-adapter.mjs",
