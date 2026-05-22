@@ -63,6 +63,15 @@ export interface MemoryService {
    *  codes, email topics) from tool-using episodes. Writes to facts
    *  table with category='work'. */
   reflectProductivityOnce(): Promise<number>
+  /** Persisted reflection counters (cross-restart). Returns the
+   *  current counts; service consumers should call `bumpReflectionCounter`
+   *  rather than write directly. */
+  getReflectionCounters(): Promise<{ personal: number; work: number }>
+  /** Increment the right counter and persist. Returns 'personal' /
+   *  'work' if the threshold was hit (and counter reset), null
+   *  otherwise. Chat layer fires the matching reflectXxxOnce() when
+   *  this returns non-null. */
+  bumpReflectionCounter(wasToolTurn: boolean): Promise<'personal' | 'work' | null>
   clearFacts(): Promise<number>
   /** Manual override for a single fact — used by the Settings UI 🗑.
    *  Deletes the row and its full supersession chain for the same key. */
@@ -279,7 +288,10 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
     async reflectOnce() {
       // Personal reflection: extracts stable user facts from the
-      // conversational episodes (chat only, no tool turns).
+      // conversational episodes (chat only, no tool turns). Feeds the
+      // currently-known personal facts back into the prompt so the
+      // model only emits NEW or CONTRADICTING facts — preventing the
+      // "near-duplicate keys" drift (`user.name` vs `user.profile.name`).
       if (!reflectExtractor) return 0
       if (reflecting) return 0
       reflecting = true
@@ -293,7 +305,12 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
             (!e.toolParts || e.toolParts.length === 0),
         )
         const recent = conversational.slice(-window)
-        const facts = await reflect(recent, reflectExtractor, { kind: 'personal' })
+        const existing = await adapter.listActiveFacts(persona(), 200, 'personal')
+        const existingFactsBlock = renderFactsBlock(existing, 0.5, '')
+        const facts = await reflect(recent, reflectExtractor, {
+          kind: 'personal',
+          existingFactsBlock,
+        })
         if (!facts || facts.length === 0) return 0
         let upserted = 0
         for (const f of facts) {
@@ -351,7 +368,12 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
             (e.toolParts && e.toolParts.length > 0),
         )
         if (!hasToolContent) return 0
-        const facts = await reflect(recent, reflectExtractor, { kind: 'work' })
+        const existing = await adapter.listActiveFacts(persona(), 50, 'work')
+        const existingFactsBlock = renderFactsBlock(existing, 0.5, '')
+        const facts = await reflect(recent, reflectExtractor, {
+          kind: 'work',
+          existingFactsBlock,
+        })
         if (!facts || facts.length === 0) return 0
         let upserted = 0
         for (const f of facts) {
@@ -369,6 +391,37 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       } finally {
         reflecting = false
       }
+    },
+
+    async getReflectionCounters() {
+      return adapter.getReflectionCounters(persona())
+    },
+
+    async bumpReflectionCounter(wasToolTurn) {
+      // Thresholds duplicated from chat.ts's module-level constants
+      // (REFLECTION_EVERY_N_TURNS / WORK_REFLECTION_EVERY_N_TURNS).
+      // Keeping the policy in the service so platforms other than the
+      // electron chat host can reuse it.
+      const PERSONAL_THRESHOLD = 5
+      const WORK_THRESHOLD = 3
+      const p = persona()
+      const cur = await adapter.getReflectionCounters(p)
+      if (wasToolTurn) {
+        const next = cur.work + 1
+        if (next >= WORK_THRESHOLD) {
+          await adapter.setReflectionCounters(p, cur.personal, 0)
+          return 'work'
+        }
+        await adapter.setReflectionCounters(p, cur.personal, next)
+        return null
+      }
+      const next = cur.personal + 1
+      if (next >= PERSONAL_THRESHOLD) {
+        await adapter.setReflectionCounters(p, 0, cur.work)
+        return 'personal'
+      }
+      await adapter.setReflectionCounters(p, next, cur.work)
+      return null
     },
 
     async clearFacts() {

@@ -628,7 +628,14 @@ export function backgroundFor(
   // Default room art for all personas. Vertical orientation reads better
   // in the portrait-shaped window than the original horizontal stock
   // photos. User can override per-persona via Settings → 人物 → 导入图片.
-  return '/background/room_vertical.png'
+  //
+  // **Relative path on purpose.** In dev, the Vite server serves
+  // index.html at `/` so `/background/...` works. In packaged, the
+  // renderer loads via `file://.../out/renderer/index.html` and a
+  // leading `/` resolves to the *filesystem* root — which is empty,
+  // hence the black-screen-on-install bug shipped in v0.0.29. Relative
+  // `./background/...` resolves correctly under both protocols.
+  return './background/room_vertical.png'
 }
 
 /**

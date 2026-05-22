@@ -94,6 +94,24 @@ export interface Episode {
 export type FactCategory = 'personal' | 'work'
 
 /**
+ * Cross-persona visibility for a fact.
+ *
+ *   'shared'  — applies to the user regardless of which persona is
+ *               active. Things-about-the-user (name, pets, hobbies,
+ *               work role, current projects) are the same person no
+ *               matter which character they chat with. Default for
+ *               new facts.
+ *
+ *   'persona' — visible only under the persona_id stored on the row.
+ *               Use for genuinely persona-specific things (an in-joke
+ *               nickname only 大小姐 uses, etc). Default for legacy
+ *               rows (pre-v0.0.30 migration) so the upgrade doesn't
+ *               surprise users by merging knowledge across characters
+ *               they intentionally separated.
+ */
+export type FactScope = 'shared' | 'persona'
+
+/**
  * L3 fact — LLM-distilled stable knowledge about the user. Lives in its
  * own table so we can inject the full set into every system prompt cheaply,
  * without vector retrieval. Mutable: when a new fact contradicts an old
@@ -107,6 +125,12 @@ export interface Fact {
   createdAt: string
   updatedAt: string
   category: FactCategory
+  scope: FactScope
+  /** ISO 8601 timestamp after which this fact is filtered out of reads.
+   *  null = never expires (current behavior for personal facts). Work
+   *  facts get this set on write so stale project/ticket state doesn't
+   *  pollute the prompt forever. */
+  expiresAt: string | null
   /** JSON array of episode ids this fact was distilled from. */
   sourceEpisodeIds: number[]
   /** If set, this fact has been superseded by fact with this id (i.e. inactive). */

@@ -87,11 +87,21 @@ const WORK_PROMPT_HEADER = `你是桌面伴侣的工作上下文整理助手。�
  * Build the full reflection prompt for a given episode window.
  * `kind` selects between the personal (relationship facts) and work
  * (productivity facts) prompt heads — see the two constants above.
+ *
+ * `existingFactsBlock`, when provided, is fed in BEFORE the episode
+ * window with a "you already know these" framing. Without it, the
+ * model re-extracts the same facts every cycle (sometimes with
+ * slightly different keys: `user.name` vs `user.profile.name`) and
+ * the facts table accumulates near-duplicates that supersession
+ * can't merge. With it, the model is steered to only emit NEW or
+ * CONTRADICTING facts.
+ *
  * Exported so callers can preview it (e.g., for debug logging).
  */
 export function buildReflectionPrompt(
   episodes: Episode[],
   kind: 'personal' | 'work' = 'personal',
+  existingFactsBlock?: string,
 ): string {
   const renderEpisode = (e: Episode): string => {
     const who =
@@ -106,7 +116,10 @@ export function buildReflectionPrompt(
   }
   const block = episodes.map(renderEpisode).join('\n')
   const header = kind === 'work' ? WORK_PROMPT_HEADER : PERSONAL_PROMPT_HEADER
-  return `${header}\n最近${kind === 'work' ? '工作交互' : '对话'}：\n${block}\n`
+  const knownBlock = existingFactsBlock?.trim()
+    ? `\n[已知事实 — 不要重复抽取这些，只输出新增或矛盾的]\n${existingFactsBlock.trim()}\n`
+    : ''
+  return `${header}${knownBlock}\n最近${kind === 'work' ? '工作交互' : '对话'}：\n${block}\n`
 }
 
 /**
@@ -170,13 +183,20 @@ export function parseReflectionResponse(raw: string): NewFact[] | null {
 export async function reflect(
   episodes: Episode[],
   extract: ReflectionExtractor,
-  opts: ReflectionOptions & { kind?: 'personal' | 'work' } = {},
+  opts: ReflectionOptions & {
+    kind?: 'personal' | 'work'
+    existingFactsBlock?: string
+  } = {},
 ): Promise<NewFact[] | null> {
   const windowSize = opts.windowSize ?? DEFAULT_WINDOW
   const maxRetries = opts.maxRetries ?? DEFAULT_RETRIES
   const window = episodes.slice(-windowSize)
   if (window.length === 0) return []
-  const prompt = buildReflectionPrompt(window, opts.kind ?? 'personal')
+  const prompt = buildReflectionPrompt(
+    window,
+    opts.kind ?? 'personal',
+    opts.existingFactsBlock,
+  )
   let lastErr: unknown
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {

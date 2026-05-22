@@ -64,8 +64,9 @@ import type { Episode } from '../core/memory/types.js'
  * Electron session. Resets to 0 on app restart, which is fine — the
  * reflection prompt looks at the recent episode window, not at the counter.
  */
-const REFLECTION_EVERY_N_TURNS = 5
-const WORK_REFLECTION_EVERY_N_TURNS = 3
+// Reflection thresholds moved to service.bumpReflectionCounter (v0.0.30).
+// Counters are now persisted per-persona in sqlite so short-session
+// users (open app → ask once → close) also accumulate progress.
 
 /**
  * One-shot text cleaner for persistence — strips `<think>` blocks and stray
@@ -118,41 +119,45 @@ async function applyBakedEmotion(emotion: Emotion, _personaId: string): Promise<
   })
 }
 
-let turnsSinceReflection = 0
-let workTurnsSinceReflection = 0
-function maybeTriggerReflection(
+/**
+ * Bump the persona-scoped reflection counter and fire the matching
+ * reflection pass if the threshold was hit. Service owns both the
+ * counter persistence and the threshold policy; chat just plumbs the
+ * `wasToolTurn` signal.
+ *
+ * Fire-and-forget: the user's reply has already streamed, no point
+ * making them wait for L3 extraction.
+ */
+async function maybeTriggerReflection(
   memory: {
+    bumpReflectionCounter(wasToolTurn: boolean): Promise<'personal' | 'work' | null>
     reflectOnce(): Promise<number>
     reflectProductivityOnce(): Promise<number>
   },
   wasToolTurn: boolean,
-): void {
-  // Two counters, two tracks. A chat turn ticks the personal counter; a
-  // tool turn ticks the work counter. They never cross-fire — preserves
-  // the strict isolation between relationship-line and productivity-line
-  // memory promised by the dual-track design.
-  if (wasToolTurn) {
-    workTurnsSinceReflection += 1
-    if (workTurnsSinceReflection >= WORK_REFLECTION_EVERY_N_TURNS) {
-      workTurnsSinceReflection = 0
-      void memory
-        .reflectProductivityOnce()
-        .then((n) => {
-          if (n > 0) console.log(`[memory] work reflection upserted ${n} fact(s)`)
-        })
-        .catch((err) => console.warn('[memory] work reflection threw:', err))
-    }
+): Promise<void> {
+  let triggered: 'personal' | 'work' | null
+  try {
+    triggered = await memory.bumpReflectionCounter(wasToolTurn)
+  } catch (err) {
+    console.warn('[memory] bumpReflectionCounter failed:', err)
     return
   }
-  turnsSinceReflection += 1
-  if (turnsSinceReflection < REFLECTION_EVERY_N_TURNS) return
-  turnsSinceReflection = 0
-  void memory
-    .reflectOnce()
-    .then((n) => {
-      if (n > 0) console.log(`[memory] personal reflection upserted ${n} fact(s)`)
-    })
-    .catch((err) => console.warn('[memory] personal reflection threw:', err))
+  if (triggered === 'personal') {
+    void memory
+      .reflectOnce()
+      .then((n) => {
+        if (n > 0) console.log(`[memory] personal reflection upserted ${n} fact(s)`)
+      })
+      .catch((err) => console.warn('[memory] personal reflection threw:', err))
+  } else if (triggered === 'work') {
+    void memory
+      .reflectProductivityOnce()
+      .then((n) => {
+        if (n > 0) console.log(`[memory] work reflection upserted ${n} fact(s)`)
+      })
+      .catch((err) => console.warn('[memory] work reflection threw:', err))
+  }
 }
 
 // setLive2DExpression tool was removed in favor of post-reply emotion
@@ -1802,7 +1807,9 @@ export async function runChat(
     // L3 reflection: fires the right track based on turn type. Fire-
     // and-forget — the user's reply has already been streamed.
     if (memory) {
-      maybeTriggerReflection(memory, wasToolTurn)
+      void maybeTriggerReflection(memory, wasToolTurn).catch((err) =>
+        console.warn('[memory] reflection trigger threw:', err),
+      )
     }
 
     // Emotion — model bakes its own self-classification at the reply's

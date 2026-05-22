@@ -270,6 +270,31 @@ export function openSqliteMemory(
     )
     console.log('[memory] migrated: added facts.category (default personal)')
   }
+  // Work fact expiry (v0.0.30): work-track context goes stale within
+  // weeks (project status / ticket state). Without TTL, factsBlock
+  // grows monotonically and old "等待 alice 验收" lingers in system
+  // prompt forever. Personal facts stay NULL (no expiry). Existing
+  // rows have NULL → treated as never-expiring on read.
+  if (!factCols.some((c) => c.name === 'expires_at')) {
+    db.exec('ALTER TABLE facts ADD COLUMN expires_at TEXT')
+    console.log('[memory] migrated: added facts.expires_at')
+  }
+  // Shared scope (v0.0.30): facts about the user (name, pets, projects)
+  // are the same person regardless of which persona is talking — they
+  // should not be re-learned every time the user switches character.
+  // 'shared' means cross-persona-visible; 'persona' means
+  // persona-specific (e.g. an in-joke nickname). New writes default to
+  // 'shared'; existing rows stay 'persona' so the upgrade doesn't
+  // surprise users by suddenly merging knowledge across characters
+  // they may have intentionally kept separate. New facts coming in
+  // after this migration will be shared (per scopeFor() rules).
+  if (!factCols.some((c) => c.name === 'scope')) {
+    db.exec("ALTER TABLE facts ADD COLUMN scope TEXT NOT NULL DEFAULT 'persona'")
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_facts_scope_active ON facts(scope, category) WHERE superseded_by IS NULL",
+    )
+    console.log("[memory] migrated: added facts.scope (existing rows kept as 'persona')")
+  }
 
   // persona_affinity new columns for milestone + weekly review (v0.0.26).
   // Seed last_milestone to the band the user is currently at — so we
@@ -310,6 +335,23 @@ export function openSqliteMemory(
       'ALTER TABLE persona_affinity ADD COLUMN presence_bumps_today INTEGER NOT NULL DEFAULT 0',
     )
     console.log('[memory] migrated: added persona_affinity.presence_bumps_today')
+  }
+  // Reflection counter persistence (v0.0.30). Module-level counters in
+  // chat.ts reset on every process restart, so users in short-session
+  // patterns (open app → ask one question → close) never reach the
+  // 5-turn threshold and reflection never fires. Persist per-persona
+  // so progress survives restarts.
+  if (!affCols.some((c) => c.name === 'personal_turns_since_reflection')) {
+    db.exec(
+      'ALTER TABLE persona_affinity ADD COLUMN personal_turns_since_reflection INTEGER NOT NULL DEFAULT 0',
+    )
+    console.log('[memory] migrated: added persona_affinity.personal_turns_since_reflection')
+  }
+  if (!affCols.some((c) => c.name === 'work_turns_since_reflection')) {
+    db.exec(
+      'ALTER TABLE persona_affinity ADD COLUMN work_turns_since_reflection INTEGER NOT NULL DEFAULT 0',
+    )
+    console.log('[memory] migrated: added persona_affinity.work_turns_since_reflection')
   }
 
   // ---- Vec0 setup (unchanged from pre-persona schema; episode JOIN
@@ -397,52 +439,78 @@ export function openSqliteMemory(
     'SELECT COUNT(*) AS c FROM episodes WHERE archived = 0 AND persona_id = ?',
   )
 
-  // ---- L3 facts prepared statements (persona-scoped, category-aware) ----
+  // ---- L3 facts prepared statements ----
   // Same-key supersession is scoped per CATEGORY: a 'work' fact for key
   // X never supersedes a 'personal' fact for the same key. Letting them
   // collide would let work memory eat personal memory whenever they
   // share a key (rare but conceivable, e.g. `user.role`).
-  const selectActiveByKey = db.prepare<[string, string, string]>(
-    `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
+  //
+  // Lookup semantics: `selectActiveFacts` returns BOTH (a) facts scoped
+  // to the active persona AND (b) facts scoped 'shared' (which apply
+  // to the user regardless of persona). `selectActiveByKey` searches
+  // both buckets too — supersession of a shared fact happens from any
+  // persona that's currently talking with the user.
+  //
+  // Work fact TTL: rows whose `expires_at` is in the past are filtered
+  // out of all read paths. Bumping confidence on an existing fact also
+  // extends the expiry (see upsertFact below).
+  const factCommonCols = `id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
             source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy,
-            category
+            category, scope, expires_at AS expiresAt`
+  const selectActiveByKey = db.prepare<[string, string, string]>(
+    `SELECT ${factCommonCols}
      FROM facts
-     WHERE persona_id = ? AND key = ? AND category = ? AND superseded_by IS NULL`,
+     WHERE (persona_id = ?1 OR scope = 'shared')
+       AND key = ?2 AND category = ?3 AND superseded_by IS NULL
+     ORDER BY scope = 'shared' DESC, id DESC
+     LIMIT 1`,
   )
   const insertFact = db.prepare<
-    [string, string, string, number, string, string, string, string]
+    [string, string, string, number, string, string, string, string, string, string | null]
   >(
-    `INSERT INTO facts (persona_id, key, value, confidence, created_at, updated_at, source_episode_ids, category)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO facts (persona_id, key, value, confidence, created_at, updated_at, source_episode_ids, category, scope, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
-  const bumpFact = db.prepare<[number, string, number]>(
-    `UPDATE facts SET confidence = ?, updated_at = ? WHERE id = ?`,
+  const bumpFact = db.prepare<[number, string, string | null, number]>(
+    `UPDATE facts SET confidence = ?, updated_at = ?, expires_at = ? WHERE id = ?`,
   )
   const supersedeFact = db.prepare<[number, number]>(
     `UPDATE facts SET superseded_by = ? WHERE id = ?`,
   )
   const selectFactById = db.prepare<[number]>(
-    `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
-            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy,
-            category
-     FROM facts WHERE id = ?`,
+    `SELECT ${factCommonCols} FROM facts WHERE id = ?`,
   )
   const selectActiveFacts = db.prepare<[string, string, number]>(
-    `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
-            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy,
-            category
+    `SELECT ${factCommonCols}
      FROM facts
-     WHERE persona_id = ? AND category = ? AND superseded_by IS NULL
+     WHERE (persona_id = ?1 OR scope = 'shared')
+       AND category = ?2
+       AND superseded_by IS NULL
+       AND (expires_at IS NULL OR expires_at > datetime('now'))
      ORDER BY updated_at DESC
-     LIMIT ?`,
+     LIMIT ?3`,
   )
   const selectFactHistory = db.prepare<[string, string]>(
-    `SELECT id, key, value, confidence, created_at AS createdAt, updated_at AS updatedAt,
-            source_episode_ids AS sourceEpisodeIdsJson, superseded_by AS supersededBy,
-            category
+    `SELECT ${factCommonCols}
      FROM facts
-     WHERE persona_id = ? AND key = ?
+     WHERE (persona_id = ?1 OR scope = 'shared') AND key = ?2
      ORDER BY id ASC`,
+  )
+
+  // ---- Reflection counter prepared statements ----
+  const selectReflectionCounters = db.prepare<[string]>(
+    `SELECT personal_turns_since_reflection AS personalTurns,
+            work_turns_since_reflection AS workTurns
+     FROM persona_affinity WHERE persona_id = ?`,
+  )
+  const upsertReflectionCounters = db.prepare<[string, number, number]>(
+    `INSERT INTO persona_affinity
+       (persona_id, score, last_updated, last_reason,
+        personal_turns_since_reflection, work_turns_since_reflection)
+     VALUES (?1, 0, datetime('now'), NULL, ?2, ?3)
+     ON CONFLICT(persona_id) DO UPDATE SET
+       personal_turns_since_reflection = excluded.personal_turns_since_reflection,
+       work_turns_since_reflection = excluded.work_turns_since_reflection`,
   )
 
   // ---- Affinity prepared statements ----
@@ -497,6 +565,8 @@ export function openSqliteMemory(
     sourceEpisodeIdsJson: string
     supersededBy: number | null
     category: string
+    scope: string
+    expiresAt: string | null
   }
   const rowToFact = (r: FactRow): Fact => ({
     id: r.id,
@@ -505,7 +575,9 @@ export function openSqliteMemory(
     confidence: r.confidence,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
-    category: (r.category === 'work' ? 'work' : 'personal'),
+    category: r.category === 'work' ? 'work' : 'personal',
+    scope: r.scope === 'shared' ? 'shared' : 'persona',
+    expiresAt: r.expiresAt ?? null,
     sourceEpisodeIds: safeParseIntArray(r.sourceEpisodeIdsJson),
     supersededBy: r.supersededBy,
   })
@@ -625,14 +697,43 @@ export function openSqliteMemory(
       const now = new Date().toISOString()
       const sourceIds = JSON.stringify(input.sourceEpisodeIds ?? [])
       const inputConf = input.confidence ?? 1.0
+      // Scope inference: by default everything we extract goes to
+      // 'shared' so 大小姐 doesn't have to relearn that the user has a
+      // cat after 女仆 already knew it. The exception is keys that
+      // represent persona-specific context (in-joke nicknames, the
+      // way THIS character refers to the user). Add prefixes here as
+      // they come up.
+      const PERSONA_SCOPED_PREFIXES = ['user.nicknames.', 'user.preferred_address']
+      const scope: 'shared' | 'persona' = PERSONA_SCOPED_PREFIXES.some((p) =>
+        input.key.startsWith(p),
+      )
+        ? 'persona'
+        : 'shared'
+      // Work-fact TTL: 14 days from write. Bumping confidence on the
+      // same key+value also extends the expiry — so as long as the
+      // model keeps confirming a fact in reflection, it stays alive.
+      const WORK_TTL_MS = 14 * 24 * 60 * 60 * 1000
+      const expiresAt =
+        category === 'work'
+          ? new Date(Date.now() + WORK_TTL_MS).toISOString()
+          : null
       const existing = selectActiveByKey.get(personaId, input.key, category) as
         | FactRow
         | undefined
       const txn = db.transaction((): Fact => {
         if (existing && existing.value === input.value) {
           const newConf = Math.min(1.0, (existing.confidence + inputConf) / 2 + 0.05)
-          bumpFact.run(newConf, now, existing.id)
-          return rowToFact({ ...existing, confidence: newConf, updatedAt: now })
+          // Extend expiry on confirmation (only relevant for work facts;
+          // personal facts pass null through and stay non-expiring).
+          const extendedExpiry =
+            existing.expiresAt && category === 'work' ? expiresAt : existing.expiresAt
+          bumpFact.run(newConf, now, extendedExpiry, existing.id)
+          return rowToFact({
+            ...existing,
+            confidence: newConf,
+            updatedAt: now,
+            expiresAt: extendedExpiry,
+          })
         }
         const ins = insertFact.run(
           personaId,
@@ -643,6 +744,8 @@ export function openSqliteMemory(
           now,
           sourceIds,
           category,
+          scope,
+          expiresAt,
         )
         const newId = Number(ins.lastInsertRowid)
         if (existing) supersedeFact.run(newId, existing.id)
@@ -661,10 +764,33 @@ export function openSqliteMemory(
       return (selectFactHistory.all(personaId, key) as FactRow[]).map(rowToFact)
     },
 
+    async getReflectionCounters(personaId) {
+      ensureOpen()
+      const row = selectReflectionCounters.get(personaId) as
+        | { personalTurns: number; workTurns: number }
+        | undefined
+      return {
+        personal: row?.personalTurns ?? 0,
+        work: row?.workTurns ?? 0,
+      }
+    },
+
+    async setReflectionCounters(personaId, personalTurns, workTurns) {
+      ensureOpen()
+      upsertReflectionCounters.run(personaId, personalTurns, workTurns)
+    },
+
     async clearFacts(personaId) {
       ensureOpen()
+      // Wipe persona-scoped facts under this persona AND every shared
+      // fact (shared facts apply across personas, so clearing makes no
+      // sense to scope to one). Match the user's mental model: "清空
+      // 记忆" means "she forgets everything about me", not "she forgets
+      // only what she-as-this-character extracted".
       const result = db
-        .prepare<[string]>('DELETE FROM facts WHERE persona_id = ?')
+        .prepare<[string]>(
+          "DELETE FROM facts WHERE persona_id = ? OR scope = 'shared'",
+        )
         .run(personaId)
       return Number(result.changes)
     },
@@ -677,19 +803,23 @@ export function openSqliteMemory(
       // behind as dead weight in the table.
       const row = selectFactById.get(factId) as FactRow | undefined
       if (!row) return false
-      // Guard cross-persona: don't let one persona's UI nuke another's
-      // facts even if id is guessed correctly.
-      const owns = db
+      // Guard: the row must be visible from this persona's perspective —
+      // either persona-scoped to this persona, or shared (in which case
+      // any persona can delete; the user is deleting their own fact).
+      const visible = db
         .prepare<[number, string]>(
-          'SELECT 1 FROM facts WHERE id = ? AND persona_id = ?',
+          "SELECT 1 FROM facts WHERE id = ? AND (persona_id = ? OR scope = 'shared')",
         )
         .get(factId, personaId)
-      if (!owns) return false
+      if (!visible) return false
+      // Wipe the whole supersession chain for that key. Match the
+      // visibility rule above (don't accidentally delete some OTHER
+      // persona's persona-scoped row that happens to share a key).
       const result = db
         .prepare<[string, string]>(
-          'DELETE FROM facts WHERE persona_id = ? AND key = ?',
+          "DELETE FROM facts WHERE key = ? AND (persona_id = ? OR scope = 'shared')",
         )
-        .run(personaId, row.key)
+        .run(row.key, personaId)
       return Number(result.changes) > 0
     },
 
@@ -747,14 +877,23 @@ export function openSqliteMemory(
     async deletePersona(personaId) {
       ensureOpen()
       const txn = db.transaction(() => {
-        // Episodes (cascades to vec rows)
+        // Episodes (cascades to vec rows) — always persona-specific.
         const ids = db
           .prepare<[string]>('SELECT id FROM episodes WHERE persona_id = ?')
           .all(personaId) as { id: number }[]
         const delVec = db.prepare('DELETE FROM episodes_vec WHERE episode_id = ?')
         for (const { id } of ids) delVec.run(BigInt(id))
         const epDel = db.prepare<[string]>('DELETE FROM episodes WHERE persona_id = ?').run(personaId)
-        const factDel = db.prepare<[string]>('DELETE FROM facts WHERE persona_id = ?').run(personaId)
+        // Facts: drop only the persona-scoped rows owned by THIS
+        // persona. Shared facts describe the user themselves and must
+        // survive — deleting 大小姐 shouldn't make the maid forget the
+        // user's cat. (Behavioral change from v0.0.29; before scope
+        // existed, every fact was persona-scoped.)
+        const factDel = db
+          .prepare<[string]>(
+            "DELETE FROM facts WHERE persona_id = ? AND scope = 'persona'",
+          )
+          .run(personaId)
         const affDel = db
           .prepare<[string]>('DELETE FROM persona_affinity WHERE persona_id = ?')
           .run(personaId)

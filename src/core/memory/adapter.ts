@@ -171,6 +171,19 @@ export interface MemoryAdapter {
     state: { date: string | null; minutesAccrued: number; bumpsToday: number },
   ): Promise<void>
 
+  /** Read reflection turn counters for this persona. Persisted across
+   *  process restarts so short-session users still accumulate toward
+   *  the reflection threshold. */
+  getReflectionCounters(personaId: string): Promise<{ personal: number; work: number }>
+
+  /** Persist reflection turn counters. Called after every chat turn
+   *  with the post-increment values. */
+  setReflectionCounters(
+    personaId: string,
+    personalTurns: number,
+    workTurns: number,
+  ): Promise<void>
+
   /** Record that a weekly review fired right now for this persona.
    *  Engine uses this + a 7-day check to decide when next to fire. */
   touchLastReview(personaId: string): Promise<void>
