@@ -1,6 +1,6 @@
 {
   "name": "openmeido",
-  "version": "0.0.33",
+  "version": "0.0.34",
   "description": "Productivity assistant + Live2D companion for non-programmers",
   "author": "lsh <laishaoheng1996@gmail.com>",
   "main": "./out/main/index.js",
@@ -32,6 +32,7 @@
     "test:combined-classifier": "node --env-file=.env --import tsx tools/smoke-combined-classifier.mjs",
     "test:baked-emotion": "node --env-file=.env --import tsx tools/smoke-baked-emotion.mjs",
     "test:table-window": "electron tools/smoke-table-window.mjs",
+    "test:table-multitab": "electron tools/smoke-table-multitab.mjs",
     "test:list-inbox": "electron tools/smoke-list-inbox.mjs",
     "test:table-e2e": "electron tools/smoke-table-e2e.mjs",
     "test:tier-conversation": "node --env-file=.env --import tsx tools/smoke-tier-conversation.mjs",

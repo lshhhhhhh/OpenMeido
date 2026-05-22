@@ -8,16 +8,19 @@
  * tool results and can be regenerated on demand. Avoiding a "saved
  * reports" feature keeps the design simple and matches the productivity
  * mental model: tables are *current snapshots*, not durable assets.
+ *
+ * Multi-tab (v0.0.34+): one BrowserWindow can host multiple tables as
+ * tabs so the user can compare side-by-side reports without juggling
+ * windows. The main process owns the tab list per window; on
+ * `addAsTab`, the new payload is pushed and the renderer re-renders.
+ * The renderer is still self-contained vanilla JS — tabs travel in
+ * the URL hash like the single-table payload always has.
  */
 
 import { app, BrowserWindow, shell } from 'electron'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// ESM-safe __dirname. electron-vite injects this for the bundled
-// main, but the unit smoke test loads this file via tsx-as-ESM where
-// the injection doesn't happen — so we derive it from import.meta.url
-// to work in both contexts.
 const __filename = fileURLToPath(import.meta.url)
 const __dirnameLocal = dirname(__filename)
 
@@ -26,31 +29,39 @@ export interface TablePayload {
   columns: string[]
   /**
    * Each row is an ARRAY of cell values in the same order as `columns`.
-   * Position-based (like CSV / spreadsheet) — not keyed by column
-   * name. This sidesteps the entire "model must use the right key
-   * name" failure mode: there are no keys to get wrong.
+   * Position-based (like CSV / spreadsheet) — not keyed by column name.
+   * Sidesteps the "model must use the right key name" failure mode.
    */
   rows: (string | number | null | undefined)[][]
 }
 
-export interface OpenTableOptions {
-  /** Force a fresh window even when a previous table window is still
-   *  open. Default false → updates the most recent live table window
-   *  in place (single-table editing UX). Pass true when the model
-   *  detects "新开一个" / "另存一份" intent. */
-  newWindow?: boolean
+/** Wire format for the renderer. Single-tab payloads are still
+ *  accepted (the renderer treats them as `{tabs: [payload]}`). */
+interface TabsBundle {
+  tabs: TablePayload[]
+  /** Which tab the renderer should show on load. Defaults to last. */
+  activeIndex?: number
 }
 
-/** Most recent table window. Used to update-in-place when the user
- *  iterates on the same table ("再加一列时间", "隐藏 X"). Cleared on
- *  the window's `closed` event. */
-let latestTableWindow: BrowserWindow | null = null
+export interface OpenTableOptions {
+  /** Spawn a fresh BrowserWindow even when one exists. Use for "另存一份"
+   *  intents where the user wants a totally separate window stream. */
+  newWindow?: boolean
+  /** Append this payload as a new tab to the existing window (if any).
+   *  When no window exists, behaves like a normal open (single tab).
+   *  Mutually exclusive with `newWindow` — `newWindow` wins. */
+  addAsTab?: boolean
+}
 
-/** Hand-off: encode the payload into URL hash. Hash (not query) so
- *  Electron's protocol handlers don't mangle it and so it doesn't end
- *  up in any access log. */
-function buildUrl(payload: TablePayload): string {
-  const json = JSON.stringify(payload)
+/** Most recent table window + the tab list it currently shows. The
+ *  tab list lives in the main process so we can append on `addAsTab`
+ *  without round-tripping through the renderer. Cleared on window
+ *  `closed`. */
+let latestTableWindow: BrowserWindow | null = null
+let latestTabs: TablePayload[] = []
+
+function buildUrl(bundle: TabsBundle): string {
+  const json = JSON.stringify(bundle)
   const b64 = Buffer.from(json, 'utf-8').toString('base64')
   const hash = `#data=${encodeURIComponent(b64)}`
   const base = process.env.ELECTRON_RENDERER_URL
@@ -58,54 +69,69 @@ function buildUrl(payload: TablePayload): string {
     : `file://${join(__dirnameLocal, '../renderer/table.html')}`
   const url = `${base}${hash}`
   console.log(
-    `[table-host] buildUrl base="${base}" payloadBytes=${json.length} hashBytes=${hash.length}`,
+    `[table-host] buildUrl tabs=${bundle.tabs.length} payloadBytes=${json.length} hashBytes=${hash.length}`,
   )
   return url
 }
 
+/** Generic title used when no single tab's title can be promoted to
+ *  the window chrome (e.g. multi-tab case where each tab has its own). */
+function windowTitleFor(bundle: TabsBundle): string {
+  if (bundle.tabs.length === 1) {
+    const t = bundle.tabs[0]?.title
+    return t ? `报表: ${t}` : '报表'
+  }
+  return `报表 (${bundle.tabs.length} 个)`
+}
+
 /**
- * Open OR update a table window showing the given payload.
+ * Open / update / append a table window.
  *
- * Default behavior — if a table window opened in this session is
- * still alive, reload it with the new payload. This implements the
- * "single edited table" UX: user says "再加一列时间", the same window
- * just refreshes. Pass `newWindow: true` to bypass this and force a
- * fresh window (for "另存一份" / "新开对比" intents).
+ * Decision matrix:
+ *   newWindow=true               → always spawn a fresh window (1 tab)
+ *   addAsTab=true, window alive  → append payload to existing tabs
+ *   addAsTab=true, no window     → open new window with this single tab
+ *   default, window alive        → replace existing tabs with [payload]
+ *   default, no window           → open new window with this single tab
  */
 export function openTableWindow(payload: TablePayload, opts: OpenTableOptions = {}): void {
   console.log(
     `[table-host] openTableWindow rows=${payload.rows.length} cols=${payload.columns.length} ` +
-      `newWindow=${Boolean(opts.newWindow)} latestAlive=${
-        latestTableWindow && !latestTableWindow.isDestroyed() ? 'yes' : 'no'
-      }`,
+      `newWindow=${Boolean(opts.newWindow)} addAsTab=${Boolean(opts.addAsTab)} ` +
+      `latestAlive=${latestTableWindow && !latestTableWindow.isDestroyed() ? 'yes' : 'no'}`,
   )
 
   // Empty-rows guard. Models sometimes call presentTable twice — once with
-  // data, then a second time with rows=[] as a "confirmation" or before
-  // the model has actually assembled the rows. Without this guard the
-  // replace-in-place logic would overwrite the good first table with the
-  // empty second call. Bail early; the existing window keeps its content.
+  // data, then a second time with rows=[] as a "confirmation". Without this
+  // guard the replace-in-place logic would overwrite the good first table.
   if (payload.rows.length === 0) {
     console.warn('[table-host] refusing to open / replace with empty rows')
     return
   }
-  // Update-in-place path.
-  if (
-    !opts.newWindow &&
-    latestTableWindow &&
-    !latestTableWindow.isDestroyed()
-  ) {
-    console.log('[table-host] reusing existing window — loadURL with new hash')
-    latestTableWindow.setTitle(payload.title ? `报表: ${payload.title}` : '报表')
-    void latestTableWindow.loadURL(buildUrl(payload))
+
+  const alive = latestTableWindow && !latestTableWindow.isDestroyed()
+
+  // Update-in-place path (default or addAsTab) — reuse the window.
+  if (!opts.newWindow && alive && latestTableWindow) {
+    const nextTabs = opts.addAsTab ? [...latestTabs, payload] : [payload]
+    latestTabs = nextTabs
+    const bundle: TabsBundle = { tabs: nextTabs, activeIndex: nextTabs.length - 1 }
+    console.log(
+      `[table-host] reusing window — ${opts.addAsTab ? 'append tab' : 'replace tabs'} ` +
+        `(now ${nextTabs.length} tabs)`,
+    )
+    latestTableWindow.setTitle(windowTitleFor(bundle))
+    void latestTableWindow.loadURL(buildUrl(bundle))
     latestTableWindow.focus()
     return
   }
-  console.log('[table-host] creating new BrowserWindow')
 
+  console.log('[table-host] creating new BrowserWindow')
   const focused = BrowserWindow.getFocusedWindow()
   const parentBounds = focused?.getBounds()
   const offset = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed()).length * 24
+  const initialTabs: TablePayload[] = [payload]
+  const bundle: TabsBundle = { tabs: initialTabs, activeIndex: 0 }
   const win = new BrowserWindow({
     width: 920,
     height: 600,
@@ -113,28 +139,19 @@ export function openTableWindow(payload: TablePayload, opts: OpenTableOptions = 
     minHeight: 300,
     x: parentBounds ? parentBounds.x + 40 + offset : undefined,
     y: parentBounds ? parentBounds.y + 60 + offset : undefined,
-    title: payload.title ? `报表: ${payload.title}` : '报表',
+    title: windowTitleFor(bundle),
     backgroundColor: '#1e1f29',
-    // Tables are read-mostly; auto-hide menu is friendlier than the
-    // companion window's frameless transparent shell.
     autoHideMenuBar: true,
     webPreferences: {
-      // No preload for the table window — it's self-contained vanilla
-      // JS that needs no IPC. Smaller attack surface and faster load.
       sandbox: true,
       contextIsolation: true,
     },
   })
 
-  // External links (e.g. if a row value happens to be a URL the user
-  // clicks) open in the real browser, not inside this window.
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
     return { action: 'deny' }
   })
-
-  // Diagnostic — surface load failures (404, file-not-found) loudly so
-  // "window didn't open" can be triaged from the log without DevTools.
   win.webContents.on('did-fail-load', (_e, code, desc, validatedURL) => {
     console.warn(
       `[table-host] did-fail-load code=${code} desc="${desc}" url="${validatedURL}"`,
@@ -144,20 +161,22 @@ export function openTableWindow(payload: TablePayload, opts: OpenTableOptions = 
     console.log('[table-host] window did-finish-load')
   })
 
-  // Track for update-in-place. Clear when the user closes it so the
-  // next `presentTable` call opens fresh instead of trying to write to
-  // a destroyed BrowserWindow handle.
+  // Track for update-in-place + tab append. `opts.newWindow` spawns a
+  // fresh window but we still promote it to `latestTableWindow` so the
+  // NEXT presentTable call (without newWindow) updates this one.
   latestTableWindow = win
+  latestTabs = initialTabs
   win.on('closed', () => {
-    if (latestTableWindow === win) latestTableWindow = null
+    if (latestTableWindow === win) {
+      latestTableWindow = null
+      latestTabs = []
+    }
   })
 
-  void win.loadURL(buildUrl(payload))
+  void win.loadURL(buildUrl(bundle))
 }
 
-/** Test seam. Closes every open table window (matched by title prefix
- *  since we don't track them in a registry). Called nowhere yet — kept
- *  for the eventual "close all reports" UI / test cleanup. */
+/** Test seam. */
 export function closeAllTableWindows(): void {
   if (!app) return
   for (const w of BrowserWindow.getAllWindows()) {

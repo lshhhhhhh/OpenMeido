@@ -740,7 +740,8 @@ const presentTable = tool({
     '**典型场景**：\n' +
     '- "总结最近 10 个邮件" / "把邮件做成表格" → 读完后调一次本工具\n' +
     '- "再加一列发送时间" / "隐藏 Uber Eats 相关的" / "按时间排序" → **重新**调一次，传更新后的 columns/rows，默认替换当前窗口\n' +
-    '- "另开一份对比" → `newWindow: true`\n' +
+    '- "再做一个 X 的表 / 加一个 tab 对比 / 也帮我把 Y 列出来" → `addAsTab: true`（在同一个窗口里加一个 tab，用户可以左右切换对照）\n' +
+    '- "另开一个完全独立的窗口" → `newWindow: true`\n' +
     '\n' +
     '**邮件汇总专项规则**：\n' +
     '1. **同线程折叠**：来回讨论同一主题的邮件合并为一行。10 封邮件可能合成 3-10 行。\n' +
@@ -775,14 +776,25 @@ const presentTable = tool({
       .describe(
         '数组的数组。每个 row 是一个数组，**长度必须 = columns.length**，第 i 个元素对应 columns[i] 那一列。例：columns=["序号","发件人"] → rows=[[1,"alice"],[2,"bob"]]。',
       ),
+    addAsTab: z
+      .boolean()
+      .optional()
+      .describe(
+        'true = 把这个表作为新 tab 加到当前表格窗口，让用户能在同一个窗口里左右切换对照；' +
+          '默认 false。优先用 addAsTab 表达"加一个表用来对比"，而不是 newWindow——单窗口多 tab 比多窗口更整洁。',
+      ),
     newWindow: z
       .boolean()
       .optional()
-      .describe('true = 新开窗口；默认 false = 替换当前窗口。'),
+      .describe(
+        'true = 重新开一个完全独立的表格窗口（不与当前窗口共用 tab）。' +
+          '默认 false = 替换当前窗口的内容。仅当用户明说"另开窗口 / 单独开"才用。',
+      ),
   }),
-  execute: async ({ title, columns, rows, newWindow }) => {
+  execute: async ({ title, columns, rows, addAsTab, newWindow }) => {
     console.log(
-      `[presentTable] called title="${title}" cols=${columns.length} rows=${rows.length} newWindow=${Boolean(newWindow)}`,
+      `[presentTable] called title="${title}" cols=${columns.length} rows=${rows.length} ` +
+        `addAsTab=${Boolean(addAsTab)} newWindow=${Boolean(newWindow)}`,
     )
 
     // Position-based schema means there's no key matching to fail. The
@@ -804,14 +816,21 @@ const presentTable = tool({
     }
 
     try {
-      openTableWindow({ title, columns, rows }, { newWindow: Boolean(newWindow) })
+      openTableWindow(
+        { title, columns, rows },
+        { newWindow: Boolean(newWindow), addAsTab: Boolean(addAsTab) },
+      )
       console.log(`[presentTable] openTableWindow returned ok`)
       return {
         ok: true,
         title,
         columnCount: columns.length,
         rowCount: rows.length,
-        opened: newWindow ? 'new-window' : 'updated-or-new',
+        opened: newWindow
+          ? 'new-window'
+          : addAsTab
+            ? 'added-as-tab'
+            : 'updated-or-new',
       }
     } catch (err) {
       console.warn('[presentTable] failed:', err)

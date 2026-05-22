@@ -13,6 +13,8 @@
       --muted: #888;
       --accent: #7ab8ff;
       --header-bg: #2d2e3c;
+      --tab-bg: #20212c;
+      --tab-active-bg: #2d2e3c;
     }
     html, body {
       margin: 0;
@@ -28,6 +30,53 @@
       display: flex;
       flex-direction: column;
     }
+    #tabbar {
+      display: none;
+      flex: 0 0 auto;
+      background: var(--tab-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 0 6px;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+    #tabbar.show { display: block; }
+    .tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 240px;
+      padding: 8px 10px;
+      border-right: 1px solid var(--border);
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--muted);
+      user-select: none;
+    }
+    .tab:hover { color: var(--text); background: rgba(255,255,255,0.025); }
+    .tab.active {
+      color: var(--text);
+      background: var(--tab-active-bg);
+      border-bottom-color: var(--accent);
+    }
+    .tab-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 200px;
+    }
+    .tab-close {
+      flex: 0 0 auto;
+      width: 16px;
+      height: 16px;
+      line-height: 14px;
+      text-align: center;
+      border-radius: 50%;
+      font-size: 11px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .tab-close:hover { color: var(--text); background: rgba(255,255,255,0.08); }
     header {
       padding: 10px 14px;
       border-bottom: 1px solid var(--border);
@@ -113,6 +162,7 @@
   </style>
 </head>
 <body>
+  <div id="tabbar"></div>
   <header>
     <div>
       <h1 id="title">报表</h1>
@@ -133,13 +183,16 @@
 
 <script>
   /**
-   * Pure-vanilla table renderer. Receives data via URL hash:
-   *   #data=<base64-encoded JSON of {title, columns, rows}>
+   * Multi-tab vanilla renderer. Receives data via URL hash:
+   *   #data=<base64-encoded JSON of {tabs: [{title, columns, rows}], activeIndex?}>
    *
-   * Kept dependency-free so this page loads instantly without the
-   * full renderer bundle (Pixi, React, Live2D etc.) that the main
-   * companion window pulls in.
+   * Backward compat: a bare {title, columns, rows} (no tabs key) is
+   * still accepted and rendered as a single-tab bundle.
    */
+
+  let tabs = []
+  let activeIndex = 0
+
   function decodeData() {
     const hash = window.location.hash || ''
     const m = hash.match(/data=([^&]+)/)
@@ -153,43 +206,78 @@
     }
   }
 
-  function render(data) {
+  function normalize(raw) {
+    if (!raw) return { tabs: [], activeIndex: 0 }
+    if (Array.isArray(raw.tabs)) {
+      const idx = typeof raw.activeIndex === 'number' ? raw.activeIndex : raw.tabs.length - 1
+      return { tabs: raw.tabs, activeIndex: Math.max(0, Math.min(idx, raw.tabs.length - 1)) }
+    }
+    if (Array.isArray(raw.columns) && Array.isArray(raw.rows)) {
+      return { tabs: [raw], activeIndex: 0 }
+    }
+    return { tabs: [], activeIndex: 0 }
+  }
+
+  function renderTabBar() {
+    const bar = document.getElementById('tabbar')
+    bar.innerHTML = ''
+    if (tabs.length < 2) {
+      bar.classList.remove('show')
+      return
+    }
+    bar.classList.add('show')
+    tabs.forEach((t, i) => {
+      const el = document.createElement('div')
+      el.className = 'tab' + (i === activeIndex ? ' active' : '')
+      el.title = t.title || '报表'
+      const label = document.createElement('span')
+      label.className = 'tab-label'
+      label.textContent = t.title || `表 ${i + 1}`
+      const close = document.createElement('span')
+      close.className = 'tab-close'
+      close.textContent = '×'
+      close.title = '关闭这个 tab'
+      close.addEventListener('click', (e) => {
+        e.stopPropagation()
+        closeTab(i)
+      })
+      el.appendChild(label)
+      el.appendChild(close)
+      el.addEventListener('click', () => switchTo(i))
+      bar.appendChild(el)
+    })
+  }
+
+  function renderActive() {
+    const empty = document.getElementById('empty')
+    const tbl = document.getElementById('tbl')
+    const theadRow = document.getElementById('thead-row')
+    const tbody = document.getElementById('tbody')
+    theadRow.innerHTML = ''
+    tbody.innerHTML = ''
+    empty.style.display = 'none'
+    tbl.style.display = ''
+
+    const data = tabs[activeIndex]
     if (!data || !Array.isArray(data.columns) || !Array.isArray(data.rows)) {
-      document.getElementById('empty').style.display = 'block'
-      document.getElementById('tbl').style.display = 'none'
+      empty.style.display = 'block'
+      tbl.style.display = 'none'
+      document.getElementById('title').textContent = '报表'
+      document.getElementById('meta').textContent = ''
+      document.title = '报表'
       return
     }
     document.title = data.title ? `报表: ${data.title}` : '报表'
     document.getElementById('title').textContent = data.title || '报表'
     document.getElementById('meta').textContent = `${data.rows.length} 行 · ${data.columns.length} 列`
 
-    const theadRow = document.getElementById('thead-row')
     for (const col of data.columns) {
       const th = document.createElement('th')
       th.textContent = col
       theadRow.appendChild(th)
     }
-
-    // Build a case- and whitespace-insensitive key map for each row so
-    // mild model sloppiness ("Subject" vs "subject", "发件人" vs "发件人 ")
-    // doesn't render every cell as empty. The strict exact-match lookup
-    // still wins when present.
-    //
-    // Catastrophic-mismatch fallback: when columns and row keys share
-    // ZERO overlap (e.g. columns=[序号,发件人,...] but row keys are
-    // English snake_case like [y_val,sender_info,...]), use POSITIONAL
-    // alignment — columns[i] ↔ row's i-th value in insertion order.
-    // Modern JS engines preserve object insertion order so this maps
-    // sensibly to whatever the model output. Ugly but unblocks users
-    // when the LLM ignores our "key 必须 = column 名" rule.
-    // rows is an array-of-arrays — purely positional. row[i]
-    // corresponds to columns[i]. No key matching, no fallback needed.
-    // (Switched from {key: value} objects in v0.0.29 — the key-naming
-    // contract was unreliable: models would output English keys
-    // against Chinese column names, or shove escape chars into keys,
-    // and the table would render empty / jumbled. Positional is
-    // foolproof: there are no keys to get wrong.)
-    const tbody = document.getElementById('tbody')
+    // rows is an array-of-arrays — purely positional. row[i] corresponds
+    // to columns[i]. See chat.ts presentTable for why this is the contract.
     for (const row of data.rows) {
       const tr = document.createElement('tr')
       for (let i = 0; i < data.columns.length; i++) {
@@ -207,6 +295,27 @@
     }
   }
 
+  function switchTo(i) {
+    if (i < 0 || i >= tabs.length) return
+    activeIndex = i
+    renderTabBar()
+    renderActive()
+  }
+
+  function closeTab(i) {
+    if (tabs.length <= 1) {
+      // Last tab — close the whole window. Leaving an empty report
+      // open is worse UX than just dismissing the window.
+      window.close()
+      return
+    }
+    tabs.splice(i, 1)
+    if (activeIndex >= tabs.length) activeIndex = tabs.length - 1
+    else if (activeIndex > i) activeIndex -= 1
+    renderTabBar()
+    renderActive()
+  }
+
   function toTSV(data) {
     const head = data.columns.join('\t')
     const body = data.rows
@@ -215,7 +324,6 @@
           .map((_, i) => {
             const v = Array.isArray(r) ? r[i] : undefined
             const s = v === undefined || v === null ? '' : String(v)
-            // TSV: replace tabs/newlines so each row stays one line.
             return s.replace(/\t/g, ' ').replace(/\r?\n/g, ' ')
           })
           .join('\t'),
@@ -260,23 +368,13 @@
     return (s || 'report').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)
   }
 
-  // Wrap the DOM-clearing render so we can re-call it on hash changes
-  // (Electron's loadURL with same path + new hash counts as a same-doc
-  // navigation; the script does NOT re-execute, so without this listener
-  // a "refine this table" follow-up would leave the old DOM in place
-  // and the user sees no visual change).
-  let data
-  const fullRender = () => {
-    const empty = document.getElementById('empty')
-    const tbl = document.getElementById('tbl')
-    const theadRow = document.getElementById('thead-row')
-    const tbody = document.getElementById('tbody')
-    theadRow.innerHTML = ''
-    tbody.innerHTML = ''
-    empty.style.display = 'none'
-    tbl.style.display = ''
-    data = decodeData()
-    render(data)
+  function fullRender() {
+    const decoded = decodeData()
+    const bundle = normalize(decoded)
+    tabs = bundle.tabs
+    activeIndex = bundle.activeIndex
+    renderTabBar()
+    renderActive()
   }
   fullRender()
   window.addEventListener('hashchange', () => {
@@ -285,6 +383,7 @@
   })
 
   document.getElementById('copy').addEventListener('click', async (e) => {
+    const data = tabs[activeIndex]
     if (!data) return
     try {
       await navigator.clipboard.writeText(toTSV(data))
@@ -302,14 +401,22 @@
   })
 
   document.getElementById('csv').addEventListener('click', () => {
+    const data = tabs[activeIndex]
     if (!data) return
     download(safeFilename(data.title) + '.csv', toCSV(data))
   })
 
-  // Esc closes the window — small UX nicety since this is a satellite
-  // window users open many of and want to dismiss quickly.
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') window.close()
+    // Ctrl+Tab / Ctrl+Shift+Tab cycle through tabs (when ≥2 exist).
+    if (tabs.length >= 2 && e.ctrlKey && e.key === 'Tab') {
+      e.preventDefault()
+      switchTo(
+        e.shiftKey
+          ? (activeIndex - 1 + tabs.length) % tabs.length
+          : (activeIndex + 1) % tabs.length,
+      )
+    }
   })
 </script>
 </body>
