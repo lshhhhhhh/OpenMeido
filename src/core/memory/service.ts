@@ -71,7 +71,7 @@ export interface MemoryService {
    *  'work' if the threshold was hit (and counter reset), null
    *  otherwise. Chat layer fires the matching reflectXxxOnce() when
    *  this returns non-null. */
-  bumpReflectionCounter(wasToolTurn: boolean): Promise<'personal' | 'work' | null>
+  bumpReflectionCounter(turnType: 'personal' | 'work' | 'neutral'): Promise<'personal' | 'work' | null>
   clearFacts(): Promise<number>
   /** Manual override for a single fact — used by the Settings UI 🗑.
    *  Deletes the row and its full supersession chain for the same key. */
@@ -270,16 +270,11 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
     async factsBlock(minConfidence) {
       try {
-        // Inject BOTH tracks into the chat model's system prompt — the
-        // model needs the user's personal context (name, pets) AND
-        // their current work context (active projects, recent emails)
-        // to feel continuous across turns. Two separate blocks so the
-        // model can tell them apart.
+        // Only inject personal stable long-term facts. Temporary work contexts
+        // are kept parallel in raw conversation episodes (L1 sliding window + L2 vector-recalled memories)
+        // and dynamically retrieved tool outputs, avoiding chronic L3 prompt pollution.
         const personal = await adapter.listActiveFacts(persona(), 200, 'personal')
-        const work = await adapter.listActiveFacts(persona(), 50, 'work')
-        const personalBlock = renderFactsBlock(personal, minConfidence)
-        const workBlock = renderFactsBlock(work, minConfidence, '[最近工作上下文]')
-        return [personalBlock, workBlock].filter((b) => b).join('\n')
+        return renderFactsBlock(personal, minConfidence)
       } catch (err) {
         reportError('factsBlock', err)
         return ''
@@ -338,89 +333,28 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
      * facts table with category='work'.
      */
     async reflectProductivityOnce() {
-      if (!reflectExtractor) return 0
-      if (reflecting) return 0
-      reflecting = true
-      try {
-        const cfg = getConfig()
-        const window = Math.max(cfg.memory.recentN, 12)
-        const raw = await adapter.recent(persona(), window * 3)
-        // Inverse of personal filter: keep tool rows + assistant rows
-        // that carried tool calls. Their text + tool data IS the work
-        // context. Also include the user message that triggered the
-        // tool (which is the assistant's immediately-prior user row);
-        // simplest heuristic: include user rows too — they're cheap
-        // signal ("总结邮件" tells the LLM what to look for).
-        const workish = raw.filter(
-          (e) =>
-            e.speaker === 'tool' ||
-            (e.toolParts && e.toolParts.length > 0) ||
-            e.speaker === 'user',
-        )
-        const recent = workish.slice(-window)
-        if (recent.length === 0) return 0
-        // Only proceed if there's at least one tool-touching episode
-        // in the window — otherwise we'd be running a work-reflection
-        // pass over pure conversation, which yields garbage.
-        const hasToolContent = recent.some(
-          (e) =>
-            e.speaker === 'tool' ||
-            (e.toolParts && e.toolParts.length > 0),
-        )
-        if (!hasToolContent) return 0
-        const existing = await adapter.listActiveFacts(persona(), 50, 'work')
-        const existingFactsBlock = renderFactsBlock(existing, 0.5, '')
-        const facts = await reflect(recent, reflectExtractor, {
-          kind: 'work',
-          existingFactsBlock,
-        })
-        if (!facts || facts.length === 0) return 0
-        let upserted = 0
-        for (const f of facts) {
-          try {
-            await adapter.upsertFact(persona(), f, 'work')
-            upserted += 1
-          } catch (err) {
-            reportError('upsertFact', err)
-          }
-        }
-        return upserted
-      } catch (err) {
-        reportError('reflectProductivityOnce', err)
-        return 0
-      } finally {
-        reflecting = false
-      }
+      // Work/productivity reflection is completely deprecated and removed (Option B).
+      // All temporary work contexts are maintained parallel in conversational history/episodes.
+      return 0
     },
 
     async getReflectionCounters() {
       return adapter.getReflectionCounters(persona())
     },
 
-    async bumpReflectionCounter(wasToolTurn) {
-      // Thresholds duplicated from chat.ts's module-level constants
-      // (REFLECTION_EVERY_N_TURNS / WORK_REFLECTION_EVERY_N_TURNS).
-      // Keeping the policy in the service so platforms other than the
-      // electron chat host can reuse it.
+    async bumpReflectionCounter(turnType: 'personal' | 'work' | 'neutral') {
       const PERSONAL_THRESHOLD = 5
-      const WORK_THRESHOLD = 3
       const p = persona()
       const cur = await adapter.getReflectionCounters(p)
-      if (wasToolTurn) {
-        const next = cur.work + 1
-        if (next >= WORK_THRESHOLD) {
-          await adapter.setReflectionCounters(p, cur.personal, 0)
-          return 'work'
+      if (turnType === 'personal') {
+        const next = cur.personal + 1
+        if (next >= PERSONAL_THRESHOLD) {
+          await adapter.setReflectionCounters(p, 0, cur.work)
+          return 'personal'
         }
-        await adapter.setReflectionCounters(p, cur.personal, next)
+        await adapter.setReflectionCounters(p, next, cur.work)
         return null
       }
-      const next = cur.personal + 1
-      if (next >= PERSONAL_THRESHOLD) {
-        await adapter.setReflectionCounters(p, 0, cur.work)
-        return 'personal'
-      }
-      await adapter.setReflectionCounters(p, next, cur.work)
       return null
     },
 

@@ -720,6 +720,27 @@ export function openSqliteMemory(
       const existing = selectActiveByKey.get(personaId, input.key, category) as
         | FactRow
         | undefined
+      if (input.value === 'DELETE') {
+        const txn = db.transaction((): Fact => {
+          db.prepare(
+            `DELETE FROM facts WHERE key = ? AND category = ? AND (persona_id = ? OR scope = 'shared')`
+          ).run(input.key, category, personaId)
+          return {
+            id: existing ? -existing.id : -1,
+            key: input.key,
+            value: 'DELETE',
+            confidence: 1.0,
+            createdAt: now,
+            updatedAt: now,
+            category: category === 'work' ? 'work' : 'personal',
+            scope: scope,
+            expiresAt: null,
+            sourceEpisodeIds: input.sourceEpisodeIds ?? [],
+            supersededBy: null,
+          }
+        })
+        return txn()
+      }
       const txn = db.transaction((): Fact => {
         if (existing && existing.value === input.value) {
           const newConf = Math.min(1.0, (existing.confidence + inputConf) / 2 + 0.05)

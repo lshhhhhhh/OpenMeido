@@ -1,8 +1,8 @@
 # OpenMeido 记忆系统设计
 
-最后更新：v0.0.30 (2026-05-21)
+最后更新：v0.0.30 (2026-05-22)
 
-OpenMeido 的"记忆"不是一件东西，而是 **四个独立但配合的子系统**。这份文档梳理它们各自的职责、数据形态、触发时机，以及关键的"工作 / 关系"二分。
+OpenMeido 的"记忆"不是一件东西，而是 **独立但配合的子系统**。这份文档梳理它们各自的职责、数据形态、触发时机，以及关键的"工作 / 关系"二分。
 
 ## 1. 为什么有这么多层
 
@@ -10,54 +10,53 @@ OpenMeido 的"记忆"不是一件东西，而是 **四个独立但配合的子�
 |---|---|---|---|
 | **Episodes** | 短期记忆 | "刚才聊了什么？" | 秒到天 |
 | **Facts (personal)** | 日常记忆 | "她记得我是谁吗？" | 月到年 |
-| **Facts (work)** | 工作上下文 | "她还记得我在跟进哪个项目吗？" | 天到周 |
+| **Facts (work)** | 工作上下文 | *已废弃 (v0.0.30+ Option B)，由并行 Raw Episodic 与 Tool 机制承载* | - |
 | **Affinity** | 好感度 | "我们的关系到什么程度了？" | 持续累积 |
 
-这四层走的物理表不同、抽取通道不同、触发条件不同，**但都通过 `MemoryService` 统一暴露给 chat 层**。
+这些层走的物理表不同、抽取通道不同、触发条件不同，**都通过 `MemoryService` 统一暴露给 chat 层**。自 v0.0.30 (Option B) 起，为了防止 token 膨胀和过期工作信息对日常感情产生慢速污染，**L3 临时工作事实 (category='work') 已经被全面废弃并剥离**，临时工作上下文完全基于 raw episodes 对话轨道与动态 tool 渲染并行重构。
 
 ## 2. 整体数据流
 
 ```
-                          ┌──────────────┐
-   user types message ───▶│  chat.ts     │  runs the agent loop
-                          └──────┬───────┘
-                                 │
-                                 ▼
-                       MemoryService.retrieve()
-                                 │
-                          ┌──────┴──────┐
-                          ▼             ▼
-                    recent episodes  recalled episodes
-                    (SQL by ts)      (vec0 KNN)
-                                 │
-                                 ▼
-                       factsBlock()
-                       ├─ personal facts → [关于用户的已知事实]
-                       └─ work facts     → [最近工作上下文]
-                                 │
-                                 ▼
-                         system prompt
-                                 │
-                         streamText() ──▶ LLM
-                                 │
-                          ┌──────┴──────┐
-                          ▼             ▼
-                      assistant     tool_calls
-                      message       (work turn?)
-                                 │
-                                 ▼
-                       persist episodes (user / assistant / tool)
-                                 │
-                          ┌──────┴──────┐
-                          ▼             ▼
-              maybeTriggerReflection(wasToolTurn)
-                          │             │
-                  personal track    work track
-                  (every 5 turns)   (every 3 work turns)
-                          │             │
-                          ▼             ▼
-                  facts.upsert      facts.upsert
-                  category=personal category=work
+                           ┌──────────────┐
+    user types message ───▶│  chat.ts     │  runs the agent loop
+                           └──────┬───────┘
+                                  │
+                                  ▼
+                        MemoryService.retrieve()
+                                  │
+                           ┌──────┴──────┐
+                           ▼             ▼
+                     recent episodes  recalled episodes
+                     (SQL by ts)      (vec0 KNN)
+                                  │
+                                  ▼
+                        factsBlock()
+                        └─ personal facts → [关于用户的已知事实] *(Only)*
+                                  │
+                                  ▼
+                          system prompt
+                                  │
+                          streamText() ──▶ LLM
+                                  │
+                           ┌──────┴──────┐
+                           ▼             ▼
+                       assistant     tool_calls
+                       message       (classifyTurnType)
+                                  │
+                                  ▼
+                        persist episodes (user / assistant / tool)
+                                  │
+                           ┌──────┴──────┐
+                           ▼             ▼
+               maybeTriggerReflection(turnType)
+                           │
+                   personal track
+                   (every 5 personal turns)
+                           │
+                           ▼
+                   facts.upsert
+                   category=personal
 ```
 
 ## 3. Episodes（短期记忆）
@@ -82,50 +81,38 @@ OpenMeido 的"记忆"不是一件东西，而是 **四个独立但配合的子�
 - `searchByEmbedding(query, k)` —— 用用户当前消息的 embedding 找语义最近的旧 episode（默认 topK=5）
 - 是 reflection 的输入源
 
-**Naive mode**：嵌入模型还没下载时，embedding 全部存空 `Float32Array`，KNN 部分跳过，只用 SQL `recent()`。L1 + L3 仍工作，L2 退化。
+**Naive mode**：嵌入模型还没下载时，embedding 全部存空 `Float32Array`，KNN部分跳过，只用 SQL `recent()`。L1 + L3 仍工作，L2 退化。
 
-## 4. Facts（事实，分两条线）
+## 4. Facts（日常事实）
 
-`facts` 表，单表 schema，靠 `category` 列分轨：
+`facts` 表，单表 schema，靠 `category` 列分轨（但当前仅持久化 `'personal'` 稳定日常记忆，`'work'` 临时工作事实已被全面废弃）：
 
 | 列 | 含义 |
 |---|---|
 | `id` | PK |
 | `persona_id` | 写入时 active 的人物（审计用）|
-| `category` | `'personal'` 或 `'work'` |
+| `category` | `'personal'` (日常记忆) |
 | `scope` | `'shared'`（跨 persona 可见，v0.0.30 起新事实默认）或 `'persona'`（人物专属）|
-| `key` | 点分层级英文，如 `user.profile.name`、`project.A1.status` |
+| `key` | 点分层级英文，如 `user.profile.name` |
 | `value` | 简短中文短语 (≤30 字) |
 | `confidence` | 0-1，新写入时 0.7-1.0 |
-| `expires_at` | ISO timestamp 或 NULL。work facts 写入时 +14 天；同 key+value 命中时顺延；personal facts 永远 NULL |
+| `expires_at` | NULL。日常个人事实永久有效，永不自动过期 |
 | `superseded_by` | 同 key + category 出现新值时指向新行，旧行自动失效 |
 | `source_episode_ids` | JSON，可审计这条事实是从哪几个 episode 抽出来的 |
 
 **Personal facts（日常记忆）**：
 - 命名空间常用：`user.profile.*` / `user.pets.*` / `user.hobbies.*` / `user.work.role`
 - 抽取源：**纯对话**的 episode（过滤掉 `speaker === 'tool'` 和带 `toolParts` 的 assistant 行）
-- 触发：每 5 个**非工具**回合一次
+- 触发：每 5 个**非工具/纯个人**回合一次
 - 展示：Settings → 人物 → 记忆 (有 🗑 单条删除)
 - 注入：`[关于用户的已知事实]` 段进 system prompt
 
-**Work facts（工作上下文）**：
-- 命名空间：`project.<id>.*` / `email.from.<sender>.*` / `task.<id>.*`
-- 抽取源：**有工具调用的** episode（tool 行 + 带 toolParts 的 assistant 行 + 触发它们的 user 行）
-- 触发：每 3 个**工具**回合一次
-- 展示：**不**在 UI 上展示（因为容易过时，怕用户误以为是稳定事实）
-- 注入：`[最近工作上下文]` 段进 system prompt
-
-**为什么分两轨**：
-- 抽取 prompt 完全不同（个人事实重稳定性，工作上下文重时效性）
-- 工作回合的 reflection 不污染日常事实（否则 `project.SH-R202` 会变成"用户特征"）
-- UI 隔离避免用户面对一堆过时 ticket 编号
-
-**双轨实现细节**（`service.reflectOnce` + `reflectProductivityOnce`）：
-- 拉 3× window 量的原始 episode
-- 各自的 filter（personal: 剔除工具行；work: 保留工具行 + 用户行）
-- 各自的 prompt 头（`PERSONAL_PROMPT_HEADER` vs `WORK_PROMPT_HEADER`）
-- 共享 `parseReflectionResponse` 解析器（容忍 fenced / prose 包装）
-- Upsert 时传不同 `category`，supersession 也按 category 隔离
+**Work facts（工作上下文 — 已于 v0.0.30 废弃与移除）**：
+> [!WARNING]
+> 为了防止过时且频繁变动的临时性工作/工单上下文污染模型的长期记忆，并避免过期的 L3 工作事实造成提示词膨胀，系统已在 **v0.0.30** 全面废弃并移除了工作事实轨道（Option B）。
+- **废弃原因**：临时性工作信息（如任务清单、邮件主题、工单状态）具有极高的波动性。用慢速的 LLM Reflection 提取并写入 SQLite 极易导致记忆陈旧滞后，且长期堆积会严重稀释模型的感情人格和注意力。
+- **替代方案**：改为通过 L1/L2 Raw Episodic 对话历史（自然携带了前面的邮件与文件读写记录）和动态 Tool Calling 机制在当前回合的工作上下文中进行即时、并行的拼装与回显，不再生成 L3 临时工作事实。
+- **废弃组件**：`reflectProductivityOnce()` 已经退化为安全占位返回 `0`；`factsBlock()` 中完全不再注入 `[最近工作上下文]` 提示词块。
 
 ## 5. Affinity（好感度）
 
@@ -134,31 +121,30 @@ OpenMeido 的"记忆"不是一件东西，而是 **四个独立但配合的子�
 - `getAffinity(personaId)` → `{ score, lastUpdated, lastReason, lastMilestone, lastReviewAt }`
 - `setAffinity(score, reason)` —— 后处理过 guardrail 的最终分
 - `getPresenceState` / `setPresenceState` —— 持久化"今日通过陪伴累积了多少分"
-- 工作回合**不**进 affinity 判官（`skipAffinity: wasToolTurn`）
+- 工作与中性回合**不**进 affinity 判官，避免被刷分（farming）
 
 引擎在 `src/shared/affinity.ts`（边际递减曲线、rolling median、daily cap）+ `src/main/affinity-host.ts`（wiring）。
 
-## 6. 工作 / 关系的边界
+## 6. 工作 / 关系的边界与分类机制
 
-整个设计的最关键的一条线。判定信号：**这一轮调用了任何工具吗？**
+整个设计的最关键的一条线。为了保证好感度不会因为工作或任务管理回合被 "刷分 (farming)"，同时防止感情线 reflection 被工具行为干扰，OpenMeido 在 **v0.0.30** 中引入了细粒度的 **Turn Classification** 机制。
 
-```typescript
-const wasToolTurn = captures.some((c) => c.calls.length > 0)
-```
+### 分类器 (classifyTurnType)
+系统将每一轮的 Tool 调用划分为三种类型：
+- `'personal'`：未调用任何工具，属于纯日常感情互动。
+- `'work'`：调用了实际工作性质的工具（如：邮件检索 `readEmail`、文件读取 `readFile`、网页抓取与搜索 `google_search`）。
+- `'neutral'`：调用了日常助手/待办类的中性管理工具（如：`addTask`、`listTasks`、`markTaskDone`、`readClipboard`、`presentTable`）。
 
-由此分支的事：
+### 各类型回合行为对比
 
-| 系统 | 工作回合行为 |
-|---|---|
-| Affinity classifier | **跳过**（`skipAffinity: true`）|
-| Personal reflection | **不计入**（episode 被过滤）|
-| Work reflection | 累加这一轮的 episode |
-| Episode persistence | 照常存（聊天历史可回看）|
-| Embedding 向量 | 照常做（语义检索仍能找到）|
-| 表情 classifier | 照常跑（脸还是要表达）|
-| UI 标记 | 气泡上加 💼 |
-
-边角：「今天好累，帮我看下邮件」这种**混合 turn** 会被判为工作，情感信号丢失。当前的接受度判断是 OK 的——纯感情时刻用户一般不夹任务。
+| 模块行为 | `'personal'` (纯感情) | `'work'` (工作任务) | `'neutral'` (待办助手) |
+|---|---|---|---|
+| **Affinity 计算** | **正常应用** | **跳过** (避免刷分) | **跳过** (避免刷分) |
+| **Personal Counter** | **正常累加**并按需触发 | **跳过** (不累加) | **跳过** (不累加) |
+| **UI 💼 标记** | **无标记** | **显示 💼 图标** | **无标记** (隐藏) |
+| **Episode 持久化** | 照常存 | 照常存 | 照常存 |
+| **Embedding 向量** | 照常做 | 照常做 | 照常做 |
+| **表情展现** | 正常变化 | 正常变化 | 正常变化 |
 
 ## 7. Retrieval（chat 上下文组装）
 
@@ -169,10 +155,9 @@ chat.ts 在每轮 streamText 之前做：
 const { recent, recalled } = await memory.retrieve(userText)
 const historyMessages = episodesToMessages([...recalled, ...recent], imageRecallTurns)
 
-// 2. 拉双轨 facts，拼成一个 prompt 段
+// 2. 拉日常 facts，拼成一个 prompt 段
 const factsBlock = await memory.factsBlock()
-// → "[关于用户的已知事实]\n- user.profile.name: 小李\n- user.pets.cat.name: 阿黄\n\n
-//    [最近工作上下文]\n- project.A1.status: 等待验收"
+// → "[关于用户的已知事实]\n- user.profile.name: 小李\n- user.pets.cat.name: 阿黄"
 
 // 3. 拉 affinity → 决定 tier prompt block (生疏/熟络/亲近/默契)
 const affinity = await memory.getAffinity()
@@ -186,34 +171,25 @@ system: `${persona.systemPrompt}\n\n${tierBlock}\n\n${factsBlock}\n[环境]\n${.
 
 ## 8. Reflection 调度
 
-**计数器持久化到 sqlite**（v0.0.30 起，`persona_affinity` 表加了
-`personal_turns_since_reflection` / `work_turns_since_reflection` 两列）。
+**计数器持久化到 sqlite**（`persona_affinity` 表加了 `personal_turns_since_reflection` / `work_turns_since_reflection` 两列，以保持兼容性）。
 
-chat.ts 不再持有计数器，调 `service.bumpReflectionCounter(wasToolTurn)`：
-- 返回 `'personal'` / `'work'` / `null`
-- 触发到阈值就**自动归零** + 返回相应字符串
-- 调用方根据返回值 fire-and-forget 对应的 `reflectXxxOnce()`
+chat.ts 不再持有计数器，调 `service.bumpReflectionCounter(turnType)`：
+- 仅当 `turnType === 'personal'` 时，才会累加 `personal_turns_since_reflection` 计数。
+- 当 `personal` 计数器累加到阈值 `5` 时，**自动归零**并返回 `'personal'`，由 chat 主循环异步触发 `reflectOnce()`。
+- 对于 `'work'` 与 `'neutral'` 等非日常回合，`bumpReflectionCounter` 不进行计数，直接返回 `null`，从而保证了日常个人事实抽取的纯粹与稳定。
 
 ```typescript
-async function maybeTriggerReflection(memory, wasToolTurn) {
-  const triggered = await memory.bumpReflectionCounter(wasToolTurn)
-  if (triggered === 'personal') void memory.reflectOnce()
-  else if (triggered === 'work') void memory.reflectProductivityOnce()
+async function maybeTriggerReflection(memory, turnType) {
+  const triggered = await memory.bumpReflectionCounter(turnType)
+  if (triggered === 'personal') {
+    void memory.reflectOnce()
+  }
 }
 ```
 
-**为什么持久化**：模块级变量在进程重启时归零。短会话用户（开 app → 问一句 → 关掉）
-每次都从 0 数 → 永远碰不到 5 次门槛 → reflection 从不触发 →
-`listFacts` 永远空。这是用户在 v0.0.29 之前实际遇到的 bug。
+**为什么持久化**：模块级变量在进程重启时归零。短会话用户（开 app → 问一句 → 关掉）每次都从 0 数 → 永远碰不到 5 次门槛 → reflection 从不触发 → `listFacts` 永远空。这是用户在 v0.0.29 之前实际遇到的 bug。
 
-两个计数器（personal / work）互不串扰。一个真正的工作回合**只**喂 work counter，不影响 personal cadence。
-
-**Reflection prompt 看已知事实**（v0.0.30 起）：`reflectOnce` / `reflectProductivityOnce`
-在调用 LLM 前先 `listActiveFacts(category)`，把现有事实拼成
-`[已知事实 — 不要重复抽取这些，只输出新增或矛盾的]` 块塞进 prompt。
-没有这一步时，模型每次都从零思考"用户是谁"，结果产生
-`user.name` / `user.profile.name` / `user.real_name` 一堆近义重复，
-supersession 救不了（必须完全同 key 才触发）。
+**Reflection prompt 看已知事实**（v0.0.30 起）：`reflectOnce` 在调用 LLM 前先 `listActiveFacts('personal')`，把现有事实拼成 `[已知事实 — 不要重复抽取这些，只输出新增或矛盾的]` 块塞进 prompt。没有这一步时，模型每次都从零思考"用户是谁"，结果产生 `user.name` / `user.profile.name` / `user.real_name` 一堆近义重复，supersession 救不了（必须完全同 key 才触发）。
 
 ## 9. Persona 隔离（v0.0.30 起 scope 化）
 
@@ -260,10 +236,10 @@ src/main/
 
 ## 12. 已知限制 / 边角
 
-- **混合 turn（既聊天又调工具）**被当工作回合处理，情感信号丢失。可接受。
+- **混合 turn（既聊天又调工具）**被当工作或待办回合处理，情感信号丢失。可接受。
 - **Reflection 是 fire-and-forget**，失败只 console.warn，下次再试。无 retry 队列。
 - **Affinity classifier 在 chat 路径之外的触发**（greeting / proactive）也跑，但 `userText=''` → 不会 apply affinity。
-- **wasToolTurn 判定过粗**：任何工具调用都算工作。`addTask("提醒喝水")` 是生活管理但被标 work 跳过 affinity。未来可按 tool name 分 `{email, file, web} = work` vs `{addTask, listTasks} = neutral`。
+- **wasToolTurn 判定过粗 (已解决)**：在 v0.0.30 (Option B) 中已通过 `classifyTurnType` 精细分类工具集解决，将待办、剪贴板等工具标为 `neutral` 并隐藏了 💼 书包图标，只有真正的 `work` 工具才被标记。
 - **factsBlock 永远全量注入**：未来如果 facts 增多到 50+ 条，可改成 query-time embedding 筛选 top-K 相关。
 - **嵌入模型锁死 bge-small-zh-512**：换模型要 drop 并重建 vec0 表。
 
@@ -273,8 +249,8 @@ src/main/
 1. `FactCategory` 加新值
 2. `reflection.ts` 加一个 `XXX_PROMPT_HEADER` 和 `buildReflectionPrompt` 的 kind 分支
 3. `service.ts` 加 `reflectXxxOnce()`
-4. `chat.ts` 加触发条件（不一定是 wasToolTurn —— 可能是关键词、可能是显式标记）
+4. `chat.ts` 加触发条件（检测到特定工具或特定词触发）
 5. `factsBlock` 拼新的段（如 `[健康相关]`）
-6. UI：决定是否展示（personal 在 UI 里，work 不在）
+6. UI：决定是否展示（personal 在 UI 里，其他可以不展示）
 
 每一步都是表面变化，不会改 schema 也不会动 retrieval 的核心。这是为什么 reflection 在设计上是 prompt-driven 而非 hardcoded 抽取规则。

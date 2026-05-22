@@ -1927,7 +1927,19 @@ function MessageBubble({
   // out of long-term reflection. Surfacing a small 💼 next to the bubble
   // makes that boundary visible to the user (so they don't worry their
   // work chatter is "training her" the way personal chat is).
-  const isWorkTurn = !isUser && (message.toolCalls?.length ?? 0) > 0
+  const isWorkTurn =
+    !isUser &&
+    (message.toolCalls?.length ?? 0) > 0 &&
+    message.toolCalls!.some(
+      (tc) =>
+        ![
+          'addTask',
+          'listTasks',
+          'markTaskDone',
+          'readClipboard',
+          'presentTable',
+        ].includes(tc.name),
+    )
   // Strip markdown formatting from assistant text before display — the
   // model sometimes emits `**bold**` / `- bullets` / `# headers` and we
   // don't render markdown, so those would show as raw asterisks/hashes.

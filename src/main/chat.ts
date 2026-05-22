@@ -120,6 +120,28 @@ async function applyBakedEmotion(emotion: Emotion, _personaId: string): Promise<
 }
 
 /**
+ * Classify a chat turn type based on the tool calls invoked during that turn.
+ */
+export function classifyTurnType(calls: { toolName: string }[]): 'personal' | 'work' | 'neutral' {
+  if (calls.length === 0) return 'personal'
+
+  const workTools = [
+    'listMailFolders',
+    'listRecentEmails',
+    'readEmail',
+    'draftEmailReply',
+    'readFile',
+    'readWebPage',
+    'google_search'
+  ]
+
+  const hasWork = calls.some(c => workTools.includes(c.toolName))
+  if (hasWork) return 'work'
+
+  return 'neutral'
+}
+
+/**
  * Bump the persona-scoped reflection counter and fire the matching
  * reflection pass if the threshold was hit. Service owns both the
  * counter persistence and the threshold policy; chat just plumbs the
@@ -130,15 +152,15 @@ async function applyBakedEmotion(emotion: Emotion, _personaId: string): Promise<
  */
 async function maybeTriggerReflection(
   memory: {
-    bumpReflectionCounter(wasToolTurn: boolean): Promise<'personal' | 'work' | null>
+    bumpReflectionCounter(turnType: 'personal' | 'work' | 'neutral'): Promise<'personal' | 'work' | null>
     reflectOnce(): Promise<number>
     reflectProductivityOnce(): Promise<number>
   },
-  wasToolTurn: boolean,
+  turnType: 'personal' | 'work' | 'neutral',
 ): Promise<void> {
   let triggered: 'personal' | 'work' | null
   try {
-    triggered = await memory.bumpReflectionCounter(wasToolTurn)
+    triggered = await memory.bumpReflectionCounter(turnType)
   } catch (err) {
     console.warn('[memory] bumpReflectionCounter failed:', err)
     return
@@ -1825,16 +1847,15 @@ export async function runChat(
       }
     }
 
-    // Work / companion split. If this turn invoked any tool (email
-    // summary, file read, addTask, etc.) we treat it as a productivity
-    // task. Affinity judgment is gated; reflection routes to the
-    // appropriate track (personal vs work facts).
-    const wasToolTurn = captures.some((c) => c.calls.length > 0)
+    // Work / companion split. Classify turn type to handle parallel contexts
+    // (personal, work, neutral) and steer reflection / affinity logic.
+    const allCalls = captures.flatMap((c) => c.calls)
+    const turnType = classifyTurnType(allCalls)
 
     // L3 reflection: fires the right track based on turn type. Fire-
     // and-forget — the user's reply has already been streamed.
     if (memory) {
-      void maybeTriggerReflection(memory, wasToolTurn).catch((err) =>
+      void maybeTriggerReflection(memory, turnType).catch((err) =>
         console.warn('[memory] reflection trigger threw:', err),
       )
     }
@@ -1853,12 +1874,12 @@ export async function runChat(
     }
 
     // Affinity classifier — fire-and-forget. Skips affinity update when
-    // this was a tool turn (see above); emotion still applies unless a
+    // this was a non-personal turn (see above); emotion still applies unless a
     // baked tag already handled it.
     if (assistantText.trim()) {
       void classifyAndApply(assistantText, userText, {
         skipEmotion: bakedEmotion !== null,
-        skipAffinity: wasToolTurn,
+        skipAffinity: turnType !== 'personal',
       })
     }
 
