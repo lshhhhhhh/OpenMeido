@@ -150,22 +150,54 @@ export function classifyTurnType(calls: { toolName: string }[]): 'personal' | 'w
  * Fire-and-forget: the user's reply has already streamed, no point
  * making them wait for L3 extraction.
  */
+/**
+ * Helper to detect if the user text contains a clear fact negation, retraction, or correction.
+ * When matched, we bypass the N-turn threshold to run reflection immediately.
+ */
+export function isRetractionOrCorrection(text: string): boolean {
+  const patterns = [
+    /不要?叫我/i,
+    /别叫我/i,
+    /我不叫/i,
+    /我不是/i,
+    /记错了/i,
+    /别记了/i,
+    /删掉(我的)?/i,
+    /清除(我的)?/i,
+    /不要记/i,
+    /忘记/i,
+    /纠正/i,
+    /改一下/i,
+    /don['’]t call me/i,
+    /forget my/i,
+    /delete my/i,
+    /clear my/i,
+    /remembered? wrong/i,
+    /stop calling me/i
+  ];
+  return patterns.some(regex => regex.test(text));
+}
+
 async function maybeTriggerReflection(
   memory: {
-    bumpReflectionCounter(turnType: 'personal' | 'work' | 'neutral'): Promise<'personal' | 'work' | null>
+    bumpReflectionCounter(
+      turnType: 'personal' | 'work' | 'neutral',
+      force?: boolean,
+    ): Promise<'personal' | 'work' | null>
     reflectOnce(): Promise<number>
     reflectProductivityOnce(): Promise<number>
   },
   turnType: 'personal' | 'work' | 'neutral',
+  forcePersonalReflection = false,
 ): Promise<void> {
   let triggered: 'personal' | 'work' | null
   try {
-    triggered = await memory.bumpReflectionCounter(turnType)
+    triggered = await memory.bumpReflectionCounter(turnType, forcePersonalReflection)
   } catch (err) {
     console.warn('[memory] bumpReflectionCounter failed:', err)
     return
   }
-  if (triggered === 'personal') {
+  if (triggered === 'personal' || forcePersonalReflection) {
     void memory
       .reflectOnce()
       .then((n) => {
@@ -1855,7 +1887,11 @@ export async function runChat(
     // L3 reflection: fires the right track based on turn type. Fire-
     // and-forget — the user's reply has already been streamed.
     if (memory) {
-      void maybeTriggerReflection(memory, turnType).catch((err) =>
+      const forceReflection = turnType === 'personal' && isRetractionOrCorrection(userText)
+      if (forceReflection) {
+        console.log('[chat] User retraction/correction detected. Forcing immediate personal reflection.')
+      }
+      void maybeTriggerReflection(memory, turnType, forceReflection).catch((err) =>
         console.warn('[memory] reflection trigger threw:', err),
       )
     }

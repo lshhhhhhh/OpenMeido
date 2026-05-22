@@ -19,6 +19,8 @@ async function main() {
   register()
   const { openSqliteMemory } = await import('../src/main/storage/sqlite-memory-adapter.ts')
   const { parseReflectionResponse } = await import('../src/core/memory/reflection.ts')
+  const { isRetractionOrCorrection } = await import('../src/main/chat.ts')
+  const { createMemoryService } = await import('../src/core/memory/service.ts')
 
   let pass = 0
   let fail = 0
@@ -96,6 +98,40 @@ async function main() {
   const activeFactsAfterAll = await adapter.listActiveFacts('maid')
   check('activeFacts length is 1 after insert', activeFactsAfterAll.length === 1)
   check('activeFacts[0] value is 小刘', activeFactsAfterAll[0]?.value === '小刘')
+
+  // ---------- 3. Unit Test isRetractionOrCorrection ----------
+  console.log('\n[3: Unit testing isRetractionOrCorrection]')
+  check('Matches "不要叫我小李"', isRetractionOrCorrection('不要叫我小李') === true)
+  check('Matches "别叫我小李了"', isRetractionOrCorrection('别叫我小李了') === true)
+  check('Matches "我不是小李"', isRetractionOrCorrection('我不是小李') === true)
+  check('Matches "记错了，我不叫小李"', isRetractionOrCorrection('记错了，我不叫小李') === true)
+  check('Matches "Don\'t call me Xiao Li"', isRetractionOrCorrection("Don't call me Xiao Li") === true)
+  check('Matches "stop calling me"', isRetractionOrCorrection("stop calling me") === true)
+  check('Does not match "今天天气很好"', isRetractionOrCorrection('今天天气很好') === false)
+  check('Does not match "总结一下最近的邮件"', isRetractionOrCorrection('总结一下最近的邮件') === false)
+
+  // ---------- 4. Integration Test bumpReflectionCounter force-trigger ----------
+  console.log('\n[4: Integration testing bumpReflectionCounter with force=true]')
+  const mockConfig = {
+    persona: { preset: 'maid' },
+    memory: { recentN: 10 }
+  }
+  const memoryService = createMemoryService({
+    adapter,
+    getConfig: () => mockConfig
+  })
+
+  // Verify default counter works normally (first turn doesn't trigger)
+  const norm1 = await memoryService.bumpReflectionCounter('personal', false)
+  check('Normal personal turn does not trigger reflection', norm1 === null)
+
+  // Verify force=true immediately triggers reflection
+  const force1 = await memoryService.bumpReflectionCounter('personal', true)
+  check('Forced personal turn immediately triggers reflection', force1 === 'personal')
+
+  // Verify counter was reset after forced trigger
+  const norm2 = await memoryService.bumpReflectionCounter('personal', false)
+  check('Reflection counter is reset after forced reflection', norm2 === null)
 
   adapter.close()
   rmSync(dir, { recursive: true, force: true })

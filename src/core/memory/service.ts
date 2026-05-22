@@ -71,7 +71,7 @@ export interface MemoryService {
    *  'work' if the threshold was hit (and counter reset), null
    *  otherwise. Chat layer fires the matching reflectXxxOnce() when
    *  this returns non-null. */
-  bumpReflectionCounter(turnType: 'personal' | 'work' | 'neutral'): Promise<'personal' | 'work' | null>
+  bumpReflectionCounter(turnType: 'personal' | 'work' | 'neutral', force?: boolean): Promise<'personal' | 'work' | null>
   clearFacts(): Promise<number>
   /** Manual override for a single fact — used by the Settings UI 🗑.
    *  Deletes the row and its full supersession chain for the same key. */
@@ -342,10 +342,14 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       return adapter.getReflectionCounters(persona())
     },
 
-    async bumpReflectionCounter(turnType: 'personal' | 'work' | 'neutral') {
+    async bumpReflectionCounter(turnType: 'personal' | 'work' | 'neutral', force = false) {
       const PERSONAL_THRESHOLD = 5
       const p = persona()
       const cur = await adapter.getReflectionCounters(p)
+      if (force) {
+        await adapter.setReflectionCounters(p, 0, cur.work)
+        return 'personal'
+      }
       if (turnType === 'personal') {
         const next = cur.personal + 1
         if (next >= PERSONAL_THRESHOLD) {
