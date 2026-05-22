@@ -212,8 +212,8 @@
     const body = data.rows
       .map((r) =>
         data.columns
-          .map((c) => {
-            const v = r[c]
+          .map((_, i) => {
+            const v = Array.isArray(r) ? r[i] : undefined
             const s = v === undefined || v === null ? '' : String(v)
             // TSV: replace tabs/newlines so each row stays one line.
             return s.replace(/\t/g, ' ').replace(/\r?\n/g, ' ')
@@ -232,7 +232,14 @@
     }
     const head = data.columns.map(esc).join(',')
     const body = data.rows
-      .map((r) => data.columns.map((c) => esc(r[c])).join(','))
+      .map((r) =>
+        data.columns
+          .map((_, i) => {
+            const v = Array.isArray(r) ? r[i] : undefined
+            return esc(v)
+          })
+          .join(','),
+      )
       .join('\n')
     return head + '\n' + body
   }

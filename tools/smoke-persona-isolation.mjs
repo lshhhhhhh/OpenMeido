@@ -104,13 +104,13 @@ async function main() {
   // ---------- 7+8. Facts isolation ----------
   console.log('\n[7+8: facts isolation]')
   await adapter.upsertFact('maid', {
-    key: 'user.profile.mood',
+    key: 'user.nicknames.mood',
     value: '今天心情不错',
     confidence: 0.9,
     sourceEpisodeIds: [maidEp1],
   })
   await adapter.upsertFact('imouto', {
-    key: 'user.profile.mood',
+    key: 'user.nicknames.mood',
     value: '今天有点烦',
     confidence: 0.9,
     sourceEpisodeIds: [imoEp1],
@@ -126,7 +126,7 @@ async function main() {
   // Now upsert a contradicting fact under maid — should supersede maid's
   // own fact, not imouto's.
   await adapter.upsertFact('maid', {
-    key: 'user.profile.mood',
+    key: 'user.nicknames.mood',
     value: '突然又有点丧',
     sourceEpisodeIds: [maidEp2],
   })
@@ -172,7 +172,7 @@ async function main() {
   // Seed an ojou record so we have a 3-way test
   await adapter.addEpisode('ojou', 'user', '哼', vMaid(), 's3')
   await adapter.setAffinity('ojou', 5, 'just met')
-  await adapter.upsertFact('ojou', { key: 'k', value: 'v' })
+  await adapter.upsertFact('ojou', { key: 'user.nicknames.title', value: 'v' })
 
   const ojouDeleted = await adapter.deletePersona('ojou')
   check(`deletePersona('ojou') removed >= 3 rows (got ${ojouDeleted})`, ojouDeleted >= 3)

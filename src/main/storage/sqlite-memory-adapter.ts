@@ -460,8 +460,8 @@ export function openSqliteMemory(
   const selectActiveByKey = db.prepare<[string, string, string]>(
     `SELECT ${factCommonCols}
      FROM facts
-     WHERE (persona_id = ?1 OR scope = 'shared')
-       AND key = ?2 AND category = ?3 AND superseded_by IS NULL
+     WHERE (persona_id = ? OR scope = 'shared')
+       AND key = ? AND category = ? AND superseded_by IS NULL
      ORDER BY scope = 'shared' DESC, id DESC
      LIMIT 1`,
   )
@@ -483,17 +483,17 @@ export function openSqliteMemory(
   const selectActiveFacts = db.prepare<[string, string, number]>(
     `SELECT ${factCommonCols}
      FROM facts
-     WHERE (persona_id = ?1 OR scope = 'shared')
-       AND category = ?2
+     WHERE (persona_id = ? OR scope = 'shared')
+       AND category = ?
        AND superseded_by IS NULL
        AND (expires_at IS NULL OR expires_at > datetime('now'))
      ORDER BY updated_at DESC
-     LIMIT ?3`,
+     LIMIT ?`,
   )
   const selectFactHistory = db.prepare<[string, string]>(
     `SELECT ${factCommonCols}
      FROM facts
-     WHERE (persona_id = ?1 OR scope = 'shared') AND key = ?2
+     WHERE (persona_id = ? OR scope = 'shared') AND key = ?
      ORDER BY id ASC`,
   )
 
@@ -507,7 +507,7 @@ export function openSqliteMemory(
     `INSERT INTO persona_affinity
        (persona_id, score, last_updated, last_reason,
         personal_turns_since_reflection, work_turns_since_reflection)
-     VALUES (?1, 0, datetime('now'), NULL, ?2, ?3)
+     VALUES (?, 0, datetime('now'), NULL, ?, ?)
      ON CONFLICT(persona_id) DO UPDATE SET
        personal_turns_since_reflection = excluded.personal_turns_since_reflection,
        work_turns_since_reflection = excluded.work_turns_since_reflection`,
@@ -528,9 +528,9 @@ export function openSqliteMemory(
        last_updated = excluded.last_updated,
        last_reason = excluded.last_reason`,
   )
-  const updateLastMilestone = db.prepare<[number, string]>(
+  const updateLastMilestone = db.prepare<[string, number]>(
     `INSERT INTO persona_affinity (persona_id, score, last_updated, last_reason, last_milestone)
-     VALUES (?2, 0, datetime('now'), NULL, ?1)
+     VALUES (?, 0, datetime('now'), NULL, ?)
      ON CONFLICT(persona_id) DO UPDATE SET last_milestone = excluded.last_milestone`,
   )
   const selectPresence = db.prepare<[string]>(
@@ -551,7 +551,7 @@ export function openSqliteMemory(
   )
   const updateLastReviewAt = db.prepare<[string, string]>(
     `INSERT INTO persona_affinity (persona_id, score, last_updated, last_reason, last_review_at)
-     VALUES (?2, 0, datetime('now'), NULL, ?1)
+     VALUES (?, 0, datetime('now'), NULL, ?)
      ON CONFLICT(persona_id) DO UPDATE SET last_review_at = excluded.last_review_at`,
   )
 
@@ -844,12 +844,12 @@ export function openSqliteMemory(
 
     async setLastMilestone(personaId, milestone) {
       ensureOpen()
-      updateLastMilestone.run(milestone, personaId)
+      updateLastMilestone.run(personaId, milestone)
     },
 
     async touchLastReview(personaId) {
       ensureOpen()
-      updateLastReviewAt.run(new Date().toISOString(), personaId)
+      updateLastReviewAt.run(personaId, new Date().toISOString())
     },
 
     async getPresenceState(personaId) {

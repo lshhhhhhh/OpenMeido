@@ -438,7 +438,7 @@ async function listInboxCached(
   return items
 }
 
-const readEmail = tool({
+export const readEmail = tool({
   description:
     '读取一封邮件的完整正文。\n' +
     '**触发场景**：用户说"读 X"、"打开 X"、"看下 X 那封"、"X 邮件讲什么"、' +
@@ -449,7 +449,8 @@ const readEmail = tool({
     '**不要凭空猜测 id**（不要写 "1"、"latest"、"WWDC" 之类）；如果上下文里没有当前 list 结果，先 listRecentEmails 再调本工具。',
   inputSchema: z.object({
     id: z
-      .string()
+      .union([z.string(), z.number()])
+      .transform((val) => String(val))
       .describe(
         'Email id (UID) — must come verbatim from a previous listRecentEmails result. ' +
           'Do NOT make up an id like "1" or "latest"; that returns the wrong email.',
@@ -566,7 +567,7 @@ function parseDraftJson(
   return { subject: fallbackSubject, body: raw.trim() }
 }
 
-const draftEmailReply = tool({
+export const draftEmailReply = tool({
   description:
     '帮用户起草一封回信。用于用户说"帮我回这封"、"草稿一下回复"、"写一版回复"、"再改一版"等场景。\n' +
     '内部会自动读取邮件 + 走 thread 上下文，调一次 LLM 用**用户本人的口吻**写一份草稿，' +
@@ -576,7 +577,8 @@ const draftEmailReply = tool({
     '加上用户的反馈作为 `instruction`。返回新草稿替换聊天里的旧卡片。',
   inputSchema: z.object({
     uid: z
-      .string()
+      .union([z.string(), z.number()])
+      .transform((val) => String(val))
       .describe('要回复的邮件 id（来自 listRecentEmails）'),
     instruction: z
       .string()
@@ -1318,17 +1320,24 @@ export async function runChat(
       const isKimi =
         cfg.backend.baseUrl.includes('moonshot.cn') ||
         cfg.backend.baseUrl.includes('moonshot.ai')
+      const isDeepSeek =
+        cfg.backend.baseUrl.toLowerCase().includes('deepseek') ||
+        cfg.backend.baseUrl.toLowerCase().includes('siliconflow') ||
+        modelId.toLowerCase().includes('deepseek') ||
+        modelId.toLowerCase().includes('r1') ||
+        modelId.toLowerCase().includes('reasoner')
+
       const injectGlmSearch = isGlm && cfg.backend.searchEnabled
       // Kimi search disabled — see the comment block above kimiWebSearchEcho
       // for context. The toggle in Settings warns users; if they still flip
       // it on against a Kimi backend, we just silently ignore it.
       if (cfg.backend.searchEnabled && isKimi) {
-        console.warn(
+        console.log(
           '[chat] searchEnabled set but Kimi web search is not currently supported. ' +
             'Use Gemini or GLM for web search.',
         )
       } else if (cfg.backend.searchEnabled && !isGlm) {
-        console.warn(
+        console.log(
           '[chat] searchEnabled set but backend (' +
             cfg.backend.baseUrl +
             ') is not Gemini / GLM. No-op.',
@@ -1340,7 +1349,7 @@ export async function runChat(
       // turns 400 with "thinking is enabled but reasoning_content is
       // missing in assistant tool call message at index N". Force-disable
       // thinking by injecting `thinking: {type: "disabled"}`.
-      const needWrapper = injectGlmSearch || isKimi
+      const needWrapper = injectGlmSearch || isKimi || isDeepSeek
       const wrappedFetch = needWrapper
         ? ((async (url, init) => {
             if (init && init.method === 'POST' && typeof init.body === 'string') {
@@ -1348,6 +1357,11 @@ export async function runChat(
                 const body = JSON.parse(init.body) as {
                   tools?: unknown[]
                   thinking?: { type: 'enabled' | 'disabled' }
+                  messages?: Array<{
+                    role: string
+                    tool_calls?: unknown
+                    reasoning_content?: string
+                  }>
                 }
                 if (injectGlmSearch) {
                   const entry = { type: 'web_search', web_search: { enable: true } }
@@ -1356,6 +1370,19 @@ export async function runChat(
                 }
                 if (isKimi) {
                   body.thinking = { type: 'disabled' }
+                }
+                if (isDeepSeek) {
+                  if (body.messages && Array.isArray(body.messages)) {
+                    for (const msg of body.messages) {
+                      if (
+                        msg.role === 'assistant' &&
+                        msg.tool_calls &&
+                        msg.reasoning_content === undefined
+                      ) {
+                        msg.reasoning_content = ''
+                      }
+                    }
+                  }
                 }
                 init = { ...init, body: JSON.stringify(body) }
               } catch {
