@@ -15,9 +15,12 @@ export interface TaskAdapter {
   /**
    * All tasks including recently-completed. `recentDoneLimit` caps how
    * many done rows tag along (sidebar shows the last few for the
-   * satisfaction-of-checking-off effect).
+   * satisfaction-of-checking-off effect). `doneSinceIso`, if provided,
+   * further restricts done rows to those completed at-or-after that
+   * timestamp — used to scope "recently completed" to the current app
+   * session so X-deleting a row doesn't pull older history into view.
    */
-  listAll(recentDoneLimit?: number): Promise<Task[]>
+  listAll(recentDoneLimit?: number, doneSinceIso?: string | null): Promise<Task[]>
 
   /**
    * All tasks with a future fireAt that haven't fired yet — used by the

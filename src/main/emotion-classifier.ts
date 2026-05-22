@@ -37,6 +37,11 @@ interface JudgeResult {
   reason: string
 }
 
+/** Last emotion the classifier landed on, keyed by persona id. Fed into
+ *  the next classifier prompt so the LLM avoids picking the same label
+ *  twice in a row (which is a visual no-op on the Live2D side). */
+const lastEmotionByPersona = new Map<string, Emotion>()
+
 /**
  * Public entry — call after the chat stream finishes. Fire-and-forget;
  * errors are swallowed (logged only).
@@ -50,6 +55,12 @@ interface JudgeResult {
 export async function classifyAndApply(
   assistantText: string,
   userText: string = '',
+  opts: {
+    /** Skip the setExpression broadcast — emotion was already applied
+     *  upstream (e.g. main chat baked a `<emo>` tag the chat loop
+     *  consumed). Affinity still runs. */
+    skipEmotion?: boolean
+  } = {},
 ): Promise<void> {
   const trimmed = assistantText.trim()
   if (trimmed.length < MIN_TEXT_LEN_FOR_CLASSIFICATION) return
@@ -68,6 +79,7 @@ export async function classifyAndApply(
         validLabels: EMOTIONS,
         currentAffinity: tier.min, // approximation; engine has the precise value
         tierLabel: tier.zhLabel,
+        lastEmotion: lastEmotionByPersona.get(personaId) ?? null,
       }),
     )
   } catch (err) {
@@ -75,12 +87,20 @@ export async function classifyAndApply(
     return
   }
   const result = parseJudgeResult(raw)
-  await applyEmotion(result.emotion, {
-    send: broadcastLive2D,
-    pushEvent: pushEmotionEvent,
-    sidecarFor: live2dGetSidecar,
-    modelName: cfg.live2d.activeModel,
-  })
+  // "每句都有表情" intent: if the model disregards the prompt and emits
+  // 中性 / unknown / parse-fails, don't blank the face — fall back to a
+  // default positive label so the Live2D figure stays alive. 开心 is the
+  // safest generic warm expression across all sidecar mappings.
+  const emotion = result.emotion ?? '开心'
+  lastEmotionByPersona.set(personaId, emotion)
+  if (!opts.skipEmotion) {
+    await applyEmotion(emotion, {
+      send: broadcastLive2D,
+      pushEvent: pushEmotionEvent,
+      sidecarFor: live2dGetSidecar,
+      modelName: cfg.live2d.activeModel,
+    })
+  }
   // Affinity only when we have user context (chat path). Greeting /
   // proactive emit assistant text with no preceding user turn — judging
   // affinity off a one-sided utterance would be noise.

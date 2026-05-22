@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, protocol, dialog, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, protocol, dialog, shell, screen } from 'electron'
 import { join, extname } from 'node:path'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
@@ -14,8 +14,8 @@ import {
   getMemoryInitError,
   isNaiveMemoryMode,
 } from './memory-host.js'
-import { initReminders, getReminderService } from './reminder-host.js'
-import { initTasks, getTaskService } from './tasks-host.js'
+import { getReminderService } from './reminder-host.js'
+import { initTasks, getTaskService, getTasksBootAt } from './tasks-host.js'
 import { greetOnLaunch } from './greeting-host.js'
 import { initGoodbye } from './goodbye-host.js'
 import { getDownloadState, startEmbedDownload } from './embed-download-host.js'
@@ -39,7 +39,7 @@ import { initHotkey, applyHotkey, getHotkeyStatus } from './hotkey-host.js'
 import { recentEmotionEvents } from './emotion-events.js'
 import { initAffinity, refreshCachedScore } from './affinity-host.js'
 import { initWeeklyReview } from './weekly-review-host.js'
-import { initPresence } from './presence-host.js'
+import { initPresence, tickNow as presenceTickNow } from './presence-host.js'
 import {
   importCustomBackground,
   registerBackgroundScheme,
@@ -69,6 +69,13 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url))
 app.commandLine.appendSwitch('ignore-gpu-blocklist')
 app.commandLine.appendSwitch('enable-gpu-rasterization')
 app.commandLine.appendSwitch('enable-zero-copy')
+// Let TTS audio play immediately at launch without waiting for a user
+// click. Chromium's default autoplay policy holds back AudioContext
+// playback until the first user gesture — that means the boot greeting
+// audio starts mid-stream when the user finally clicks something later,
+// and the first second of speech is lost. Electron defaults to the
+// Chromium policy unless we override it here.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 
 // Last-resort safety net: AI SDK / streamText can sometimes propagate an
 // error asynchronously (e.g. MissingToolResultsError thrown inside an
@@ -117,9 +124,18 @@ let mainWindow: BrowserWindow | null = null
 function createWindow(): void {
   const cfg = getConfig()
 
+  // Fit-to-screen guard. Default config is 618×1184 — comfortable on
+  // 1080p+ displays but tall enough to clip on common 1366×768 laptops.
+  // Cap to 90% of the primary display's work area so first-launch users
+  // on smaller screens get a usable window instead of one with its
+  // bottom half hidden under the taskbar.
+  const work = screen.getPrimaryDisplay().workAreaSize
+  const fittedWidth = Math.min(cfg.window.width, Math.floor(work.width * 0.9))
+  const fittedHeight = Math.min(cfg.window.height, Math.floor(work.height * 0.9))
+
   const win = new BrowserWindow({
-    width: cfg.window.width,
-    height: cfg.window.height,
+    width: fittedWidth,
+    height: fittedHeight,
     minWidth: 260,
     minHeight: 400,
     transparent: true,
@@ -394,12 +410,185 @@ ipcMain.handle('stt:transcribe', async (_event, payload: { samples: unknown }) =
 })
 
 ipcMain.handle('screen:capture', async () => {
-  const all = await captureAllScreensPng()
+  const all = await captureAllScreensPng(getConfig().proactive.excludedScreenIds)
   // Each entry is a base64 PNG — JSON-serialisable + small enough for IPC.
   return all.map((bytes) => ({
     mimeType: 'image/png',
     base64: Buffer.from(bytes).toString('base64'),
   }))
+})
+
+/** Enumerate currently-attached displays — used by Settings → 主动 to
+ *  let the user pick which screens are OK for the AI to see. Returns
+ *  preview thumbnails small enough for the picker grid. */
+ipcMain.handle('screen:list', async () => {
+  const { listScreens } = await import('./screen-host.js')
+  return listScreens()
+})
+
+/**
+ * Quick screen-react — user clicked the "看屏幕" button. Capture all
+ * displays, ask the vision LLM to comment in persona voice + current
+ * tier, broadcast through the same proactive:remark channel so it
+ * gets the chat bubble + TTS + emotion classifier + memory persistence
+ * for free.
+ *
+ * Idempotent against rapid clicks: handler is single-shot per call,
+ * renderer side gates with a busy flag so the user can't fire 10
+ * captures in 2 seconds.
+ */
+/**
+ * Parse the JSON output of buildQuickScreenReactPrompt — {spoken,
+ * noted}. Tolerant of fence-wrapped, bare-JSON, and "embedded JSON
+ * in a paragraph" forms. Falls back to treating the entire raw text
+ * as the spoken line when parsing fails — better UX than crashing.
+ */
+function parseScreenReactJson(raw: string): { spoken: string; noted: string[] } {
+  const trimmed = raw.trim()
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const candidates: string[] = []
+  if (fenced?.[1]) candidates.push(fenced[1])
+  candidates.push(trimmed)
+  // Look for the first balanced {...} block as last resort.
+  const objStart = trimmed.indexOf('{')
+  if (objStart >= 0) candidates.push(trimmed.slice(objStart))
+  for (const s of candidates) {
+    try {
+      const obj = JSON.parse(s) as Record<string, unknown>
+      const spoken = typeof obj.spoken === 'string' ? obj.spoken : ''
+      const noted = Array.isArray(obj.noted)
+        ? obj.noted
+            .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+            .map((x) => x.trim())
+        : []
+      if (spoken) return { spoken, noted }
+    } catch {
+      /* try next */
+    }
+  }
+  // No valid JSON — treat the raw output as the spoken line, no notes.
+  return { spoken: trimmed, noted: [] }
+}
+
+ipcMain.handle('chat:quickScreenReact', async () => {
+  console.log(`[quickScreen] triggered at ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`)
+  try {
+    const cfg = getConfig()
+    const { resolvePersona } = await import('../shared/config.js')
+    const { buildTierPromptBlock } = await import('../shared/affinity.js')
+    const { buildQuickScreenReactPrompt } = await import('../shared/daily-prompts.js')
+    const { runExtractionWithImages } = await import('./chat-host.js')
+    const { classifyAndApply } = await import('./emotion-classifier.js')
+    const { formatLocalNow } = await import('../shared/time-format.js')
+
+    const persona = resolvePersona(cfg.persona)
+    const memory = getMemoryService()
+    const affinity = memory ? await memory.getAffinity().catch(() => null) : null
+    const tierBlock = buildTierPromptBlock(
+      affinity?.score ?? 0,
+      persona.name,
+      persona.traits,
+    )
+    const userName = memory ? await memory.getUserName().catch(() => null) : null
+
+    // Pull memory context: distilled facts + recent silent observations
+    // from past screen captures. This is what lets her say "又在看
+    // 猎鹰" on day 2 — she silently noted "Falcons 战队" on day 1.
+    const factsBlock = memory ? await memory.factsBlock(0.5).catch(() => '') : ''
+    const recentEpisodes = memory ? await memory.listRecent(60).catch(() => []) : []
+    const pastObservations = recentEpisodes
+      .filter((e) => e.speaker === 'assistant' && e.text.startsWith('[obs] '))
+      .slice(-10) // last 10 observations
+      .map((e) => e.text.slice('[obs] '.length))
+
+    let imageBytes: Uint8Array[]
+    try {
+      imageBytes = await captureAllScreensPng(cfg.proactive.excludedScreenIds)
+    } catch (err) {
+      return { ok: false as const, error: '截屏失败：' + String(err) }
+    }
+    if (imageBytes.length === 0) {
+      return { ok: false as const, error: '没有可用的屏幕。' }
+    }
+    const images = imageBytes.map((bytes) => ({ mimeType: 'image/png', bytes }))
+
+    const prompt = buildQuickScreenReactPrompt({
+      persona,
+      tierBlock,
+      now: formatLocalNow(),
+      userName,
+      factsBlock,
+      pastObservations,
+    })
+
+    let raw: string
+    try {
+      raw = await runExtractionWithImages(prompt, images, { temperature: 0.8 })
+    } catch (err) {
+      return {
+        ok: false as const,
+        error: 'LLM 调用失败：' + (err instanceof Error ? err.message : String(err)),
+      }
+    }
+    // Parse JSON {spoken, noted}. Falls back to treating the whole
+    // output as the spoken line when JSON is malformed — better than
+    // showing a stack trace to the user.
+    const parsed = parseScreenReactJson(raw)
+    const line = parsed.spoken.trim()
+    // Privacy escape — model can output "(SILENT)" when the screen
+    // shows something it shouldn't comment on (passwords, banking, etc).
+    if (!line || /^\(?SILENT\)?$/i.test(line) || line.length < 4) {
+      console.log(`[quickScreen] silent (raw="${raw.slice(0, 80)}")`)
+      return { ok: false as const, error: '画面太敏感了，这次先不说。' }
+    }
+
+    // Persist as an assistant episode so future retrieval sees it
+    // ("she commented on what I was doing earlier").
+    if (memory) {
+      try {
+        await memory.addEpisode('assistant', line)
+      } catch (err) {
+        console.warn('[quickScreen] episode persist failed:', err)
+      }
+    }
+    // Persist the silent observation block as a separate "[obs] ..."
+    // assistant episode. UI filters this prefix; L3 reflection still
+    // sees it and can distill patterns into facts ("user.interest.game:
+    // CS2"). Future screen-react prompts re-inject the last 10 of these
+    // as `pastObservations` — that's how she goes from "你喜欢 CS2 吗"
+    // on day 0 to "又看猎鹰啊" on day 1.
+    if (memory && parsed.noted.length > 0) {
+      const obsText = '[obs] ' + parsed.noted.join(', ')
+      try {
+        await memory.addEpisode('assistant', obsText)
+        console.log(`[quickScreen] noted: ${parsed.noted.join(', ')}`)
+      } catch (err) {
+        console.warn('[quickScreen] observation persist failed:', err)
+      }
+    }
+    // Broadcast — same channel as proactive remarks. Renderer renders
+    // it as an assistant bubble, plays TTS, fires emotion classifier.
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send('proactive:remark', {
+          text: line,
+          ts: new Date().toISOString(),
+          triggers: ['quick-screen-react'],
+        })
+      }
+    }
+    void classifyAndApply(line, '')
+    // Print FULL text (no truncation) so prompt-iteration debug doesn't
+    // require running inspect-memory. Adds a clear visual marker around
+    // the bubble so it's easy to grep / pick out of the dev terminal.
+    console.log(`[quickScreen] →→→ ${line.length} 字`)
+    console.log(`  ${line.replace(/\n/g, '\n  ')}`)
+    console.log(`[quickScreen] ←←←`)
+    return { ok: true as const, text: line }
+  } catch (err) {
+    console.warn('[quickScreen] failed:', err)
+    return { ok: false as const, error: String(err) }
+  }
 })
 
 // ---- Config IPC ----
@@ -493,6 +682,18 @@ ipcMain.handle('memory:clearFacts', async () => {
   if (!svc) return 0
   return svc.clearFacts()
 })
+ipcMain.handle('memory:deleteFact', async (_event, factId: number) => {
+  const svc = getMemoryService()
+  if (!svc) return false
+  return svc.deleteFact(factId)
+})
+
+// Diagnostic — fire a presence tick on demand. Used from DevTools when
+// you don't want to wait 10 minutes between ticks while investigating
+// why presence isn't accruing.
+ipcMain.handle('presence:tickNow', async () => {
+  await presenceTickNow()
+})
 ipcMain.handle('memory:reflectNow', async () => {
   const svc = getMemoryService()
   if (!svc) return 0
@@ -574,7 +775,11 @@ ipcMain.handle('reminders:cancel', async (_event, id: number) => {
 ipcMain.handle('tasks:listAll', async (_event, recentDoneLimit: number = 5) => {
   const svc = getTaskService()
   if (!svc) return []
-  return svc.listAll(recentDoneLimit)
+  // Scope "recently completed" to the current app session — see
+  // tasks-host.bootAt. Without this, X-deleting a done row pulls an
+  // older one into the top-N window and the user reads it as the
+  // deleted task coming back.
+  return svc.listAll(recentDoneLimit, getTasksBootAt())
 })
 ipcMain.handle(
   'tasks:add',
@@ -686,7 +891,11 @@ void app.whenReady().then(async () => {
   // session and breaks continuity. createWindow is last so the renderer
   // never sees a half-initialized backend.
   await initMemory()
-  await initReminders()
+  // initReminders() was the v0.0.13-era host. It's been dead code since
+  // the unified TaskService landed: no tool calls it, no UI reads from
+  // it. Worse, it kept reminders.sqlite open during boot, which made
+  // initTasks's "rename to .bak after migration" silently fail with
+  // EBUSY. Removed.
   // Tasks (unified reminders + TODOs, v0.0.14) — depends on memory for
   // session-id injection in add(). Migrates legacy reminders.sqlite on
   // first run if found.

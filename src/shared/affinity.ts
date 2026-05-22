@@ -76,18 +76,50 @@ export const AFFINITY_DECAY_FLOOR = 30
 export const PER_TURN_DELTA_CLAMP = 2
 /** Max total |delta| accumulated across one calendar day. */
 export const PER_DAY_DELTA_CAP = 10
-/** During the first N turns of relationship history, multiply incoming
- *  deltas by this factor. Stops a single warm exchange on day-one from
- *  vaulting the user to "亲近" in five turns. */
-export const COLD_START_DAMPING = 0.5
-/** How many turns are "cold start". After this many lifetime turns with
- *  this persona, deltas land at full strength. */
-export const COLD_START_TURN_COUNT = 20
 /** Score ceiling for passive presence accrual. Above this, time-on-app
  *  alone doesn't move the score — past Lv.3 requires real interaction
  *  to advance. Prevents users from grinding to deep tier just by
  *  leaving the window open. */
 export const PRESENCE_SCORE_CEILING = 40
+
+// Removed (2026-05-21): cold-start damping. It was a pre-emptive
+// "halve deltas for the first 20 turns" rule, but combined with the
+// integer truncation we used to apply, every +1 judge verdict became
+// 0 — score stuck at 0 for new users no matter how warm the chat.
+// The rolling-median guard already filters lone spikes (so a single
+// dramatic +2 on day one still gets dampened), and the per-day cap
+// limits sustained runaway. Cold-start was redundant.
+
+/**
+ * Diminishing-returns curve for POSITIVE deltas only. The same +1
+ * verdict moves a stranger more than a soulmate — friendship is steep
+ * at the start, asymptotic near the top. Going cold (negative deltas)
+ * is NOT dampened: high-affinity isn't supposed to be a damage shield.
+ *
+ *   factor = (1 - currentScore/100)^CURVE_EXPONENT
+ *
+ * With exponent 0.5:
+ *   score=0   → 1.00   (full)
+ *   score=20  → 0.89
+ *   score=40  → 0.77
+ *   score=60  → 0.63
+ *   score=80  → 0.45
+ *   score=95  → 0.22
+ *   score=100 → 0
+ */
+export const CURVE_EXPONENT = 0.5
+
+export function diminishingFactor(currentScore: number): number {
+  const s = Math.max(AFFINITY_MIN, Math.min(AFFINITY_MAX, currentScore))
+  return Math.pow(1 - s / AFFINITY_MAX, CURVE_EXPONENT)
+}
+
+/** Apply the curve to a delta. Negative deltas pass through; positive
+ *  deltas get scaled by `diminishingFactor(currentScore)`. */
+export function curveDelta(rawDelta: number, currentScore: number): number {
+  if (rawDelta <= 0) return rawDelta
+  return rawDelta * diminishingFactor(currentScore)
+}
 
 /**
  * Build the instruction block that gets appended to the persona system
@@ -246,28 +278,25 @@ export function tierFor(score: number): TierInfo {
 }
 
 /**
- * Apply guardrails to a raw judge delta and return the final score
- * to persist. Returns both the resolved score and what kind of
- * adjustment we applied — useful for telemetry / debug.
+ * Apply guardrails to a raw judge delta and return the final score.
+ * Score is stored as a plain JS number (float) — no integer truncation.
+ * UI rounds at display time.
  *
- * The contract:
- *   - Clamp raw delta to ±PER_TURN_DELTA_CLAMP
- *   - Cold-start damping if lifetime turn count is below threshold
- *   - Daily cap: if today's accumulated |delta| is already at the cap,
- *     incoming delta is clipped (can still flow in the OPPOSITE
- *     direction to balance, but same-direction is blocked)
- *   - Take median of [raw_delta, last_delta_1, last_delta_2] to dampen
- *     outliers (a single weird judgment can't move the score much)
- *   - Final score clamped 0..100, with decay-floor consideration left
- *     to the decay pass (this function only handles per-turn updates)
+ * Guardrails in order:
+ *   1. Per-turn clamp ±PER_TURN_DELTA_CLAMP (judge can't single-shot
+ *      huge swings)
+ *   2. Rolling median of [d, last2 deltas] (one outlier judgement
+ *      can't move score)
+ *   3. Daily cap PER_DAY_DELTA_CAP (sustained warmth still capped per day)
+ *   4. Diminishing-returns curve on positive deltas (friendship is
+ *      steep at the start, asymptotic near 100)
+ *   5. Score bounds 0..100
  */
 export interface ApplyDeltaInput {
   /** Current persisted score. */
   currentScore: number
   /** Raw delta from the LLM judge. */
   rawDelta: number
-  /** Lifetime turn count with this persona (any speaker). Drives cold-start. */
-  lifetimeTurns: number
   /** Already-accumulated |delta| today, summed across signs. */
   todayAbsDelta: number
   /** The last 2 deltas this engine applied (newest first). Used as the
@@ -295,31 +324,32 @@ export function applyDeltaWithGuardrails(input: ApplyDeltaInput): ApplyDeltaResu
     note = `per-turn clamp ${input.rawDelta} → ${d}`
   }
 
-  // 2. Cold-start damping.
-  if (input.lifetimeTurns < COLD_START_TURN_COUNT) {
-    const damped = Math.trunc(d * COLD_START_DAMPING)
-    if (damped !== d) {
-      note = (note ? note + '; ' : '') + `cold-start ×${COLD_START_DAMPING}`
-      d = damped
-    }
-  }
-
-  // 3. Rolling median across [d, last1, last2]. Wraps the incoming delta
-  // with up to two prior values; median is more robust to one outlier
-  // judgment than a plain assignment.
+  // 2. Rolling median across [d, last1, last2]. Wraps the incoming delta
+  // with up to two prior values; median is robust to a lone outlier.
+  //
+  // Sign-flip guard: if the median lands on the OPPOSITE sign of `d`,
+  // applying it would amplify disagreement into a wrong-direction move
+  // (e.g. d=-1 with recents=[+1,+1] gives median=+1, which would turn
+  // a "she's annoyed" verdict into a "she's pleased" delta). In that
+  // case treat the incoming delta as an outlier against the trend and
+  // zero it out — neither value is trustworthy as a move.
   const sample = [d, ...input.recentDeltas].slice(0, 3)
   if (sample.length === 3) {
     const sorted = [...sample].sort((a, b) => a - b)
     const med = sorted[1]!
     if (med !== d) {
-      note = (note ? note + '; ' : '') + `rolling median ${d} → ${med}`
-      d = med
+      const signFlip = (d > 0 && med < 0) || (d < 0 && med > 0)
+      if (signFlip) {
+        note = (note ? note + '; ' : '') + `median sign-flip ${d} vs ${med} → 0`
+        d = 0
+      } else {
+        note = (note ? note + '; ' : '') + `rolling median ${d} → ${med}`
+        d = med
+      }
     }
   }
 
-  // 4. Daily cap. Today's accumulated |delta| can't exceed PER_DAY_DELTA_CAP.
-  // If we're already at the cap, this turn's delta is clipped to fit
-  // (possibly to 0). Counts both directions: +5 then -4 = 9 used.
+  // 3. Daily cap. Today's accumulated |delta| can't exceed PER_DAY_DELTA_CAP.
   const remaining = PER_DAY_DELTA_CAP - input.todayAbsDelta
   if (remaining <= 0) {
     if (d !== 0) {
@@ -328,12 +358,20 @@ export function applyDeltaWithGuardrails(input: ApplyDeltaInput): ApplyDeltaResu
     }
   } else if (Math.abs(d) > remaining) {
     const clipped = d > 0 ? remaining : -remaining
-    note =
-      (note ? note + '; ' : '') + `daily cap clip ${d} → ${clipped}`
+    note = (note ? note + '; ' : '') + `daily cap clip ${d} → ${clipped}`
     d = clipped
   }
 
-  // 5. Apply.
+  // 4. Diminishing returns on positive moves only.
+  if (d > 0) {
+    const curved = curveDelta(d, input.currentScore)
+    if (curved !== d) {
+      note = (note ? note + '; ' : '') + `curve ${d.toFixed(2)} → ${curved.toFixed(2)}`
+      d = curved
+    }
+  }
+
+  // 5. Apply + bound.
   const next = Math.max(AFFINITY_MIN, Math.min(AFFINITY_MAX, input.currentScore + d))
   return {
     finalScore: next,
@@ -346,7 +384,7 @@ function clampDelta(d: number): number {
   if (!Number.isFinite(d)) return 0
   if (d > PER_TURN_DELTA_CLAMP) return PER_TURN_DELTA_CLAMP
   if (d < -PER_TURN_DELTA_CLAMP) return -PER_TURN_DELTA_CLAMP
-  return Math.trunc(d)
+  return d
 }
 
 /**

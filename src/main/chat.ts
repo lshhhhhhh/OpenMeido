@@ -40,6 +40,11 @@ import { getMailService } from './mail-host.js'
 import { getTaskService } from './tasks-host.js'
 import { createTextDeltaFilter } from './chat-text-filter.js'
 import { classifyAndApply } from './emotion-classifier.js'
+import { applyEmotion } from './emotion-apply.js'
+import { broadcastLive2D } from './live2d-host.js'
+import { getSidecar as live2dGetSidecar } from './live2d-models-host.js'
+import { EMOTIONS, type Emotion } from '../shared/live2d-models.js'
+import { pushEmotionEvent } from './emotion-events.js'
 import { runExtraction } from './chat-host.js'
 import { buildTierPromptBlock } from '../shared/affinity.js'
 import type { Episode } from '../core/memory/types.js'
@@ -83,6 +88,34 @@ function cleanInlineText(s: string): string {
  */
 // formatLocalNow lives in shared/time-format.ts so greeting-host etc. can
 // import it without taking a dependency on the chat module.
+/**
+ * Pull the model's self-classified emotion out of its raw output. The
+ * model is instructed to bake `<emo>X</emo>` at the end of its final
+ * reply; this regex extracts the label and validates it against the
+ * known vocabulary. Returns null when the tag is missing or holds an
+ * unknown label (caller falls back to the post-reply classifier).
+ */
+const BAKED_EMOTION_RE = /<emo>\s*([^<>\s]+)\s*<\/emo>/i
+function extractBakedEmotion(raw: string): Emotion | null {
+  const m = raw.match(BAKED_EMOTION_RE)
+  if (!m) return null
+  const label = m[1]!.trim()
+  if ((EMOTIONS as readonly string[]).includes(label)) return label as Emotion
+  return null
+}
+
+/** Apply a baked emotion the same way the classifier would. Mirrors
+ *  classifier deps so behavior stays consistent. */
+async function applyBakedEmotion(emotion: Emotion, _personaId: string): Promise<void> {
+  const cfg = getConfig()
+  await applyEmotion(emotion, {
+    send: broadcastLive2D,
+    pushEvent: pushEmotionEvent,
+    sidecarFor: live2dGetSidecar,
+    modelName: cfg.live2d.activeModel,
+  })
+}
+
 let turnsSinceReflection = 0
 function maybeTriggerReflection(memory: { reflectOnce(): Promise<number> }): void {
   turnsSinceReflection += 1
@@ -805,6 +838,16 @@ function episodesToMessages(
    *  as text-only. See cfg.memory.imageRecallTurns. */
   imageRecallTurns: number = 3,
 ): ModelMessage[] {
+  // Drop silent screen-observation entries — they're "[obs] CS2 比赛,
+  // Falcons 战队, ..." style private notes she wrote to herself about
+  // what was on screen, NOT user-visible utterances. Including them in
+  // chat replay would make the model think it had been speaking
+  // observation lists aloud, confusing future turns. The notes still
+  // flow into the screen-react path through a separate retrieval, and
+  // L3 reflection picks them up to distill into facts.
+  episodes = episodes.filter(
+    (e) => !(e.speaker === 'assistant' && e.text.startsWith('[obs] ')),
+  )
   const sorted = episodes.slice().sort((a, b) => a.id - b.id)
 
   // Decide which user episodes are "fresh enough" to replay their images.
@@ -1242,7 +1285,16 @@ export async function runChat(
         `\n` +
         `# 工具调用前后\n` +
         `**调用工具时不要在前面说话**——不要"好的我去查"、"我看一下"、"稍等"这种铺垫。直接调工具。所有工具都跑完、有了最终结果，再开口说话——这一次就要把答案说完整、说清楚。\n` +
-        `**多工具并行**：能并行就并行（在同一个回复里返回多个 tool_call）。尤其是用户让你总结、汇总多封邮件这种场景，**一定**在拿到列表后同一回复里同时发起多封邮件的正文读取调用，不要一封一封串行处理。串行处理会撞步数上限，最后说不出总结。`,
+        `**多工具并行**：能并行就并行（在同一个回复里返回多个 tool_call）。尤其是用户让你总结、汇总多封邮件这种场景，**一定**在拿到列表后同一回复里同时发起多封邮件的正文读取调用，不要一封一封串行处理。串行处理会撞步数上限，最后说不出总结。\n` +
+        `\n` +
+        `# 表情标签（最终回复结尾必须输出）\n` +
+        `**最终回复**（不再调工具的那一次）说完正文后，在文本最末尾追加一个表情标签 \`<emo>X</emo>\`，X 从下面 8 个里选一个，对应**你这句话此刻的情绪**：\n` +
+        `开心 / 害羞 / 无语 / 难过 / 慌张 / 震惊 / 尴尬 / 得意\n` +
+        `规则：\n` +
+        `- 这个标签**不会展示**给主人，只用来同步 Live2D 表情。\n` +
+        `- 必须从 8 个里选一个，没有"中性"。日常应答 = 害羞 / 开心 / 得意 之间挑，不要总是同一个。\n` +
+        `- 中间步骤（要调工具时）**不要**输出标签，只在最终一次说话结尾输出。\n` +
+        `- 格式严格：\`<emo>害羞</emo>\`，紧贴在正文最后一个字之后或者下一行，不要包在其它符号里。`,
       messages,
       // Conditional tool exposure: when mail isn't enabled, drop the email
       // tools entirely so the model doesn't see them in its function list.
@@ -1286,6 +1338,11 @@ export async function runChat(
 
     // Accumulate the full assistant text so we can persist it after streaming.
     let assistantText = ''
+    // Parallel raw-text accumulator — keeps the model's pre-filter output
+    // so we can extract the baked `<emo>...</emo>` tag after stream-done.
+    // The filter strips the tag from `assistantText` (display/persist),
+    // but we still need its content for instant Live2D expression sync.
+    let rawText = ''
     const filter = createTextDeltaFilter()
 
     // Pre-tool narration suppressor. Almost every dup we saw in the wild
@@ -1336,6 +1393,7 @@ export async function runChat(
         case 'text-delta': {
           // Strip thinking blocks + tool-call XML the model sometimes leaks
           // as text on top of the proper tool-call channel.
+          rawText += part.text
           const { emit: clean, resetLength } = filter.process(part.text)
           if (resetLength && resetLength > 0) {
             // Implicit `</think>` arrived — roll back the reasoning prefix.
@@ -1535,12 +1593,24 @@ export async function runChat(
       maybeTriggerReflection(memory)
     }
 
-    // Emotion classifier — pick a Live2D expression for THIS reply via a
-    // lightweight LLM call. Fire-and-forget; classifier owns its own error
-    // handling and broadcasts to renderer when done. The expression catches
-    // up with the bubble ~500ms after the user sees the final word.
+    // Emotion — model bakes its own self-classification at the reply's
+    // end as `<emo>害羞</emo>`. Filter strips it from displayed text;
+    // here we read it from the parallel rawText track and apply
+    // immediately so the expression syncs with the bubble appearing,
+    // not 1-2s later. The classifier still runs (next block) for
+    // affinity, but with skipEmotion so it doesn't fight us.
+    const bakedEmotion = extractBakedEmotion(rawText)
+    if (bakedEmotion) {
+      void applyBakedEmotion(bakedEmotion, cfg.persona.preset).catch((err) =>
+        console.warn('[chat] baked emotion apply failed:', err),
+      )
+    }
+
+    // Affinity classifier — fire-and-forget. Always runs (even when a
+    // baked emotion was applied) because affinity is its own task; pass
+    // skipEmotion so it doesn't redundantly call setExpression.
     if (assistantText.trim()) {
-      void classifyAndApply(assistantText, userText)
+      void classifyAndApply(assistantText, userText, { skipEmotion: bakedEmotion !== null })
     }
 
     localEmit({ type: 'done' })

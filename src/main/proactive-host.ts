@@ -141,7 +141,9 @@ function collectTriggers(cfg: Config['proactive']): Trigger[] {
 // buildProactiveRemarkPrompt — it consumes persona + now + triggers and
 // keeps the JSON contract identical to what parseDecision below expects.
 
-function parseDecision(raw: string): ProactiveDecision | null {
+function parseDecision(
+  raw: string,
+): (ProactiveDecision & { noted: string[] }) | null {
   let text = raw.trim()
   const fenced = text.match(/```(?:json)?\s*([\s\S]+?)```/i)
   if (fenced) text = fenced[1]!.trim()
@@ -152,12 +154,19 @@ function parseDecision(raw: string): ProactiveDecision | null {
       should_speak?: unknown
       reason?: unknown
       comment?: unknown
+      noted?: unknown
     }
     if (typeof parsed.should_speak !== 'boolean') return null
+    const noted = Array.isArray(parsed.noted)
+      ? parsed.noted
+          .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+          .map((x) => x.trim())
+      : []
     return {
       shouldSpeak: parsed.should_speak,
       reason: typeof parsed.reason === 'string' ? parsed.reason : '',
       comment: typeof parsed.comment === 'string' ? parsed.comment : '',
+      noted,
     }
   } catch {
     return null
@@ -220,16 +229,33 @@ async function evaluate(): Promise<void> {
   // — they don't have room to mention specifics anyway.
   let factsBlock = ''
   let recentUserMessages: string[] = []
-  if (elaborate && memoryForCtx) {
+  // Past silent screen observations — pulled when screen-mode is on,
+  // regardless of elaborate. Drives "she remembers what you've been
+  // watching" pattern recognition (CS2 + Falcons across days).
+  let pastObservations: string[] = []
+  if (memoryForCtx) {
     try {
-      factsBlock = await memoryForCtx.factsBlock(0.5).catch(() => '')
-      const episodes = await memoryForCtx.listRecent(40).catch(() => [])
-      recentUserMessages = episodes
-        .filter((e) => e.speaker === 'user' && e.text.trim().length > 0)
-        .slice(-6) // keep newest 6 user lines
-        .map((e) =>
-          e.text.length > 120 ? e.text.slice(0, 120) + '…' : e.text,
-        )
+      if (elaborate) {
+        factsBlock = await memoryForCtx.factsBlock(0.5).catch(() => '')
+        const episodes = await memoryForCtx.listRecent(40).catch(() => [])
+        recentUserMessages = episodes
+          .filter((e) => e.speaker === 'user' && e.text.trim().length > 0)
+          .slice(-6)
+          .map((e) => (e.text.length > 120 ? e.text.slice(0, 120) + '…' : e.text))
+      }
+      if (cfg.proactive.includeScreen) {
+        const episodes = await memoryForCtx.listRecent(60).catch(() => [])
+        pastObservations = episodes
+          .filter((e) => e.speaker === 'assistant' && e.text.startsWith('[obs] '))
+          .slice(-10)
+          .map((e) => e.text.slice('[obs] '.length))
+        // Also pull facts in screen mode even if not elaborate — they're
+        // the distilled patterns ("user.interest.game: CS2") and the
+        // model uses them to reference habits.
+        if (!factsBlock) {
+          factsBlock = await memoryForCtx.factsBlock(0.5).catch(() => '')
+        }
+      }
     } catch (err) {
       console.warn('[proactive] grounding pull failed:', err)
     }
@@ -252,7 +278,7 @@ async function evaluate(): Promise<void> {
       // displays / permission denied) silently falls back to text-only.
       let images: { mimeType: string; bytes: Uint8Array }[] = []
       try {
-        const pngs = await captureAllScreensPng()
+        const pngs = await captureAllScreensPng(cfg.proactive.excludedScreenIds)
         images = pngs.map((bytes) => ({ mimeType: 'image/png', bytes }))
       } catch (err) {
         console.warn('[proactive] screen capture failed, falling back to text:', err)
@@ -268,6 +294,7 @@ async function evaluate(): Promise<void> {
         elaborate,
         factsBlock,
         recentUserMessages,
+        pastObservations,
       })
       raw =
         images.length > 0
@@ -296,6 +323,16 @@ async function evaluate(): Promise<void> {
     return
   }
   const decision = parseDecision(raw)
+  // Save silent observations from this capture regardless of whether
+  // she ends up speaking — the memory of "what was on screen" is
+  // valuable for future pattern recognition even when she chose silence.
+  if (decision && decision.noted.length > 0 && memoryForCtx) {
+    const obsText = '[obs] ' + decision.noted.join(', ')
+    void memoryForCtx.addEpisode('assistant', obsText).catch((err) => {
+      console.warn('[proactive] observation persist failed:', err)
+    })
+    console.log(`[proactive] noted: ${decision.noted.join(', ')}`)
+  }
   if (!decision || !decision.shouldSpeak || !decision.comment.trim()) {
     console.log('[proactive] decision: silent', decision?.reason ?? '(unparseable)')
     return

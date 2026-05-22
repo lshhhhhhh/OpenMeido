@@ -60,6 +60,9 @@ export interface MemoryService {
   factsBlock(minConfidence?: number): Promise<string>
   reflectOnce(): Promise<number>
   clearFacts(): Promise<number>
+  /** Manual override for a single fact — used by the Settings UI 🗑.
+   *  Deletes the row and its full supersession chain for the same key. */
+  deleteFact(factId: number): Promise<boolean>
 
   // ---- Persona-scoped helpers exposed for UI / migration ----
   /** Active persona id at call time (read from config). */
@@ -289,6 +292,10 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
     async clearFacts() {
       return adapter.clearFacts(persona())
+    },
+
+    async deleteFact(factId) {
+      return adapter.deleteFact(persona(), factId)
     },
 
     async getAffinity() {

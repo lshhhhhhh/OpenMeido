@@ -39,6 +39,34 @@ const api = {
     },
 
     /**
+     * Quick screen-react — captures all displays, sends them with the
+     * current persona+tier prompt to the vision-capable model, and
+     * broadcasts the resulting comment through the proactive:remark
+     * channel (so the chat panel renders an assistant bubble + TTS
+     * plays + emotion classifier fires, same as a normal proactive).
+     *
+     * Returns the produced text on success, or an error string when
+     * the model refused (privacy-sensitive screen) / network failed.
+     */
+    quickScreenReact(): Promise<
+      { ok: true; text: string } | { ok: false; error: string }
+    > {
+      return ipcRenderer.invoke('chat:quickScreenReact') as Promise<
+        { ok: true; text: string } | { ok: false; error: string }
+      >
+    },
+
+    /** List attached displays — used by Settings to show the screen-
+     *  exclusion picker. Each entry has a small preview thumbnail. */
+    listScreens(): Promise<
+      Array<{ id: string; name: string; previewBase64: string }>
+    > {
+      return ipcRenderer.invoke('screen:list') as Promise<
+        Array<{ id: string; name: string; previewBase64: string }>
+      >
+    },
+
+    /**
      * Probe the LLM backend without spending tokens. Hits `/models` on the
      * OpenAI-compatible endpoint. `apiKeyOverride` lets Settings pass a key
      * the user has typed but not yet saved.
@@ -388,6 +416,9 @@ const api = {
     clearFacts(): Promise<number> {
       return ipcRenderer.invoke('memory:clearFacts') as Promise<number>
     },
+    deleteFact(factId: number): Promise<boolean> {
+      return ipcRenderer.invoke('memory:deleteFact', factId) as Promise<boolean>
+    },
     /** Force a reflection cycle on demand (Settings → 记忆 → "提取事实"). */
     reflectNow(): Promise<number> {
       return ipcRenderer.invoke('memory:reflectNow') as Promise<number>
@@ -631,6 +662,15 @@ const api = {
       return () => {
         ipcRenderer.off('embed:downloadComplete', handler)
       }
+    },
+  },
+
+  // Diagnostic surface — only meant to be called from DevTools while
+  // investigating bugs. Don't wire UI buttons to these.
+  diag: {
+    /** Fire one presence tick now and dump the gate state to main log. */
+    presenceTickNow(): Promise<void> {
+      return ipcRenderer.invoke('presence:tickNow') as Promise<void>
     },
   },
 }

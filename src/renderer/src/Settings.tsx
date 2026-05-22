@@ -16,7 +16,54 @@ import {
   type ModelSidecar,
 } from '../../shared/live2d-models'
 import { BASE_URL_PRESETS, findPreset, suggestedModels } from './backend-presets'
-import { performanceModel } from '../../shared/lightweight-models'
+import { performanceModel, visionModel } from '../../shared/lightweight-models'
+
+/**
+ * Per-capability resolution for the active provider. Drives the "能力概览"
+ * card in the AI tab so the user can see, after picking a vendor, which
+ * model handles which job — and when something isn't supported at all.
+ *
+ * Returning a discriminated string makes the renderer keep its switch
+ * exhaustive (`have` → model, `none` → hint, `depends` → LM Studio).
+ */
+type Capability =
+  | { kind: 'have'; model: string }
+  | { kind: 'none'; hint: string }
+  | { kind: 'depends'; hint: string }
+
+function textCapability(baseUrl: string, currentModel: string): Capability {
+  const perf = performanceModel(baseUrl)
+  if (perf) return { kind: 'have', model: perf }
+  if (baseUrl.includes('127.0.0.1') || baseUrl.includes('localhost'))
+    return { kind: 'depends', hint: currentModel || '取决于 LM Studio 当前加载的模型' }
+  return { kind: 'have', model: currentModel }
+}
+
+function visionCapability(baseUrl: string, currentModel: string): Capability {
+  const vis = visionModel(baseUrl)
+  if (vis) return { kind: 'have', model: vis }
+  if (baseUrl.includes('deepseek.com'))
+    return { kind: 'none', hint: 'DeepSeek 不支持图像 — 换 Gemini / GLM / Qwen' }
+  if (baseUrl.includes('127.0.0.1') || baseUrl.includes('localhost'))
+    return {
+      kind: 'depends',
+      hint: `取决于加载的模型（${currentModel || '?'}），仅多模态模型可用`,
+    }
+  return { kind: 'none', hint: '当前 backend 没有视觉模型 — 换 Gemini / GLM / Qwen' }
+}
+
+function searchCapability(baseUrl: string): Capability {
+  if (baseUrl.includes('googleapis.com'))
+    return { kind: 'have', model: '✓ Google 搜索（Gemini grounding）' }
+  if (baseUrl.includes('bigmodel.cn'))
+    return { kind: 'have', model: '✓ 智谱内置 web_search' }
+  if (baseUrl.includes('moonshot.cn') || baseUrl.includes('moonshot.ai'))
+    return {
+      kind: 'none',
+      hint: 'Kimi $web_search 协议与流式客户端不兼容 — 换 Gemini / GLM',
+    }
+  return { kind: 'none', hint: '当前 backend 不支持联网搜索 — 换 Gemini / GLM' }
+}
 
 interface SettingsProps {
   initial: Config
@@ -36,7 +83,7 @@ const MAIL_PRESETS: { label: string; host: string; helpUrl: string }[] = [
   { label: 'QQ', host: 'imap.qq.com', helpUrl: 'https://service.mail.qq.com/detail/0/351' },
 ]
 
-type TabId = 'ai' | 'persona' | 'live2d' | 'voice' | 'mail' | 'window' | 'proactive'
+type TabId = 'ai' | 'persona' | 'live2d' | 'voice' | 'mail' | 'window' | 'proactive' | 'about'
 const TABS: { id: TabId; label: string }[] = [
   { id: 'ai', label: 'AI' },
   { id: 'persona', label: '人物' },
@@ -45,7 +92,11 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'proactive', label: '主动' },
   { id: 'mail', label: '邮箱' },
   { id: 'window', label: '窗口' },
+  { id: 'about', label: '关于' },
 ]
+
+const REPO_URL = 'https://github.com/lshhhhhhh/OpenMeido'
+const LICENSE_URL = 'https://www.gnu.org/licenses/gpl-3.0.html'
 
 export function Settings({ initial, onClose }: SettingsProps) {
   const [draft, setDraft] = useState<Config>(initial)
@@ -331,6 +382,63 @@ export function Settings({ initial, onClose }: SettingsProps) {
             )
           })()}
 
+          {/* ===== 能力概览 — per-capability model breakdown =====
+              Shows: 文字 / 多模态 / 联网搜索 → either the model that handles
+              it, or "✗ 不支持" with a hint pointing the user at a backend
+              that does. The point: when someone picks "DeepSeek" they should
+              immediately see "no images, no search" rather than discovering
+              it the hard way mid-conversation. */}
+          {(() => {
+            const text = textCapability(draft.backend.baseUrl, draft.backend.model)
+            const vision = visionCapability(draft.backend.baseUrl, draft.backend.model)
+            const search = searchCapability(draft.backend.baseUrl)
+            const rows: { icon: string; label: string; cap: Capability }[] = [
+              { icon: '📝', label: '文字对话', cap: text },
+              { icon: '🖼️', label: '看图 / 截屏', cap: vision },
+              { icon: '🌐', label: '联网搜索', cap: search },
+            ]
+            return (
+              <div
+                style={{
+                  marginTop: 8,
+                  marginBottom: 4,
+                  padding: '8px 10px',
+                  background: 'rgba(255,255,255,0.04)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: 6,
+                  fontSize: 12,
+                }}
+              >
+                <div style={{ color: '#999', fontSize: 11, marginBottom: 6 }}>
+                  能力概览
+                </div>
+                {rows.map((r) => (
+                  <div
+                    key={r.label}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      gap: 8,
+                      padding: '3px 0',
+                    }}
+                  >
+                    <span style={{ width: 16, flexShrink: 0 }}>{r.icon}</span>
+                    <span style={{ width: 80, flexShrink: 0, color: '#bbb' }}>
+                      {r.label}
+                    </span>
+                    {r.cap.kind === 'have' ? (
+                      <code style={{ color: '#8ec98e' }}>{r.cap.model}</code>
+                    ) : r.cap.kind === 'depends' ? (
+                      <span style={{ color: '#d9c97a' }}>{r.cap.hint}</span>
+                    ) : (
+                      <span style={{ color: '#d98a8a' }}>✗ {r.cap.hint}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
+
           {/* Model picker — collapsed by default. The recommended model is
               auto-picked when the user clicks a backend preset (above), so
               this section is for power users (fine-tunes, beta versions,
@@ -413,21 +521,11 @@ export function Settings({ initial, onClose }: SettingsProps) {
             )}
           </div>
 
-          {/* Search-grounding toggle. Currently wired for Gemini only; for
-              other backends we still show the checkbox but with a hint
-              that it's a no-op until provider-specific support lands. */}
+          {/* Search-grounding toggle. Support state is already surfaced by
+              the 能力概览 row above — so this is just the on/off, disabled
+              when the active backend can't do search at all. */}
           {(() => {
-            const isGemini = draft.backend.baseUrl.includes('googleapis.com')
-            const isGlm = draft.backend.baseUrl.includes('bigmodel.cn')
-            const isKimi =
-              draft.backend.baseUrl.includes('moonshot.cn') ||
-              draft.backend.baseUrl.includes('moonshot.ai')
-            // Kimi's $web_search uses a non-OpenAI tool_call shape
-            // (type: "builtin_function") that the Vercel AI SDK's
-            // streaming parser rejects. Until we add a non-streaming
-            // path for it, search via Kimi just doesn't work — toggle
-            // is shown disabled with a hint.
-            const supported = isGemini || isGlm
+            const supported = searchCapability(draft.backend.baseUrl).kind === 'have'
             return (
               <div style={{ marginTop: 12 }}>
                 <label
@@ -436,11 +534,14 @@ export function Settings({ initial, onClose }: SettingsProps) {
                     alignItems: 'center',
                     gap: 6,
                     fontSize: 13,
+                    opacity: supported ? 1 : 0.5,
+                    cursor: supported ? 'pointer' : 'not-allowed',
                   }}
                 >
                   <input
                     type="checkbox"
-                    checked={draft.backend.searchEnabled}
+                    disabled={!supported}
+                    checked={supported && draft.backend.searchEnabled}
                     onChange={(e) =>
                       setDraft({
                         ...draft,
@@ -450,24 +551,11 @@ export function Settings({ initial, onClose }: SettingsProps) {
                   />
                   允许 AI 联网搜索
                 </label>
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: '#999',
-                    marginTop: 4,
-                    lineHeight: 1.5,
-                  }}
-                >
-                  {isGemini
-                    ? '✓ Gemini 支持：开启后模型自动决定何时谷歌搜索，回答会标注引用来源。'
-                    : isGlm
-                    ? '✓ GLM 支持：开启后模型自动决定何时搜索（智谱内置 web_search 工具）。'
-                    : isKimi
-                    ? '⚠️ Kimi 联网搜索暂不支持（他们的 $web_search 协议与流式 OpenAI 客户端不兼容）。需要联网搜索请切换到 Gemini 或 GLM。'
-                    : supported
-                    ? ''
-                    : '⚠️ 当前 backend 暂未接入搜索（Qwen / DeepSeek / LM Studio 等）。打勾不会生效。'}
-                </div>
+                {supported && (
+                  <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>
+                    开启后模型自动决定何时搜索，回答会标注引用来源。
+                  </div>
+                )}
               </div>
             )
           })()}
@@ -1047,6 +1135,78 @@ export function Settings({ initial, onClose }: SettingsProps) {
           </>
         )}
 
+        {activeTab === 'about' && (
+          <>
+            <Section title="关于 OpenMeido">
+              <div style={{ fontSize: 13, lineHeight: 1.7, color: '#ddd' }}>
+                <div style={{ marginBottom: 12 }}>
+                  桌面 AI 伴侣 — Live2D 形象 + 多后端 LLM + 记忆 / 好感度系统。
+                  为不写代码的人也能用 AI 而做。
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <Label>仓库</Label>
+                  <a
+                    href={REPO_URL}
+                    onClick={(e) => {
+                      e.preventDefault()
+                      void window.open(REPO_URL, '_blank', 'noopener,noreferrer')
+                    }}
+                    style={{ color: '#7ab8ff', textDecoration: 'underline' }}
+                  >
+                    {REPO_URL}
+                  </a>
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <Label>许可证</Label>
+                  <a
+                    href={LICENSE_URL}
+                    onClick={(e) => {
+                      e.preventDefault()
+                      void window.open(LICENSE_URL, '_blank', 'noopener,noreferrer')
+                    }}
+                    style={{ color: '#7ab8ff', textDecoration: 'underline' }}
+                  >
+                    GNU General Public License v3.0
+                  </a>
+                  <div style={{ fontSize: 11, color: '#999', marginTop: 4, lineHeight: 1.6 }}>
+                    可自由使用、修改、分发，但任何衍生作品也必须以同等条款开源。
+                  </div>
+                </div>
+              </div>
+            </Section>
+
+            <Section title="声明">
+              <div style={{ fontSize: 12, lineHeight: 1.7, color: '#bbb' }}>
+                <div style={{ marginBottom: 8 }}>
+                  <b style={{ color: '#8ec98e' }}>本软件完全免费、完全开源。</b>
+                </div>
+                <ul style={{ paddingLeft: 16, margin: '8px 0' }}>
+                  <li style={{ marginBottom: 4 }}>
+                    OpenMeido 本体不收取任何费用。如有人向你收费销售，请要求退款并到上方仓库地址反馈。
+                  </li>
+                  <li style={{ marginBottom: 4 }}>
+                    使用 LLM 后端（OpenAI / Gemini / GLM 等）产生的 API 费用由各 backend 厂商收取，与本项目无关。
+                  </li>
+                  <li style={{ marginBottom: 4 }}>
+                    本项目仅集成 Live2D Cubism Web SDK 的运行时调用；不包含、不分发任何 Live2D 模型文件。
+                    用户自带的模型版权归各原作者所有。
+                  </li>
+                  <li style={{ marginBottom: 4 }}>
+                    AI 生成的对话、表情、判断**仅供娱乐**，不代表任何事实陈述或建议；
+                    不要把 OpenMeido 当成医疗、法律、金融顾问。
+                  </li>
+                  <li>
+                    本软件按 GPL-3.0 第 15、16 条之规定，**不附带任何明示或暗示的担保**——
+                    使用过程中的数据丢失、设备损坏、心情起伏等概由用户自负。
+                  </li>
+                </ul>
+              </div>
+            </Section>
+          </>
+        )}
+
         {error && (
           <div style={{ color: '#f88', fontSize: 12, marginTop: 8 }}>[保存失败] {error}</div>
         )}
@@ -1168,20 +1328,26 @@ function ProactiveTab({
             <span>让她偶尔瞥一眼屏幕（截图传给 LLM）</span>
           </label>
           {draft.includeScreen && (
-            <div
-              style={{
-                fontSize: 11,
-                color: '#fc8',
-                marginBottom: 12,
-                padding: '6px 8px',
-                background: 'rgba(255,200,100,0.08)',
-                border: '1px solid rgba(255,200,100,0.25)',
-                borderRadius: 4,
-              }}
-            >
-              ⚠️ 每次主动触发都会拍下所有屏幕发给云端 LLM。会拍到密码框、私聊、银行界面。
-              请确认你信任当前后端的隐私策略。
-            </div>
+            <>
+              <div
+                style={{
+                  fontSize: 11,
+                  color: '#fc8',
+                  marginBottom: 8,
+                  padding: '6px 8px',
+                  background: 'rgba(255,200,100,0.08)',
+                  border: '1px solid rgba(255,200,100,0.25)',
+                  borderRadius: 4,
+                }}
+              >
+                ⚠️ 截屏会发送到云端 LLM。会拍到密码框、私聊、银行界面。
+                请确认你信任当前后端的隐私策略。
+              </div>
+              <ScreenExclusionPicker
+                excludedIds={draft.excludedScreenIds}
+                onChange={(ids) => onChange({ ...draft, excludedScreenIds: ids })}
+              />
+            </>
           )}
 
           <div style={{ fontSize: 11, color: '#888', marginBottom: 12 }}>
@@ -1416,6 +1582,7 @@ function Live2DTab({
         onChange={(e) => onChangeZoom(Number(e.target.value))}
         style={{ width: '100%', marginBottom: 12 }}
       />
+
 
       {active && (
         <>
@@ -2436,6 +2603,28 @@ function FactsPanel() {
               <span style={{ color: '#666', fontSize: 10 }}>
                 {(f.confidence * 100).toFixed(0)}%
               </span>
+              <button
+                onClick={async () => {
+                  // No confirm() — the action is small-scoped (one fact) and
+                  // reversible-ish (you can just chat about it again and
+                  // reflection will re-extract). Confirm dialogs on every
+                  // 🗑 in a long list are friction.
+                  await window.api.memory.deleteFact(f.id)
+                  await refresh()
+                }}
+                title="删除这条记忆"
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: '#888',
+                  cursor: 'pointer',
+                  fontSize: 11,
+                  padding: '0 2px',
+                  lineHeight: 1,
+                }}
+              >
+                🗑
+              </button>
             </div>
           ))}
         </div>
@@ -2547,6 +2736,160 @@ const closeBtnStyle: React.CSSProperties = {
   padding: 0,
 }
 
+/**
+ * Picker for which screens the AI is ALLOWED to capture. List = all
+ * attached displays with preview thumbnails. Checkbox per screen
+ * controls inclusion. The config field stores EXCLUDED ids (default
+ * empty = all included) so leaving the picker untouched preserves
+ * the "see all displays" default.
+ *
+ * Refreshes the list on mount + whenever the user clicks 刷新 (e.g.
+ * after plugging/unplugging a monitor).
+ */
+function ScreenExclusionPicker({
+  excludedIds,
+  onChange,
+}: {
+  excludedIds: string[]
+  onChange: (ids: string[]) => void
+}) {
+  const [screens, setScreens] = useState<
+    Array<{ id: string; name: string; previewBase64: string }>
+  >([])
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const reload = async (): Promise<void> => {
+    setLoading(true)
+    setErr(null)
+    try {
+      // Defensive: listScreens was added in v0.0.28; if the user is
+      // running with an older preload bundle that doesn't expose it
+      // (common during dev when preload hasn't HMR'd), we want a
+      // visible error not silent empty state.
+      const fn = window.api.chat.listScreens
+      if (typeof fn !== 'function') {
+        throw new Error('window.api.chat.listScreens 不存在——preload bundle 老了，重启 app。')
+      }
+      setScreens(await fn())
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => {
+    void reload()
+  }, [])
+  const excludedSet = new Set(excludedIds)
+  function toggle(id: string): void {
+    const next = new Set(excludedIds)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    onChange([...next])
+  }
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: 6,
+        }}
+      >
+        <Label>选择她能看到的屏幕</Label>
+        <button
+          onClick={() => void reload()}
+          disabled={loading}
+          style={{
+            fontSize: 10,
+            padding: '1px 8px',
+            background: 'rgba(255,255,255,0.06)',
+            border: '1px solid rgba(255,255,255,0.15)',
+            borderRadius: 4,
+            color: '#bbb',
+            cursor: 'pointer',
+          }}
+        >
+          {loading ? '...' : '刷新'}
+        </button>
+      </div>
+      {err ? (
+        <div style={{ fontSize: 11, color: '#f88' }}>{err}</div>
+      ) : screens.length === 0 ? (
+        <div style={{ fontSize: 11, color: '#888' }}>
+          {loading ? '正在检测屏幕…' : '没有检测到屏幕（点上方"刷新"重试）。'}
+        </div>
+      ) : (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
+            gap: 6,
+          }}
+        >
+          {screens.map((s) => {
+            const included = !excludedSet.has(s.id)
+            return (
+              <label
+                key={s.id}
+                style={{
+                  display: 'block',
+                  cursor: 'pointer',
+                  border: included
+                    ? '2px solid #5a8edf'
+                    : '2px solid rgba(255,255,255,0.1)',
+                  borderRadius: 4,
+                  padding: 4,
+                  background: included
+                    ? 'rgba(90,142,223,0.08)'
+                    : 'rgba(255,255,255,0.02)',
+                  opacity: included ? 1 : 0.5,
+                }}
+              >
+                <div style={{ position: 'relative' }}>
+                  <img
+                    src={`data:image/png;base64,${s.previewBase64}`}
+                    alt={s.name}
+                    style={{ width: '100%', display: 'block', borderRadius: 2 }}
+                  />
+                  <input
+                    type="checkbox"
+                    checked={included}
+                    onChange={() => toggle(s.id)}
+                    style={{
+                      position: 'absolute',
+                      top: 4,
+                      right: 4,
+                      transform: 'scale(1.2)',
+                    }}
+                  />
+                </div>
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: included ? '#ddd' : '#888',
+                    marginTop: 2,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {s.name}
+                </div>
+              </label>
+            )
+          })}
+        </div>
+      )}
+      <div style={{ fontSize: 10, color: '#888', marginTop: 4 }}>
+        勾选 = 允许她看；取消 = 这一块屏幕永远不会被截。设置同时影响"主动瞥屏"
+        和 👀 按钮触发的看屏。
+      </div>
+    </div>
+  )
+}
+
 /** Match shared/affinity.ts tier breakpoints. Duplicated in renderer to
  *  avoid pulling a Node-typed module into the renderer bundle. */
 function tierLabelFor(score: number): string {
@@ -2617,7 +2960,7 @@ function PersonaStatsPanel({
       >
         <span>❤️ 好感度</span>
         <span>
-          {stats.score} / 100 · {tier}
+          {Math.round(stats.score)} / 100 · {tier}
         </span>
       </div>
       <div

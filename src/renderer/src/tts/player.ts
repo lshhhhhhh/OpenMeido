@@ -34,12 +34,28 @@ export interface PlayHandle {
 let sharedCtx: AudioContext | null = null
 
 function getCtx(): AudioContext {
-  // Lazy-init so the AudioContext doesn't try to start at module-load
-  // time (browsers reject that). The first user gesture (chat send,
-  // button click) is enough to allow audio.
+  // Lazy-init the AudioContext. We pair this with main.ts's
+  // `--autoplay-policy=no-user-gesture-required` switch so the
+  // first audio at launch (greeting TTS) actually plays from the
+  // beginning instead of being held until the user first clicks.
   if (sharedCtx && sharedCtx.state !== 'closed') return sharedCtx
   sharedCtx = new AudioContext({ sampleRate: 24000 })
   return sharedCtx
+}
+
+/**
+ * Pre-create the shared AudioContext at renderer mount so the first
+ * playback (often the boot greeting) doesn't pay both the construction
+ * cost AND the autoplay-resume cost in the same frame. Safe to call
+ * repeatedly — idempotent on an already-open context.
+ */
+export function warmupAudioContext(): void {
+  try {
+    const ctx = getCtx()
+    if (ctx.state === 'suspended') void ctx.resume().catch(() => {})
+  } catch (err) {
+    console.warn('[tts] warmup failed:', err)
+  }
 }
 
 function base64ToArrayBuffer(b64: string): ArrayBuffer {

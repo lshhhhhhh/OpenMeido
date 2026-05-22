@@ -19,6 +19,17 @@ import type { Task } from '../core/tasks/types.js'
 
 let service: TaskService | null = null
 let initError: string | null = null
+/**
+ * Wall-clock ISO timestamp of when the task host first came up this
+ * launch. Used to scope "recently completed" rows shown in the sidebar
+ * to the current app session — otherwise X-deleting one done item lets
+ * older history slide into view, looking like resurrection.
+ */
+let bootAt: string | null = null
+
+export function getTasksBootAt(): string | null {
+  return bootAt
+}
 
 function broadcast(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -87,6 +98,7 @@ export function broadcastTasksChanged(): void {
 export async function initTasks(): Promise<void> {
   if (service || initError) return
   try {
+    bootAt = new Date().toISOString()
     const adapter = openSqliteTasks(app.getPath('userData'))
     service = createTaskService({
       adapter,

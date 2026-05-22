@@ -281,6 +281,25 @@ export function openSqliteMemory(
     db.exec('ALTER TABLE persona_affinity ADD COLUMN last_review_at TEXT')
     console.log('[memory] migrated: added persona_affinity.last_review_at')
   }
+  // Presence accrual state (v0.0.28). Without this, every app restart
+  // wipes minutesSinceLastBump and a user who chats in short sessions
+  // never reaches the 60-minute threshold for a +1.
+  if (!affCols.some((c) => c.name === 'presence_date')) {
+    db.exec('ALTER TABLE persona_affinity ADD COLUMN presence_date TEXT')
+    console.log('[memory] migrated: added persona_affinity.presence_date')
+  }
+  if (!affCols.some((c) => c.name === 'presence_minutes_accrued')) {
+    db.exec(
+      'ALTER TABLE persona_affinity ADD COLUMN presence_minutes_accrued REAL NOT NULL DEFAULT 0',
+    )
+    console.log('[memory] migrated: added persona_affinity.presence_minutes_accrued')
+  }
+  if (!affCols.some((c) => c.name === 'presence_bumps_today')) {
+    db.exec(
+      'ALTER TABLE persona_affinity ADD COLUMN presence_bumps_today INTEGER NOT NULL DEFAULT 0',
+    )
+    console.log('[memory] migrated: added persona_affinity.presence_bumps_today')
+  }
 
   // ---- Vec0 setup (unchanged from pre-persona schema; episode JOIN
   // applies the persona filter at query time) ----
@@ -424,6 +443,22 @@ export function openSqliteMemory(
     `INSERT INTO persona_affinity (persona_id, score, last_updated, last_reason, last_milestone)
      VALUES (?2, 0, datetime('now'), NULL, ?1)
      ON CONFLICT(persona_id) DO UPDATE SET last_milestone = excluded.last_milestone`,
+  )
+  const selectPresence = db.prepare<[string]>(
+    `SELECT presence_date AS date,
+            presence_minutes_accrued AS minutesAccrued,
+            presence_bumps_today AS bumpsToday
+     FROM persona_affinity WHERE persona_id = ?`,
+  )
+  const upsertPresence = db.prepare<[string, string | null, number, number]>(
+    `INSERT INTO persona_affinity
+       (persona_id, score, last_updated, last_reason,
+        presence_date, presence_minutes_accrued, presence_bumps_today)
+     VALUES (?, 0, datetime('now'), NULL, ?, ?, ?)
+     ON CONFLICT(persona_id) DO UPDATE SET
+       presence_date = excluded.presence_date,
+       presence_minutes_accrued = excluded.presence_minutes_accrued,
+       presence_bumps_today = excluded.presence_bumps_today`,
   )
   const updateLastReviewAt = db.prepare<[string, string]>(
     `INSERT INTO persona_affinity (persona_id, score, last_updated, last_reason, last_review_at)
@@ -600,6 +635,30 @@ export function openSqliteMemory(
       return Number(result.changes)
     },
 
+    async deleteFact(personaId, factId) {
+      ensureOpen()
+      // Find the key first so we can also wipe the full supersession
+      // chain. Otherwise an orphaned earlier version of the same fact
+      // (still marked superseded by the row we're deleting) gets left
+      // behind as dead weight in the table.
+      const row = selectFactById.get(factId) as FactRow | undefined
+      if (!row) return false
+      // Guard cross-persona: don't let one persona's UI nuke another's
+      // facts even if id is guessed correctly.
+      const owns = db
+        .prepare<[number, string]>(
+          'SELECT 1 FROM facts WHERE id = ? AND persona_id = ?',
+        )
+        .get(factId, personaId)
+      if (!owns) return false
+      const result = db
+        .prepare<[string, string]>(
+          'DELETE FROM facts WHERE persona_id = ? AND key = ?',
+        )
+        .run(personaId, row.key)
+      return Number(result.changes) > 0
+    },
+
     async getAffinity(personaId) {
       ensureOpen()
       const row = selectAffinity.get(personaId) as AffinityRecord | undefined
@@ -627,6 +686,28 @@ export function openSqliteMemory(
     async touchLastReview(personaId) {
       ensureOpen()
       updateLastReviewAt.run(new Date().toISOString(), personaId)
+    },
+
+    async getPresenceState(personaId) {
+      ensureOpen()
+      const row = selectPresence.get(personaId) as
+        | { date: string | null; minutesAccrued: number; bumpsToday: number }
+        | undefined
+      return {
+        date: row?.date ?? null,
+        minutesAccrued: row?.minutesAccrued ?? 0,
+        bumpsToday: row?.bumpsToday ?? 0,
+      }
+    },
+
+    async setPresenceState(personaId, state) {
+      ensureOpen()
+      upsertPresence.run(
+        personaId,
+        state.date,
+        state.minutesAccrued,
+        state.bumpsToday,
+      )
     },
 
     async deletePersona(personaId) {

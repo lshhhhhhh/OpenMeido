@@ -378,8 +378,11 @@ export function Sidebar({
               }}
             >
               <span>❤️ 好感度</span>
-              <span style={{ color: '#888' }}>
-                {affinity.score} · {affinity.tierLabel}
+              <span
+                style={{ color: '#888', cursor: 'help' }}
+                title={`${affinity.score.toFixed(2)} / 100`}
+              >
+                {Math.round(affinity.score)} · {affinity.tierLabel}
               </span>
             </div>
             <div
@@ -597,18 +600,39 @@ export function Sidebar({
                       fontSize: 11,
                     }}
                   >
-                    <div style={{ color: '#333' }}>
-                      <span style={{ fontWeight: 500 }}>
-                        {toolLabelZh(a.toolName)}
+                    <div
+                      style={{
+                        color: '#333',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'baseline',
+                        gap: 6,
+                      }}
+                    >
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <span style={{ fontWeight: 500 }}>
+                          {toolLabelZh(a.toolName)}
+                        </span>
+                        {(() => {
+                          const detail = toolDetailZh(a.toolName, a.summary)
+                          return detail ? (
+                            <span style={{ color: '#666', marginLeft: 4 }}>
+                              · {detail}
+                            </span>
+                          ) : null
+                        })()}
+                      </div>
+                      <span
+                        style={{
+                          color: '#999',
+                          fontSize: 10,
+                          flexShrink: 0,
+                          whiteSpace: 'nowrap',
+                        }}
+                        title={new Date(a.ts).toLocaleString('zh-CN')}
+                      >
+                        {relativeTime(a.ts)}
                       </span>
-                      {(() => {
-                        const detail = toolDetailZh(a.toolName, a.summary)
-                        return detail ? (
-                          <span style={{ color: '#666', marginLeft: 4 }}>
-                            · {detail}
-                          </span>
-                        ) : null
-                      })()}
                     </div>
                   </li>
                 ))}

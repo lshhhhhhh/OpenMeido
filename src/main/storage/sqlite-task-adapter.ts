@@ -51,9 +51,38 @@ function row2task(r: TaskRow): Task {
  * the new table has zero rows, so re-launching after a successful
  * migration is a no-op.
  */
+/**
+ * Best-effort rename of leftover legacy files to *.bak. Called when
+ * migration was already done but the rename step failed in a prior
+ * launch (EBUSY from a concurrently-running electron process). Silent
+ * on success; warns once if it still fails so the user can clean up
+ * manually if they care.
+ */
+function cleanupOrphanLegacy(dataDir: string): void {
+  for (const name of ['reminders.sqlite', 'todos.sqlite']) {
+    const path = join(dataDir, name)
+    if (!existsSync(path)) continue
+    try {
+      renameSync(path, path + '.bak')
+      console.log(`[tasks] cleaned up orphan ${name} → ${name}.bak`)
+    } catch (err) {
+      // EBUSY still — another electron instance is up. Cosmetic; ignore.
+      void err
+    }
+  }
+}
+
 function migrateLegacy(db: Database.Database, dataDir: string): void {
   const existing = db.prepare('SELECT COUNT(*) AS c FROM tasks').get() as { c: number }
-  if (existing.c > 0) return // already migrated (or new install with data)
+  if (existing.c > 0) {
+    // Tasks already populated — main migration is done. But if a prior
+    // launch hit EBUSY when renaming reminders.sqlite → reminders.sqlite.bak
+    // (another electron process was still holding the file), the legacy
+    // file stays as an orphan. Retry the rename now; ignore failures —
+    // it's a cosmetic cleanup, not load-bearing.
+    cleanupOrphanLegacy(dataDir)
+    return
+  }
 
   const remindersPath = join(dataDir, 'reminders.sqlite')
   const todosPath = join(dataDir, 'todos.sqlite')
@@ -182,12 +211,27 @@ export function openSqliteTasks(dataDir: string): TaskAdapter {
      WHERE done_at IS NULL
      ORDER BY created_at DESC, id DESC`,
   )
+  // Two flavors: with and without a "done_at >= ?" filter. We compose
+  // a different SQL when a doneSince ISO is supplied so the inner LIMIT
+  // is applied AFTER the time filter (otherwise you'd top-5 the whole
+  // history and then maybe filter all of them out).
   const selectAllStmt = db.prepare<[number]>(
     `SELECT id, created_at, text, done_at, fire_at, notified_at, due_at, session_id FROM (
        SELECT *, 0 AS sort_key FROM tasks WHERE done_at IS NULL
        UNION ALL
        SELECT *, 1 AS sort_key FROM (
          SELECT * FROM tasks WHERE done_at IS NOT NULL
+         ORDER BY done_at DESC, id DESC LIMIT ?
+       )
+     )
+     ORDER BY sort_key ASC, created_at DESC, id DESC`,
+  )
+  const selectAllSinceStmt = db.prepare<[string, number]>(
+    `SELECT id, created_at, text, done_at, fire_at, notified_at, due_at, session_id FROM (
+       SELECT *, 0 AS sort_key FROM tasks WHERE done_at IS NULL
+       UNION ALL
+       SELECT *, 1 AS sort_key FROM (
+         SELECT * FROM tasks WHERE done_at IS NOT NULL AND done_at >= ?
          ORDER BY done_at DESC, id DESC LIMIT ?
        )
      )
@@ -237,9 +281,12 @@ export function openSqliteTasks(dataDir: string): TaskAdapter {
       return (selectActiveStmt.all() as TaskRow[]).map(row2task)
     },
 
-    async listAll(recentDoneLimit = 5) {
+    async listAll(recentDoneLimit = 5, doneSinceIso: string | null = null) {
       ensureOpen()
-      return (selectAllStmt.all(recentDoneLimit) as TaskRow[]).map(row2task)
+      const rows = doneSinceIso
+        ? (selectAllSinceStmt.all(doneSinceIso, recentDoneLimit) as TaskRow[])
+        : (selectAllStmt.all(recentDoneLimit) as TaskRow[])
+      return rows.map(row2task)
     },
 
     async listUpcoming() {

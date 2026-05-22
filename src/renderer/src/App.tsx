@@ -4,7 +4,7 @@ import type { ChatEvent, ChatImageAttachment } from '../../shared/ipc'
 import { resolvePersona, backgroundFor } from '../../shared/config'
 import { Live2DCanvas } from './live2d/Live2DCanvas'
 import type { Live2DController, Coverage } from './live2d/stage'
-import { playMp3Base64, type PlayHandle } from './tts/player'
+import { playMp3Base64, warmupAudioContext, type PlayHandle } from './tts/player'
 import { Settings } from './Settings'
 import { SetupWizard } from './SetupWizard'
 import { Sidebar } from './Sidebar'
@@ -42,7 +42,13 @@ interface ChatMessage {
 // `-webkit-app-region` isn't in @types/react's CSSProperties yet. Bridge it.
 type AppRegionStyle = React.CSSProperties & { WebkitAppRegion?: 'drag' | 'no-drag' }
 
-const DEFAULT_CHAT_HEIGHT = 180
+/** Default chat panel takes 2/5 of the window height. Computed lazily so
+ *  it adapts to the user's actual window size rather than assuming the
+ *  720 default — a tall ultrawide window would otherwise get a tiny
+ *  chat panel relative to the Live2D space. */
+const DEFAULT_CHAT_HEIGHT_RATIO = 0.4
+const computeDefaultChatHeight = (): number =>
+  Math.round((typeof window !== 'undefined' ? window.innerHeight : 720) * DEFAULT_CHAT_HEIGHT_RATIO)
 const MIN_CHAT_HEIGHT = 100
 const MIN_LIVE2D_HEIGHT = 120
 
@@ -109,7 +115,7 @@ export default function App() {
   // section refetches. Activity is derived from episodes, no broadcast.
   const [activityRefreshToken, setActivityRefreshToken] = useState(0)
   const [error, setError] = useState<string | null>(null)
-  const [chatHeight, setChatHeight] = useState(DEFAULT_CHAT_HEIGHT)
+  const [chatHeight, setChatHeight] = useState(computeDefaultChatHeight)
   const [settingsOpen, setSettingsOpen] = useState(false)
   // Pending attachments for the NEXT send. Cleared after send fires.
   const [attachments, setAttachments] = useState<ChatImageAttachment[]>([])
@@ -118,6 +124,9 @@ export default function App() {
   // recording uses MediaRecorder + AudioContext to capture the user's mic;
   // transcribing decodes the blob, resamples to 16 kHz mono Float32, and
   // ships to main where Whisper produces the transcript.
+  /** Quick screen-react in flight — disables the button so rapid
+   *  clicks don't fire concurrent captures + LLM calls. */
+  const [quickScreenBusy, setQuickScreenBusy] = useState(false)
   const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>(
     'idle',
   )
@@ -222,6 +231,14 @@ export default function App() {
       patchLastAssistant((m) => ({ ...m, text: m.text + buf }))
     }
   }
+
+  // Warm the AudioContext on first mount so the boot-greeting TTS plays
+  // from the start, not from "wherever Chromium let it begin once we
+  // had a user gesture". Pairs with main.ts's
+  // --autoplay-policy=no-user-gesture-required.
+  useEffect(() => {
+    warmupAudioContext()
+  }, [])
 
   useEffect(() => {
     return window.api.chat.onEvent((event: ChatEvent) => {
@@ -758,6 +775,30 @@ export default function App() {
    * mono Float32, ship to main for Whisper transcription, and put the
    * result into the chat input box (user can edit before Send).
    */
+  /**
+   * Quick screen-react — user clicks the 👀 button. Main captures all
+   * displays, vision LLM comments in persona+tier voice, result lands
+   * in chat as an assistant bubble via the existing proactive:remark
+   * pipe (so TTS + emotion classifier + memory persistence all run
+   * for free). Disabled while a previous call is in flight.
+   */
+  async function triggerQuickScreenReact(): Promise<void> {
+    if (quickScreenBusy) return
+    setQuickScreenBusy(true)
+    try {
+      const result = await window.api.chat.quickScreenReact()
+      if (!result.ok) {
+        // Show as a transient error — don't add an assistant bubble.
+        setError(result.error)
+        setTimeout(() => setError(null), 4000)
+      }
+      // On success the proactive:remark broadcast already added the
+      // assistant bubble + ran TTS + classifier. Nothing more to do.
+    } finally {
+      setQuickScreenBusy(false)
+    }
+  }
+
   async function toggleVoiceInput(): Promise<void> {
     if (voiceState === 'transcribing') return // ignore mid-transcribe clicks
     if (voiceState === 'recording') {
@@ -1058,18 +1099,29 @@ export default function App() {
         </div>
       </div>
 
-      {/* Live2D stage — fills the bulk of the window, transparent BG so the
-          desktop shows through everywhere except where the character renders. */}
+      {/* Stage container — Live2D fills the FULL area below the status
+          bar (chat panel does NOT carve out space from it). Chat panel
+          overlays the bottom portion, so the model's lower body sits
+          BEHIND the chat. This matches the desktop-companion-with-desk
+          visual: she's standing in the room and the chat box covers
+          her legs. */}
       <div style={{ flex: 1, minHeight: 0, position: 'relative', zIndex: 1 }}>
-        {config && modelUrl && (
-          <Live2DCanvas
-            ref={live2dRef}
-            modelPath={modelUrl}
-            fitMode="portrait"
-            portraitZoom={config.live2d.portraitZoom}
-            onCoverageChange={handleLive2DCoverage}
-          />
-        )}
+        {/* Live2D canvas — absolute inset 0 so it spans the entire
+            stage container, including the area the chat panel covers.
+            Model anchored at the bottom of THIS container = full window
+            height (minus status bar), not just the visible-above-chat
+            portion. */}
+        <div style={{ position: 'absolute', inset: 0, zIndex: 1 }}>
+          {config && modelUrl && (
+            <Live2DCanvas
+              ref={live2dRef}
+              modelPath={modelUrl}
+              fitMode="portrait"
+              portraitZoom={config.live2d.portraitZoom}
+              onCoverageChange={handleLive2DCoverage}
+            />
+          )}
+        </div>
         {/* Slice 2 test controls — floating top-left, no-drag so they're clickable. */}
         <div
           style={{
@@ -1080,6 +1132,7 @@ export default function App() {
             display: 'flex',
             gap: 4,
             fontSize: 11,
+            zIndex: 2,
           }}
         >
           <button onClick={() => live2dRef.current?.randomExpression()}>随机表情</button>
@@ -1093,17 +1146,18 @@ export default function App() {
             sidebar is collapsed. Updates live via the affinity:changed
             broadcast. */}
         <Live2DAffinityBadge />
-      </div>
 
-      {/* Chat panel — translucent card at the bottom, no-drag so the input
-          and buttons receive normal clicks instead of starting a window drag.
-          Height is controlled by chatHeight + the resize strip below.
-          Rounded top corners make the top edge look like an intentional card
-          boundary, not a frame. */}
+      {/* Chat panel — overlays the bottom of the stage container. zIndex
+          2 puts it above the Live2D canvas (zIndex 1) so the model's
+          lower body is genuinely covered by the chat card, not just
+          clipped at the canvas edge. */}
       <div
         style={{
           ...noDragRegion,
-          flex: '0 0 auto',
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          bottom: 0,
           height: chatHeight,
           background: 'rgba(255, 255, 255, 0.88)',
           backdropFilter: 'blur(8px)',
@@ -1112,13 +1166,7 @@ export default function App() {
           flexDirection: 'column',
           fontFamily: 'system-ui, sans-serif',
           overflow: 'hidden',
-          // Render above the bg layer (which has zIndex: 0). Without
-          // this, the chat panel — being a sibling in normal flow with
-          // no explicit z-index — can wind up below the bg's stacking
-          // context once `transform: scale()` is applied, swallowing
-          // clicks in the rightmost region.
-          position: 'relative',
-          zIndex: 1,
+          zIndex: 2,
         }}
       >
         {/* Resize strip — lives INSIDE the chat panel's top so its 6px height
@@ -1358,7 +1406,7 @@ export default function App() {
             <button
               onClick={captureScreen}
               disabled={capturing || busy}
-              title="截屏给妹妹看（多屏自动全截）"
+              title={`截屏给${config ? resolvePersona(config.persona).name : '她'}看（多屏自动全截，附在下一条消息）`}
               style={{
                 padding: '4px 8px',
                 background: attachments.length ? 'rgba(120,160,255,0.25)' : undefined,
@@ -1442,6 +1490,28 @@ export default function App() {
               )}
             </button>
             )}
+            <button
+              onClick={() => void triggerQuickScreenReact()}
+              disabled={quickScreenBusy}
+              title="让她看一眼你的屏幕，主动评论一下"
+              style={{
+                ...noDragRegion,
+                padding: '4px 8px',
+                width: 32,
+                background: quickScreenBusy
+                  ? 'rgba(120, 160, 255, 0.25)'
+                  : undefined,
+                color: '#555',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 16,
+                cursor: quickScreenBusy ? 'default' : 'pointer',
+                opacity: quickScreenBusy ? 0.6 : 1,
+              }}
+            >
+              {quickScreenBusy ? '…' : '👀'}
+            </button>
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -1486,6 +1556,9 @@ export default function App() {
           </div>
         </div>
       </div>
+      {/* end chat panel */}
+      </div>
+      {/* end stage container */}
 
       {/* Sidebar — live view of tasks (reminders + TODOs) + recent activity.
           Toggle hits main via `sidebar.setOpen` so the window grows/shrinks
@@ -1741,7 +1814,7 @@ function Live2DAffinityBadge() {
   if (!info) return null
   return (
     <div
-      title={info.reason ?? '还没有判定记录'}
+      title={`${info.score.toFixed(2)} / 100\n${info.reason ?? '还没有判定记录'}`}
       style={{
         position: 'absolute',
         top: 4,
@@ -1764,7 +1837,7 @@ function Live2DAffinityBadge() {
       }}
     >
       <span style={{ color: '#f6a4b3' }}>❤️</span>
-      <span>{info.score}</span>
+      <span>{Math.round(info.score)}</span>
       <span style={{ color: '#bbb', fontSize: 10 }}>· {info.tierLabel}</span>
     </div>
   )

@@ -30,3 +30,7 @@ src/renderer/public/live2d-models/haitu_vts/
 # (which `npm run dist` runs as a pre-step). Live2D zips at models/*.zip
 # are extracted into src/renderer/public/live2d-models/ by the seed flow.
 models/
+
+# Project-root background/ is author-only working storage. The actual
+# assets shipped with the renderer live at src/renderer/public/background/.
+/background/

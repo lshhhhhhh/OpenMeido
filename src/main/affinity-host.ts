@@ -21,11 +21,11 @@ import { getConfig } from './config.js'
 import { getMemoryService, getMemoryAdapter } from './memory-host.js'
 import {
   AFFINITY_MAX,
-  PER_DAY_DELTA_CAP,
   PRESENCE_SCORE_CEILING,
   applyDecay,
   applyDeltaWithGuardrails,
   buildTierPromptBlock,
+  curveDelta,
   tierFor,
   type TierInfo,
 } from '../shared/affinity.js'
@@ -82,13 +82,11 @@ export async function applyJudgement(
   if (!memory) return null
   try {
     const record = await memory.getAffinity()
-    const lifetimeTurns = await memory.countFor(personaId)
     const s = getOrInit(personaId)
     s.cachedScore = record.score
     const result = applyDeltaWithGuardrails({
       currentScore: record.score,
       rawDelta,
-      lifetimeTurns,
       todayAbsDelta: s.todayAbsDelta,
       recentDeltas: s.recentDeltas,
     })
@@ -132,54 +130,49 @@ export async function applyJudgement(
 }
 
 /**
- * Passive presence bump — +1 affinity for having the user nearby for
- * a sustained period. Different from `applyJudgement`:
+ * Passive presence bump — small fractional affinity gain for having the
+ * user nearby. Different from `applyJudgement`:
  *   - no LLM call (no judge, no reason synthesis)
- *   - skips cold-start damping (presence is presence regardless of
- *     how many chat turns have happened)
  *   - HARD-CAPS at PRESENCE_SCORE_CEILING — deep relationship still
  *     requires real interaction, can't be ground out by leaving the
  *     window open
- *   - still respects per-day cap (shared with judge deltas) and the
- *     0..100 score bounds
+ *   - respects the 0..100 score bounds
+ *   - does NOT touch the per-day judge cap or the rolling-median buffer
+ *     (presence is a separate budget tracked by presence-host)
  *
- * Called by `presence-host` after the user has accumulated enough
- * active minutes. Returns the resolved new score, or null if no bump
- * applied (ceiling reached / day cap full / memory not ready).
+ * `amount` is the raw points to add (before the diminishing curve).
+ * The curve scales it down at higher scores so the meaningful payout
+ * shrinks as the relationship matures. Returns null if no movement
+ * (ceiling reached / memory not ready); otherwise the before+after
+ * scores so the caller can decide what to log.
  */
 export async function applyPresenceBump(
   personaId: string,
+  amount: number,
   reason: string,
-): Promise<number | null> {
+): Promise<{ before: number; after: number } | null> {
   const memory = getMemoryService()
   if (!memory) return null
   try {
     const record = await memory.getAffinity()
-    if (record.score >= PRESENCE_SCORE_CEILING) {
-      console.log(
-        `[affinity] presence bump skipped — score ${record.score} >= ceiling ${PRESENCE_SCORE_CEILING}`,
-      )
-      return null
-    }
+    if (record.score >= PRESENCE_SCORE_CEILING) return null
     const s = getOrInit(personaId)
     s.cachedScore = record.score
-    // Share the per-day cap with judge deltas — same `todayAbsDelta`
-    // counter. If today already moved by 10 from chat, presence won't
-    // pile on top.
-    if (s.todayAbsDelta >= PER_DAY_DELTA_CAP) {
-      console.log('[affinity] presence bump skipped — daily cap reached')
-      return null
-    }
-    const next = Math.min(AFFINITY_MAX, record.score + 1)
+    const curved = curveDelta(amount, record.score)
+    const next = Math.min(
+      AFFINITY_MAX,
+      Math.min(PRESENCE_SCORE_CEILING, record.score + curved),
+    )
     if (next === record.score) return null
     await memory.setAffinity(next, reason)
     s.cachedScore = next
-    s.todayAbsDelta += 1
-    s.recentDeltas = [1, ...s.recentDeltas].slice(0, 2)
-    console.log(`[affinity] presence ${personaId} ${record.score} → ${next}: ${reason}`)
+    // Intentionally not touching todayAbsDelta or recentDeltas — presence
+    // is its own budget tracked by presence-host. Mixing them caused the
+    // rolling-median sign-flip class of bugs (presence's many small
+    // positives swamping a single judge negative).
     broadcastAffinityChanged(personaId, next, reason)
 
-    // Milestone check — passive bumps can still cross tier boundaries.
+    // Milestone check — passive accrual can still cross tier boundaries.
     const crossed = milestoneCrossed(record.lastMilestone, next)
     if (crossed !== null) {
       console.log(
@@ -189,7 +182,7 @@ export async function applyPresenceBump(
         console.warn('[affinity] milestone fire failed:', err)
       })
     }
-    return next
+    return { before: record.score, after: next }
   } catch (err) {
     console.warn('[affinity] applyPresenceBump failed:', err)
     return null

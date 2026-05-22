@@ -112,15 +112,19 @@ export function buildCombinedClassifierPrompt(args: {
   currentAffinity: number
   /** Tier label for context. */
   tierLabel: string
+  /** Emotion she displayed on the PREVIOUS reply. Used to break "stuck on
+   *  the same label" streaks — the renderer's `model.expression()` is a
+   *  no-op when called with the same name twice in a row, so repeated
+   *  identical labels look like "no expression change at all". */
+  lastEmotion?: string | null
 }): string {
   return (
     `你是这次对话的旁观者。任务：\n` +
     `1. 判断${args.persona.name}刚才那句话里**她**的情绪。\n` +
     `2. 判断**用户**这一轮的态度让${args.persona.name}对用户的好感度该如何变化。\n` +
     `\n` +
-    `# 情绪候选（只能选其一，或选 中性）\n` +
+    `# 情绪（必须从下面 8 个标签里选一个，没有"中性"或"无"这种逃避选项）\n` +
     args.validLabels.map((e) => `- ${e}`).join('\n') +
-    `\n- 中性（看不出明显情绪）\n` +
     `\n` +
     `# 好感度变化（affinity_delta，整数 -2 到 +2）\n` +
     `+2  用户非常温暖 / 分享了私人事 / 真情流露 / 主动关心\n` +
@@ -133,15 +137,26 @@ export function buildCombinedClassifierPrompt(args: {
     `# 规则\n` +
     `- 看用户的态度，不看话题。"早上好"本身不该 +2；用户记得了她说过的事、主动关心、自然撒娇 → +1/+2。\n` +
     `- 用户单纯让她做事（"提醒我五分钟后喝水"）= 0。\n` +
-    `- 不确定 → 0。\n` +
-    `- 情绪偏保守：不明显选 中性。\n` +
+    `- 不确定（好感度）→ 0。\n` +
+    `- **每句都有情绪**。从 8 个标签里挑最贴近的，例子按标签分散——\n` +
+    `  · 开心：发现主人成就 / 被主人逗笑 / 主人回来了\n` +
+    `  · 害羞：被夸 / 被关心 / 客气的"好的，我会的"\n` +
+    `  · 得意：答应任务并觉得自己能搞定 / 主动帮忙 / 客观回读自己刚做完的事\n` +
+    `  · 无语：主人耍嘴 / 不可理喻的请求 / 重复同一问题\n` +
+    `  · 尴尬：撒娇式抱怨 / 被戳穿\n` +
+    `  · 慌张：报错 / 来不及 / 自己搞砸了\n` +
+    `  · 难过：被冷落 / 主人遭遇坏事\n` +
+    `  · 震惊：意外消息 / 主人爆料\n` +
+    (args.lastEmotion
+      ? `- **避免连续重复**。她上一次的情绪是「${args.lastEmotion}」。如果这一轮的判断非常贴近「${args.lastEmotion}」，从另外 7 个里挑最接近的次贴近的——表情连续两次相同在视觉上等于没变化。\n`
+      : '') +
     `\n` +
     `# 输入\n` +
     `用户上一句：「${args.userText}」\n` +
     `${args.persona.name}回复：「${args.assistantText}」\n` +
     `\n` +
     `# 输出（只输出 JSON，不要解释）\n` +
-    `{"emotion": "<情绪标签或中性>", "affinity_delta": -2..2, "reason": "中文一句话，不超过 25 字"}\n`
+    `{"emotion": "<8 个标签里选一个>", "affinity_delta": -2..2, "reason": "中文一句话，不超过 25 字"}\n`
   )
 }
 
@@ -334,15 +349,25 @@ export function buildProactiveRemarkPrompt(args: {
    *  factsBlock — only used in elaborate mode to ground references
    *  in real conversation history instead of invention. */
   recentUserMessages?: string[]
+  /** Recent silent screen-observations (e.g. "CS2 比赛, Falcons 战队")
+   *  from past screen captures. Drives "she remembers what you've been
+   *  watching" — same data flow as the user-triggered quick-screen
+   *  path, shared so both feel like the same character noticing. Only
+   *  meaningful with hasScreenshot=true. */
+  pastObservations?: string[]
 }): string {
   const triggerLines = args.triggers.map((t) => `${t.kind}: ${t.note}`).join('\n')
   const mood = timeOfDayMood()
   const nameLine = args.userName
     ? `已知用户的名字是「${args.userName}」。可以自然地用名字。\n`
     : ''
+  // Shared screen-reaction rules — same block the user-triggered
+  // quick-screen-react uses. Without this, timer-triggered remarks felt
+  // like film criticism ("这期在拆祖国人反扑，节奏挺狠") while button-
+  // triggered ones felt like a friend's reaction. Same rules now =
+  // same voice across both paths.
   const screenHint = args.hasScreenshot
-    ? `\n# 屏幕\n` +
-      `这次还附了用户当前屏幕的截图。如果画面里有具体的事（在看视频 / 在写代码 / 在聊天 / 看上去发呆 / 看上去专注），可以自然带一句相关的。**绝对不要**念屏幕上的具体文字内容、UI 元素、用户名、密码、邮箱地址等——只用一句感受性的、关心式的描述。如果画面不清楚或没什么可说，silent 即可。\n`
+    ? '\n' + buildScreenReactionRules(false) + '\n'
     : ''
   const selfHistoryBlock =
     args.recentSelfRemarks && args.recentSelfRemarks.length > 0
@@ -389,10 +414,25 @@ export function buildProactiveRemarkPrompt(args: {
         `- 如果上面没有真实可引的东西，就别提"上周说的"、"上次提到"、"你之前那个"这类话——这些都是**幻觉**。\n` +
         `- 没东西可分享 → should_speak=false。不要为凑字数堆客套。\n\n`
       : '') +
+    (args.hasScreenshot && args.pastObservations && args.pastObservations.length > 0
+      ? `\n# 你之前在屏幕上观察过（私下笔记，不是用户说过的话）\n` +
+        args.pastObservations.map((o) => `- ${o}`).join('\n') +
+        `\n（如果这次屏幕和上面某条匹配，comment 可以自然引用——"又在看 X" / "上次那个 Y 怎么样了"）\n`
+      : '') +
     `# 输出（只输出 JSON，不要解释）\n` +
-    (args.elaborate
-      ? `{"should_speak": true|false, "reason": "内部说明，不会展示给用户", "comment": "如果 should_speak=true 时要说的话；用你这个角色的语气和称呼；60-120 字；不要 emoji、markdown、引号"}\n`
-      : `{"should_speak": true|false, "reason": "内部说明，不会展示给用户", "comment": "如果 should_speak=true 时要说的话；用你这个角色的语气和称呼；不超过 30 字；不要 emoji、markdown、引号"}\n`) +
+    (args.hasScreenshot
+      ? // With screenshot: also capture silent observations for memory.
+        // `noted` is private — NEVER shown to user, fed to next call.
+        `{\n` +
+        `  "should_speak": true|false,\n` +
+        `  "reason": "内部说明，不展示",\n` +
+        `  "comment": "${args.elaborate ? '60-120 字' : '不超过 30 字'}；遵守屏幕规则；should_speak=false 时填空字符串",\n` +
+        `  "noted": ["<具体细节，看到什么记什么——节目名/战队/选手/应用/在做什么；2-15 字名词性短语；3-8 条；隐私内容不要记>"]\n` +
+        `}\n` +
+        `**noted 必须填**：哪怕 should_speak=false 也要记下这次看到的东西。这是给你下次见到类似画面的私下笔记。\n`
+      : args.elaborate
+        ? `{"should_speak": true|false, "reason": "内部说明，不会展示给用户", "comment": "如果 should_speak=true 时要说的话；用你这个角色的语气和称呼；60-120 字；不要 emoji、markdown、引号"}\n`
+        : `{"should_speak": true|false, "reason": "内部说明，不会展示给用户", "comment": "如果 should_speak=true 时要说的话；用你这个角色的语气和称呼；不超过 30 字；不要 emoji、markdown、引号"}\n`) +
     `\n` +
     `# 触发原因\n` +
     `${triggerLines}\n`
@@ -501,6 +541,170 @@ export function buildWeeklyReviewPrompt(args: {
     `- 输出纯文本，不要 JSON、不要标题、不要列表、不要 emoji、不要 markdown。`
   )
 }
+
+/**
+ * Quick-screen-react prompt — fired when the user clicks the "看屏幕"
+ * button. Unlike the proactive proactive prompt (which gates on
+ * should_speak and might decide to stay silent), this one is
+ * **always called by user action** so she always responds. Only
+ * exception: explicit privacy-sensitive content where saying anything
+ * would itself be invasive — those cases output the literal string
+ * "(SILENT)" which the caller handles.
+ *
+ * Inherits the screen privacy rules — specific public content is fair
+ * game, private content (emails, chats, passwords) gets vague-acknowledged
+ * or skipped.
+ */
+export function buildQuickScreenReactPrompt(args: {
+  persona: { name: string; systemPrompt: string }
+  tierBlock: string
+  now: string
+  userName?: string | null
+  /** L3 distilled knowledge — e.g. "user.interest.game: CS2", "user.interest.team: Falcons".
+   *  Lets the model say "你又在看猎鹰" without having to recompute the pattern. */
+  factsBlock?: string
+  /** Recent silent observations from prior screen captures. Each entry is
+   *  a comma-joined list of specific things she noted on that earlier
+   *  screen. Drives the "she remembers what you've been doing" feel:
+   *  Day 0 she silently notes "CS2 比赛, Falcons 战队"; Day 1 prompt
+   *  contains "你之前观察过：- CS2 比赛, Falcons 战队"; she can now
+   *  reference the pattern aloud. */
+  pastObservations?: string[]
+}): string {
+  const nameLine = args.userName
+    ? `已知用户的名字是「${args.userName}」。可以自然带入。\n`
+    : ''
+  const facts =
+    args.factsBlock && args.factsBlock.trim()
+      ? `\n# 你对用户的稳定认知\n${args.factsBlock.trim()}\n`
+      : ''
+  const past =
+    args.pastObservations && args.pastObservations.length > 0
+      ? `\n# 你之前在屏幕上观察过（私下笔记，不是用户说过的话）\n` +
+        args.pastObservations.map((o) => `- ${o}`).join('\n') +
+        `\n（如果这次屏幕和上面某条匹配，你可以在 spoken 里自然引用——"又在看 X" / "上次那个 Y 怎么样了"）\n`
+      : ''
+  return (
+    args.persona.systemPrompt +
+    '\n\n' +
+    args.tierBlock +
+    '\n\n' +
+    `# 此刻\n` +
+    `用户瞥了一下屏幕给你看——想听**你对他/她**的反应。\n` +
+    `当前时间：${args.now}。\n` +
+    nameLine +
+    facts +
+    past +
+    `\n` +
+    buildScreenReactionRules(true) +
+    `\n` +
+    `# 输出（**只输出 JSON**）\n` +
+    `结构：\n` +
+    `{\n` +
+    `  "spoken": "<用户能听见的那句话——按 persona + tier 语气，遵守上面所有规则>",\n` +
+    `  "noted": ["<具体细节 1>", "<具体细节 2>", ...]\n` +
+    `}\n` +
+    `\n` +
+    `## spoken 字段\n` +
+    `- 用户实际看到 / 听到的那句话\n` +
+    `- 严格遵守"看人不看戏"规则 + 禁用开头 + 字数限制\n` +
+    `- 隐私敏感：输出 "(SILENT)"\n` +
+    `\n` +
+    `## noted 字段（**私下笔记**，用户看不到）\n` +
+    `- 列出你**在这次屏幕上看到的具体信息**——你说出口的，和你没说出口的，**都要记**\n` +
+    `- 例子：节目名 / 战队 / 选手 / 应用 / 游戏 / 网站 / 用户当下在做什么 / 时间段\n` +
+    `- 每条 2-15 字，名词性短语，**事实层**，不是评价\n` +
+    `- 3-8 条即可。隐私内容（密码框、私聊正文等）**不要记**\n` +
+    `- 即使 spoken 里没提到的也要记下来——这是给你下次见到类似画面时的私人笔记\n` +
+    `\n` +
+    `## 示例\n` +
+    `用户左屏 CS2 比赛（Falcons vs Vitality, NIKO 在镜头里），右屏在敲 Python：\n` +
+    `{\n` +
+    `  "spoken": "主人喜欢 CS2 这个游戏吗？",\n` +
+    `  "noted": ["CS2 比赛", "Falcons 战队", "NIKO 选手", "Vitality 战队", "B 站直播间", "Python 编辑器"]\n` +
+    `}\n` +
+    `\n` +
+    `（spoken 没点名战队和选手——还不熟；但 noted 全部记下来，下次见到同样的人你就能问"又看猎鹰啊"）\n`
+  )
+}
+
+/**
+ * Shared "what to do when there's a screenshot" rule block. Used by
+ * BOTH the user-triggered quick-screen-react path AND the timer-
+ * triggered proactive-with-screen path. Keeps the two paths producing
+ * the same persona-voiced reactions instead of one feeling like an
+ * impromptu friend and the other feeling like a content describer.
+ *
+ * The caller decides:
+ *   - includeAngle: whether to inject a random "open-up angle"
+ *     (good for one-shot button presses; redundant for the proactive
+ *     path which already gets variety from triggers + self-history).
+ */
+export function buildScreenReactionRules(includeAngle: boolean): string {
+  const angle = includeAngle
+    ? `\n## 这次的开口角度（随机一个）\n${
+        SHARED_SCREEN_ANGLES[
+          Math.floor(Math.random() * SHARED_SCREEN_ANGLES.length)
+        ]
+      }\n`
+    : ''
+  return (
+    `# **看屏幕时：你在看用户，不在评价屏幕内容**\n` +
+    `\n` +
+    `你**不是影评人 / 内容评论员 / 介绍员**。屏幕上的东西是关于**用户当下状态**的线索——他/她在看什么、忙什么、卡在哪、是不是累了。话要落在**用户**身上，不是**内容**身上。\n` +
+    `\n` +
+    `## 绝对禁止的开头模式\n` +
+    `- ❌ "您正在 / 你在 / 你这是 ..."\n` +
+    `- ❌ "这是 / 这个 / 这部 / 这期 / 这段 / 这一 / 这页 ..."\n` +
+    `- ❌ "屏幕上 / 我看到 / 我注意到 / 这边 / 那边 ..."\n` +
+    `- ❌ "您打开了 / 您正在使用 / 后台还在 ..."\n` +
+    `- ❌ 任何"评价内容本身（节奏挺狠 / 镜头不错 / 剧情挺猛 / 写得好）"的影评式表达\n` +
+    `- ❌ "先报内容名 + 一句评价"的两段式\n` +
+    `\n` +
+    `## 正确：把镜头对准用户\n` +
+    `❌ "这期在拆祖国人反扑，节奏挺狠" ← 影评\n` +
+    `✅ "祖国人一出来您就停下来看了，喜欢这种角色吧。"\n` +
+    `\n` +
+    `❌ "Python 处理 CSV，挺基础的活儿" ← 评内容\n` +
+    `✅ "又卡 encoding 上了？上次那个解决了吗？"\n` +
+    `\n` +
+    `❌ "塞尔达的画面真不错" ← 评游戏\n` +
+    `✅ "这血条……您是要送了。"\n` +
+    `\n` +
+    `❌ "这段写得不错" ← 评内容\n` +
+    `✅ "光标停半天了，思路断了吧？"\n` +
+    `\n` +
+    `## 隐私边界（看见但不评论 → silent / should_speak=false）\n` +
+    `- 密码框 / 银行 / 金融 / 证件 / 医疗\n` +
+    `- 邮件正文 / 私密聊天\n` +
+    `- 约会软件、人事 / 心理咨询类信息\n` +
+    `- 任何含人名 + 联系方式的私密内容\n` +
+    `\n` +
+    `## 关键\n` +
+    `- 看**人**，不看**戏**——内容只是线索\n` +
+    `- 不复述屏幕标题、字幕、UI 文字\n` +
+    `- 直接进入"关于用户当下"的反应：状态、习惯、可能感受、可能下一步\n` +
+    `- **1 句话**为佳，最多 2 句\n` +
+    angle
+  )
+}
+
+/**
+ * Random angles injected into quick-screen-react prompts so identical
+ * screens produce varied replies. Each emphasizes a different
+ * "look-at-the-user" framing. Shared between quick-screen and any
+ * other path that wants angle variety on screen reactions.
+ */
+const SHARED_SCREEN_ANGLES = [
+  '调侃他/她最近的某种状态或习惯',
+  '关心一下他/她的身体 / 情绪 / 是否需要休息',
+  '猜测他/她当下的内心活动或下一步打算',
+  '把屏幕上的东西和"他/她最近一直在做什么"联系起来',
+  '提出一个跟他/她当前状态有关的小问题',
+  '在他/她的状态上打个温暖的小玩笑',
+  '注意到他/她跟之前对比的变化（更累 / 更专注 / 比以前晚 / 比以前早等）',
+]
+
 
 /**
  * Render the "what you actually know" block injected into elaborate-mode

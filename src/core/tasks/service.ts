@@ -16,7 +16,7 @@ import type { NewTask, Task } from './types.js'
 export interface TaskService {
   add(input: NewTask): Promise<number>
   listActive(): Promise<Task[]>
-  listAll(recentDoneLimit?: number): Promise<Task[]>
+  listAll(recentDoneLimit?: number, doneSinceIso?: string | null): Promise<Task[]>
   markDone(id: number): Promise<boolean>
   markActive(id: number): Promise<boolean>
   remove(id: number): Promise<boolean>
@@ -107,8 +107,8 @@ export function createTaskService(deps: TaskServiceDeps): TaskService {
       return adapter.listActive()
     },
 
-    listAll(recentDoneLimit) {
-      return adapter.listAll(recentDoneLimit)
+    listAll(recentDoneLimit, doneSinceIso) {
+      return adapter.listAll(recentDoneLimit, doneSinceIso)
     },
 
     async markDone(id) {

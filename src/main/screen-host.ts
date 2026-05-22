@@ -52,13 +52,55 @@ export async function listScreens(): Promise<ScreenInfo[]> {
  * get one image per display. We let the vision model decide which screen
  * is relevant rather than making the user pick.
  */
-export async function captureAllScreensPng(): Promise<Uint8Array[]> {
+export async function captureAllScreensPng(
+  excludedIds: readonly string[] = [],
+): Promise<Uint8Array[]> {
   const sources = await desktopCapturer.getSources({
     types: ['screen'],
     thumbnailSize: FULL_SIZE,
   })
   if (sources.length === 0) throw new Error('screen-host: no screens available')
-  return sources.map((s) => {
+  // Honor the user's exclusion list — they opted certain displays out
+  // of "what the AI can see" via Settings → 主动 → 屏幕选择. Empty list
+  // = capture everything (default).
+  const excluded = new Set(excludedIds)
+  const filtered = sources.filter((s) => !excluded.has(s.id))
+  if (excludedIds.length > 0) {
+    console.log(
+      `[screen] excluded ${sources.length - filtered.length}/${sources.length} source(s) by user setting`,
+    )
+  }
+  if (filtered.length === 0) {
+    throw new Error(
+      'screen-host: all available screens are in the user exclusion list',
+    )
+  }
+  // Diagnostic: surface what Electron actually saw — name, id, thumbnail
+  // dimensions, and whether the thumbnail is suspiciously small (a sign
+  // the OS denied capture for that source).
+  console.log(`[screen] captured ${filtered.length} source(s):`)
+  for (const s of filtered) {
+    const size = s.thumbnail.getSize()
+    const isEmpty = s.thumbnail.isEmpty()
+    console.log(
+      `[screen]  · "${s.name}" (id=${s.id.slice(0, 24)}…) → ${size.width}×${size.height}${
+        isEmpty ? ' EMPTY' : ''
+      }`,
+    )
+  }
+  // Drop empty thumbnails so we don't send a 0×0 black image to the
+  // vision model (which would either silently ignore it or hallucinate
+  // a description of nothing).
+  const valid = filtered.filter((s) => !s.thumbnail.isEmpty())
+  if (valid.length === 0) {
+    throw new Error('screen-host: all screen thumbnails empty (OS denied capture?)')
+  }
+  if (valid.length < filtered.length) {
+    console.warn(
+      `[screen] dropped ${filtered.length - valid.length} empty thumbnail(s) before sending`,
+    )
+  }
+  return valid.map((s) => {
     const buf = s.thumbnail.toPNG()
     return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength)
   })

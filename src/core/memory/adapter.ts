@@ -115,6 +115,13 @@ export interface MemoryAdapter {
   /** Wipe all facts for this persona. Returns rows removed. */
   clearFacts(personaId: string): Promise<number>
 
+  /**
+   * Manual override: delete one fact by id (hard delete row + any history
+   * for the same key under this persona). Used by the Settings UI when
+   * the user corrects something the model wrote ("我没养猫"). Returns
+   * true if the row existed and was removed. */
+  deleteFact(personaId: string, factId: number): Promise<boolean>
+
   // ---- Per-persona affinity (relationship state) ----
 
   /**
@@ -135,6 +142,21 @@ export interface MemoryAdapter {
    *  Called by the affinity engine after a milestone event has been
    *  delivered to the renderer, so the same band doesn't re-fire. */
   setLastMilestone(personaId: string, milestone: number): Promise<void>
+
+  /** Read persisted presence-accrual state for this persona. Returns
+   *  zeros + null date when no row exists yet (first run). */
+  getPresenceState(personaId: string): Promise<{
+    date: string | null
+    minutesAccrued: number
+    bumpsToday: number
+  }>
+
+  /** Persist presence-accrual state. Called after every tick that
+   *  changes the in-memory counters so a restart doesn't lose them. */
+  setPresenceState(
+    personaId: string,
+    state: { date: string | null; minutesAccrued: number; bumpsToday: number },
+  ): Promise<void>
 
   /** Record that a weekly review fired right now for this persona.
    *  Engine uses this + a 7-day check to decide when next to fire. */

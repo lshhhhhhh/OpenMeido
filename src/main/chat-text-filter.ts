@@ -60,6 +60,12 @@ const DROP_BLOCK_OPENERS: { open: RegExp; close: string }[] = [
   { open: /^<tool_call>/i, close: '</tool_call>' },
   { open: /^<arg_key>/i, close: '</arg_key>' },
   { open: /^<arg_value>/i, close: '</arg_value>' },
+  // Inline emotion tag — model bakes its own self-classification at the
+  // end of the reply (<emo>害羞</emo>) so chat.ts can apply the
+  // expression instantly, without waiting for the post-reply classifier.
+  // The chat loop captures the label from a parallel raw-text track
+  // before this filter strips it from the displayed/persisted text.
+  { open: /^<emo>/i, close: '</emo>' },
 ]
 // Bare close-tag that we treat as an implicit-thinking close. Matches
 // `</think>` and `</thinking>` (case-insensitive). When the filter hits

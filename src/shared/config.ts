@@ -292,15 +292,21 @@ export const configSchema = z.object({
        * Settings → Live2D.
        */
       activeModel: z.string().default('hiyori_pro_en'),
-      /** 1.0 = fit width exactly; 1.6 = upper-body crop. */
-      portraitZoom: z.number().min(0.5).max(3).default(1.6),
+      /** 1.0 = fit width exactly; 1.6 = upper-body crop. 1.0 default
+       *  shows the full body — better default than the upper-body crop
+       *  for new installs since users see the persona "whole" first. */
+      portraitZoom: z.number().min(0.5).max(3).default(1.0),
     })
     .default({}),
   window: z
     .object({
       alwaysOnTop: z.boolean().default(true),
-      width: z.number().int().min(260).default(480),
-      height: z.number().int().min(400).default(720),
+      // Default window dimensions tuned for portrait Live2D + comfortable
+      // chat panel (~474px high at 2/5 ratio). Main process clamps to
+      // 90% of work-area on smaller screens — see main/index.ts
+      // createWindow's fit-to-screen guard.
+      width: z.number().int().min(260).default(618),
+      height: z.number().int().min(400).default(1184),
       /**
        * Launch OpenMeido automatically when the user logs in.
        * Default ON — OpenMeido is a desktop companion meant to be
@@ -433,6 +439,16 @@ export const configSchema = z.object({
        * fall back to their main chat model.
        */
       includeScreen: z.boolean().default(false),
+      /**
+       * Screens to EXCLUDE when capturing the user's display(s). Empty
+       * array (default) = capture all available displays. Stores the
+       * desktopCapturer source id (e.g. "screen:0:0", "screen:1:0").
+       * Applies to BOTH proactive screen mode AND the user-triggered
+       * quick-screen-react button — it's a privacy preference about
+       * which displays the AI is allowed to see at all, not a per-
+       * feature setting.
+       */
+      excludedScreenIds: z.array(z.string()).default([]),
       /**
        * Windows toast-notification listener — when ON, OpenMeido subscribes
        * to the OS notification feed (QQ / WeChat / Outlook etc.) and the LLM
@@ -608,10 +624,9 @@ export function backgroundFor(
     // Encode each segment in case the filename has spaces / unicode.
     return `meido-bg://custom/${encodeURIComponent(custom)}`
   }
-  // Default for portrait-oriented window. Vertical room art reads better
-  // than the original horizontal house/bedroom photos. User can override
-  // per-persona via the Settings → 人物 → 导入图片 flow.
-  if (personaId === 'maid' || personaId === 'ojou') return '/background/house_vertical.png'
+  // Default room art for all personas. Vertical orientation reads better
+  // in the portrait-shaped window than the original horizontal stock
+  // photos. User can override per-persona via Settings → 人物 → 导入图片.
   return '/background/room_vertical.png'
 }
 
