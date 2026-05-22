@@ -59,19 +59,19 @@ export interface MemoryService {
   getUserName(): Promise<string | null>
   factsBlock(minConfidence?: number): Promise<string>
   reflectOnce(): Promise<number>
-  /** Productivity-track reflection — extracts work context (project
-   *  codes, email topics) from tool-using episodes. Writes to facts
-   *  table with category='work'. */
-  reflectProductivityOnce(): Promise<number>
-  /** Persisted reflection counters (cross-restart). Returns the
-   *  current counts; service consumers should call `bumpReflectionCounter`
-   *  rather than write directly. */
+  /** Persisted reflection counters (cross-restart). The `work` field is
+   *  preserved for schema compatibility but always 0 since v0.0.31
+   *  (work-track reflection was removed — Option B). */
   getReflectionCounters(): Promise<{ personal: number; work: number }>
-  /** Increment the right counter and persist. Returns 'personal' /
-   *  'work' if the threshold was hit (and counter reset), null
-   *  otherwise. Chat layer fires the matching reflectXxxOnce() when
-   *  this returns non-null. */
-  bumpReflectionCounter(turnType: 'personal' | 'work' | 'neutral', force?: boolean): Promise<'personal' | 'work' | null>
+  /** Increment the personal counter on `'personal'` turns and persist.
+   *  Returns `'personal'` when the threshold was hit (and counter reset)
+   *  so the chat layer can fire reflectOnce(). `'work'` and `'neutral'`
+   *  turns are intentionally inert — work facts were removed in Option B
+   *  (v0.0.31), and neutral turns (task / clipboard / table tools) must
+   *  not farm affinity or pollute reflection. When `force = true`, the
+   *  threshold is bypassed; the chat layer uses this on detected user
+   *  retraction / correction (see isRetractionOrCorrection). */
+  bumpReflectionCounter(turnType: 'personal' | 'work' | 'neutral', force?: boolean): Promise<'personal' | null>
   clearFacts(): Promise<number>
   /** Manual override for a single fact — used by the Settings UI 🗑.
    *  Deletes the row and its full supersession chain for the same key. */
@@ -235,9 +235,6 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     },
 
     async listFacts(limit = 200) {
-      // UI surface — personal only. Work memory is internal context for
-      // the chat model; surfacing it in the 记忆 panel would clutter
-      // with stale ticket numbers (see types.ts FactCategory comment).
       return adapter.listActiveFacts(persona(), limit, 'personal')
     },
 
@@ -303,39 +300,30 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
         const existing = await adapter.listActiveFacts(persona(), 200, 'personal')
         const existingFactsBlock = renderFactsBlock(existing, 0.5, '')
         const facts = await reflect(recent, reflectExtractor, {
-          kind: 'personal',
           existingFactsBlock,
         })
         if (!facts || facts.length === 0) return 0
-        let upserted = 0
+        let written = 0
+        let deleted = 0
         for (const f of facts) {
           try {
-            await adapter.upsertFact(persona(), f, 'personal')
-            upserted += 1
+            const res = await adapter.upsertFact(persona(), f, 'personal')
+            if (res === null) deleted += 1
+            else written += 1
           } catch (err) {
             reportError('upsertFact', err)
           }
         }
-        return upserted
+        if (deleted > 0) {
+          console.log(`[memory] reflection wrote ${written} new fact(s), deleted ${deleted}`)
+        }
+        return written + deleted
       } catch (err) {
         reportError('reflectOnce', err)
         return 0
       } finally {
         reflecting = false
       }
-    },
-
-    /**
-     * Productivity reflection: extracts short/medium-term work context
-     * (project codes, ticket status, email topics) from tool-using
-     * episodes. Runs separately from personal reflection so a single
-     * call doesn't have to juggle two extraction styles. Writes to
-     * facts table with category='work'.
-     */
-    async reflectProductivityOnce() {
-      // Work/productivity reflection is completely deprecated and removed (Option B).
-      // All temporary work contexts are maintained parallel in conversational history/episodes.
-      return 0
     },
 
     async getReflectionCounters() {

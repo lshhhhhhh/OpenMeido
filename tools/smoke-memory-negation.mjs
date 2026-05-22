@@ -79,10 +79,20 @@ async function main() {
     confidence: 1.0,
     sourceEpisodeIds: [2]
   })
-  check('deleteResult returns fact object with value DELETE', deleteResult?.value === 'DELETE')
+  check('deleteResult returns null (delete, not write)', deleteResult === null)
 
   const activeFactsAfterDelete = await adapter.listActiveFacts('maid')
   check('activeFacts is empty after DELETE', activeFactsAfterDelete.length === 0)
+
+  // Idempotency: deleting a key that no longer exists is a no-op + null.
+  console.log('  Step B2: Sending DELETE again for the same key')
+  const deleteAgain = await adapter.upsertFact('maid', {
+    key: 'user.profile.name',
+    value: 'DELETE',
+    confidence: 1.0,
+    sourceEpisodeIds: [99]
+  })
+  check('redundant DELETE returns null', deleteAgain === null)
 
   // Step C: Send the new value "小刘"
   console.log('  Step C: Sending user.profile.name = "小刘"')

@@ -7,7 +7,6 @@
  *   2. bumpReflectionCounter only increments personal reflection counters and
  *      returns 'personal' when hitting the threshold (5), while completely bypassing
  *      work and neutral turns.
- *   3. reflectProductivityOnce has been safely deprecated and immediately returns 0.
  *
  * Run: electron tools/smoke-turn-classification.mjs
  */
@@ -108,11 +107,6 @@ async function main() {
   const finalCounters = await svc.getReflectionCounters()
   check('personal counter reset to 0', finalCounters.personal === 0)
   check('work counter stays 0', finalCounters.work === 0)
-
-  // ---------- 3. Verify reflectProductivityOnce is a safe no-op ----------
-  console.log('\n[3: Unit testing reflectProductivityOnce deprecation]')
-  const prodReflectResult = await svc.reflectProductivityOnce()
-  check('reflectProductivityOnce immediately returns 0', prodReflectResult === 0)
 
   adapter.close()
   rmSync(dir, { recursive: true, force: true })

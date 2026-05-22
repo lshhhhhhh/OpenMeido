@@ -76,22 +76,16 @@ export interface Episode {
 }
 
 /**
- * Fact category — two parallel memory tracks that share a table but
- * never mix in extraction or UI surfacing.
+ * Fact category.
  *
- *   'personal' — relationship-line memory: name, pets, hobbies, family,
- *                anything about the user's life that persists for months
- *                or years. Reflected from conversational episodes.
- *                Surfaced in Settings → 人物 → 记忆.
- *
- *   'work'     — productivity-line memory: project codes, ticket status,
- *                recent email topics. Reflected from tool-using episodes.
- *                Stale within days/weeks. Injected into chat context for
- *                continuity (so the user can ask "any update on Project-A1?"
- *                next day) but NOT shown in the memory UI to avoid the
- *                stale-data trap.
+ * Originally a two-track design (personal + work). The work track was
+ * removed in v0.0.31 (Option B) because productivity context changes
+ * too fast for LLM-distilled facts — it lives more naturally in raw
+ * episodes + live tool output. The type is kept as a single-value
+ * union so the parameter slot stays addressable for any future
+ * orthogonal track without an API break.
  */
-export type FactCategory = 'personal' | 'work'
+export type FactCategory = 'personal'
 
 /**
  * Cross-persona visibility for a fact.
@@ -127,9 +121,9 @@ export interface Fact {
   category: FactCategory
   scope: FactScope
   /** ISO 8601 timestamp after which this fact is filtered out of reads.
-   *  null = never expires (current behavior for personal facts). Work
-   *  facts get this set on write so stale project/ticket state doesn't
-   *  pollute the prompt forever. */
+   *  Always null since v0.0.31 (Option B removed the only category that
+   *  used it). The column + filter remain in the schema for forward
+   *  compatibility if a TTL-bearing track is reintroduced. */
   expiresAt: string | null
   /** JSON array of episode ids this fact was distilled from. */
   sourceEpisodeIds: number[]

@@ -48,7 +48,7 @@ const PERSONAL_PROMPT_HEADER = `你是桌面伴侣的记忆整理助手。从下
 5. value 用简短的中文短语（不超过 30 字），不要完整句子。
 6. confidence ∈ [0.0, 1.0]：用户明确说过 → 0.9-1.0；隐含推断 → 0.5-0.8；不确定 → 不要输出
 7. 如果没有可提取的，输出空数组 []
-8. 如果用户在对话中明确否定、撤回、纠正或驳回了某个已知事实（例如：用户说“我没有猫”、“别叫我小李了”），你必须将该事实的 key 提取出来，并将其 value 设置为 "DELETE"（必须是全大写），confidence 设为 1.0，以指示该事实应该被系统清除。
+8. 如果用户在对话中明确否定、撤回、纠正或驳回了某个已知事实（例如：用户说"我没有猫"、"别叫我小李了"），你必须将该事实的 key 提取出来，并将其 value 设置为 "DELETE"（必须是全大写），confidence 设为 1.0，以指示该事实应该被系统清除。
 
 输出格式（**只输出 JSON，不要解释**）：
 [
@@ -60,35 +60,8 @@ const PERSONAL_PROMPT_HEADER = `你是桌面伴侣的记忆整理助手。从下
 
 `
 
-const WORK_PROMPT_HEADER = `你是桌面伴侣的工作上下文整理助手。从下面这段最近的工作交互（用户的任务请求 + 助手的工具调用 + 结果 + 总结）里，提取**当前在跟进的工作项目 / 任务 / 邮件主题**，输出 JSON。
-
-规则：
-1. 提取**短中期**会用到的工作上下文：项目代号、ticket 状态、最近邮件主题、相关人物、正在追踪的问题。这种信息几天到几周内会变。
-2. 不要提取与工作无关的事实（× 用户养了一只猫；○ 用户在跟进 Project-A1）。
-3. 不要提取关于用户本身的稳定属性（× user.profile.name；○ project.Project-A1.status）。
-4. key 用点分层级的全小写英文，按类别组织：
-   - 项目状态：project.<id>.status / project.<id>.context
-   - 邮件话题：email.<topic>.summary / email.from.<sender>.recent
-   - 任务追踪：task.<id>.status / task.<id>.next_step
-5. value 用简短的中文短语（不超过 30 字）。
-6. confidence ∈ [0.0, 1.0]：信息明确 → 0.9-1.0；推断 → 0.5-0.8；不确定 → 不要输出。
-7. 如果工作内容没有值得记下的（纯查询、读完就忘的），输出空数组 []。
-8. 如果用户在交互中明确否定、撤回或驳回了某个已知的工作项目/任务（例如：项目已被取消、不需要再跟进），你必须将该事实的 key 提取出来，并将其 value 设置为 "DELETE"（必须是全大写），confidence 设为 1.0，以指示该项目上下文应该被清除。
-
-输出格式（**只输出 JSON，不要解释**）：
-[
-  {"key": "project.Project-A1.status", "value": "等待 alice 验收，加急", "confidence": 0.9},
-  {"key": "email.from.alice.recent", "value": "SpecX/SpecY 验收", "confidence": 0.85}
-]
-
-或者：{"facts": [ ... 同样格式 ... ]}
-
-`
-
 /**
  * Build the full reflection prompt for a given episode window.
- * `kind` selects between the personal (relationship facts) and work
- * (productivity facts) prompt heads — see the two constants above.
  *
  * `existingFactsBlock`, when provided, is fed in BEFORE the episode
  * window with a "you already know these" framing. Without it, the
@@ -96,13 +69,12 @@ const WORK_PROMPT_HEADER = `你是桌面伴侣的工作上下文整理助手。�
  * slightly different keys: `user.name` vs `user.profile.name`) and
  * the facts table accumulates near-duplicates that supersession
  * can't merge. With it, the model is steered to only emit NEW or
- * CONTRADICTING facts.
+ * CONTRADICTING facts (or DELETE markers when retracted).
  *
  * Exported so callers can preview it (e.g., for debug logging).
  */
 export function buildReflectionPrompt(
   episodes: Episode[],
-  kind: 'personal' | 'work' = 'personal',
   existingFactsBlock?: string,
 ): string {
   const renderEpisode = (e: Episode): string => {
@@ -117,11 +89,10 @@ export function buildReflectionPrompt(
     return `[${who}${toolHint}] ${e.text}`
   }
   const block = episodes.map(renderEpisode).join('\n')
-  const header = kind === 'work' ? WORK_PROMPT_HEADER : PERSONAL_PROMPT_HEADER
   const knownBlock = existingFactsBlock?.trim()
     ? `\n[已知事实 — 不要重复抽取这些，只输出新增或矛盾的]\n${existingFactsBlock.trim()}\n`
     : ''
-  return `${header}${knownBlock}\n最近${kind === 'work' ? '工作交互' : '对话'}：\n${block}\n`
+  return `${PERSONAL_PROMPT_HEADER}${knownBlock}\n最近对话：\n${block}\n`
 }
 
 /**
@@ -186,7 +157,6 @@ export async function reflect(
   episodes: Episode[],
   extract: ReflectionExtractor,
   opts: ReflectionOptions & {
-    kind?: 'personal' | 'work'
     existingFactsBlock?: string
   } = {},
 ): Promise<NewFact[] | null> {
@@ -194,11 +164,7 @@ export async function reflect(
   const maxRetries = opts.maxRetries ?? DEFAULT_RETRIES
   const window = episodes.slice(-windowSize)
   if (window.length === 0) return []
-  const prompt = buildReflectionPrompt(
-    window,
-    opts.kind ?? 'personal',
-    opts.existingFactsBlock,
-  )
+  const prompt = buildReflectionPrompt(window, opts.existingFactsBlock)
   let lastErr: unknown
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {

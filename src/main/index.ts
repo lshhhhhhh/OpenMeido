@@ -714,11 +714,6 @@ ipcMain.handle('memory:reflectNow', async () => {
   if (!svc) return 0
   return svc.reflectOnce()
 })
-ipcMain.handle('memory:reflectWorkNow', async () => {
-  const svc = getMemoryService()
-  if (!svc) return 0
-  return svc.reflectProductivityOnce()
-})
 
 ipcMain.handle('memory:recentToolActivity', async (_event, limit: number = 20) => {
   const adapter = getMemoryAdapter()

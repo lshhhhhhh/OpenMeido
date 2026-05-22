@@ -1,6 +1,6 @@
 {
   "name": "openmeido",
-  "version": "0.0.32",
+  "version": "0.0.33",
   "description": "Productivity assistant + Live2D companion for non-programmers",
   "author": "lsh <laishaoheng1996@gmail.com>",
   "main": "./out/main/index.js",
@@ -14,6 +14,7 @@
     "spike1": "node --env-file=.env --import tsx tools/spike1.ts",
     "test:leak-audit": "node tools/smoke-live2d-leak-audit.mjs",
     "test:reflection-parse": "node --import tsx tools/smoke-reflection-parse.mjs",
+    "test:openai-compat-body": "node --import tsx tools/smoke-openai-compat-body.mjs",
     "test:notif-parse": "node --import tsx tools/smoke-notif-parse.mjs",
     "test:text-filter": "node --import tsx tools/smoke-text-filter.mjs",
     "test:task-adapter": "electron tools/smoke-task-adapter.mjs",
@@ -28,7 +29,6 @@
     "test:affinity-guardrails": "node --import tsx tools/smoke-affinity-guardrails.mjs",
     "test:combined-classifier": "node --env-file=.env --import tsx tools/smoke-combined-classifier.mjs",
     "test:baked-emotion": "node --env-file=.env --import tsx tools/smoke-baked-emotion.mjs",
-    "test:memory-split": "node --env-file=.env --import tsx tools/smoke-memory-split.mjs",
     "test:table-window": "electron tools/smoke-table-window.mjs",
     "test:list-inbox": "electron tools/smoke-list-inbox.mjs",
     "test:table-e2e": "electron tools/smoke-table-e2e.mjs",

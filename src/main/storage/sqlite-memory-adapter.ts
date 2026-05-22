@@ -354,6 +354,22 @@ export function openSqliteMemory(
     console.log('[memory] migrated: added persona_affinity.work_turns_since_reflection')
   }
 
+  // ---- Option B cleanup: purge legacy work-category facts ----
+  // The work-track reflection was removed in v0.0.31 (productivity context
+  // now flows through L1/L2 raw episodes + live tool output, not LLM-distilled
+  // facts). Pre-Option-B rows with category='work' are inert — `factsBlock()`
+  // and `listActiveFacts()` filter by category='personal' — but they take DB
+  // space and confuse future debuggers grepping the schema. One-shot delete.
+  // The persona_affinity.work_turns_since_reflection column is preserved (it's
+  // read but always 0) so we avoid an ALTER...DROP COLUMN on user installs.
+  {
+    const cnt = (db.prepare(`SELECT count(*) AS n FROM facts WHERE category = 'work'`).get() as { n: number }).n
+    if (cnt > 0) {
+      db.prepare(`DELETE FROM facts WHERE category = 'work'`).run()
+      console.log(`[memory] migrated: purged ${cnt} legacy category='work' fact(s) (Option B)`)
+    }
+  }
+
   // ---- Vec0 setup (unchanged from pre-persona schema; episode JOIN
   // applies the persona filter at query time) ----
   const existing = db
@@ -575,7 +591,7 @@ export function openSqliteMemory(
     confidence: r.confidence,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
-    category: r.category === 'work' ? 'work' : 'personal',
+    category: 'personal',
     scope: r.scope === 'shared' ? 'shared' : 'persona',
     expiresAt: r.expiresAt ?? null,
     sourceEpisodeIds: safeParseIntArray(r.sourceEpisodeIdsJson),
@@ -709,51 +725,32 @@ export function openSqliteMemory(
       )
         ? 'persona'
         : 'shared'
-      // Work-fact TTL: 14 days from write. Bumping confidence on the
-      // same key+value also extends the expiry — so as long as the
-      // model keeps confirming a fact in reflection, it stays alive.
-      const WORK_TTL_MS = 14 * 24 * 60 * 60 * 1000
-      const expiresAt =
-        category === 'work'
-          ? new Date(Date.now() + WORK_TTL_MS).toISOString()
-          : null
+      // Personal facts never expire — TTL plumbing remains in the schema
+      // for forward-compat but writes always pass null since Option B
+      // removed the only TTL'd category.
+      const expiresAt: string | null = null
       const existing = selectActiveByKey.get(personaId, input.key, category) as
         | FactRow
         | undefined
       if (input.value === 'DELETE') {
-        const txn = db.transaction((): Fact => {
+        const txn = db.transaction((): Fact | null => {
           db.prepare(
-            `DELETE FROM facts WHERE key = ? AND category = ? AND (persona_id = ? OR scope = 'shared')`
+            `DELETE FROM facts WHERE key = ? AND category = ? AND (persona_id = ? OR scope = 'shared')`,
           ).run(input.key, category, personaId)
-          return {
-            id: existing ? -existing.id : -1,
-            key: input.key,
-            value: 'DELETE',
-            confidence: 1.0,
-            createdAt: now,
-            updatedAt: now,
-            category: category === 'work' ? 'work' : 'personal',
-            scope: scope,
-            expiresAt: null,
-            sourceEpisodeIds: input.sourceEpisodeIds ?? [],
-            supersededBy: null,
-          }
+          // null signals "delete, not write". Idempotent: 0 rows affected
+          // (key didn't exist) returns null all the same.
+          return null
         })
         return txn()
       }
       const txn = db.transaction((): Fact => {
         if (existing && existing.value === input.value) {
           const newConf = Math.min(1.0, (existing.confidence + inputConf) / 2 + 0.05)
-          // Extend expiry on confirmation (only relevant for work facts;
-          // personal facts pass null through and stay non-expiring).
-          const extendedExpiry =
-            existing.expiresAt && category === 'work' ? expiresAt : existing.expiresAt
-          bumpFact.run(newConf, now, extendedExpiry, existing.id)
+          bumpFact.run(newConf, now, existing.expiresAt, existing.id)
           return rowToFact({
             ...existing,
             confidence: newConf,
             updatedAt: now,
-            expiresAt: extendedExpiry,
           })
         }
         const ins = insertFact.run(

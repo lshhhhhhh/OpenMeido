@@ -49,6 +49,7 @@ import { pushEmotionEvent } from './emotion-events.js'
 import { runExtraction } from './chat-host.js'
 import { buildTierPromptBlock } from '../shared/affinity.js'
 import type { Episode } from '../core/memory/types.js'
+import { transformOpenAIBody, needsBodyTransform } from './openai-compat-body.js'
 
 // Emotion → expression / motion is no longer hardcoded — each model carries
 // its own sidecar (openmeido.json) and we look up at tool-call time. See
@@ -183,14 +184,13 @@ async function maybeTriggerReflection(
     bumpReflectionCounter(
       turnType: 'personal' | 'work' | 'neutral',
       force?: boolean,
-    ): Promise<'personal' | 'work' | null>
+    ): Promise<'personal' | null>
     reflectOnce(): Promise<number>
-    reflectProductivityOnce(): Promise<number>
   },
   turnType: 'personal' | 'work' | 'neutral',
   forcePersonalReflection = false,
 ): Promise<void> {
-  let triggered: 'personal' | 'work' | null
+  let triggered: 'personal' | null
   try {
     triggered = await memory.bumpReflectionCounter(turnType, forcePersonalReflection)
   } catch (err) {
@@ -204,13 +204,6 @@ async function maybeTriggerReflection(
         if (n > 0) console.log(`[memory] personal reflection upserted ${n} fact(s)`)
       })
       .catch((err) => console.warn('[memory] personal reflection threw:', err))
-  } else if (triggered === 'work') {
-    void memory
-      .reflectProductivityOnce()
-      .then((n) => {
-        if (n > 0) console.log(`[memory] work reflection upserted ${n} fact(s)`)
-      })
-      .catch((err) => console.warn('[memory] work reflection threw:', err))
   }
 }
 
@@ -1397,47 +1390,16 @@ export async function runChat(
             ') is not Gemini / GLM. No-op.',
         )
       }
-      // Kimi (Moonshot) — kimi-k2.6 defaults to thinking ON, which then
-      // demands `reasoning_content` on every assistant tool-call message
-      // we replay in history. We don't capture that channel, so subsequent
-      // turns 400 with "thinking is enabled but reasoning_content is
-      // missing in assistant tool call message at index N". Force-disable
-      // thinking by injecting `thinking: {type: "disabled"}`.
-      const needWrapper = injectGlmSearch || isKimi || isDeepSeek
-      const wrappedFetch = needWrapper
+      // Provider-specific body mutations live in openai-compat-body.ts —
+      // see that file for the per-flag rationale (GLM web_search inject,
+      // Kimi thinking-disable, DeepSeek reasoning_content fill).
+      const bodyFlags = { injectGlmSearch, isKimi, isDeepSeek }
+      const wrappedFetch = needsBodyTransform(bodyFlags)
         ? ((async (url, init) => {
             if (init && init.method === 'POST' && typeof init.body === 'string') {
               try {
-                const body = JSON.parse(init.body) as {
-                  tools?: unknown[]
-                  thinking?: { type: 'enabled' | 'disabled' }
-                  messages?: Array<{
-                    role: string
-                    tool_calls?: unknown
-                    reasoning_content?: string
-                  }>
-                }
-                if (injectGlmSearch) {
-                  const entry = { type: 'web_search', web_search: { enable: true } }
-                  if (Array.isArray(body.tools)) body.tools.push(entry)
-                  else body.tools = [entry]
-                }
-                if (isKimi) {
-                  body.thinking = { type: 'disabled' }
-                }
-                if (isDeepSeek) {
-                  if (body.messages && Array.isArray(body.messages)) {
-                    for (const msg of body.messages) {
-                      if (
-                        msg.role === 'assistant' &&
-                        msg.tool_calls &&
-                        msg.reasoning_content === undefined
-                      ) {
-                        msg.reasoning_content = ''
-                      }
-                    }
-                  }
-                }
+                const body = JSON.parse(init.body)
+                transformOpenAIBody(body, bodyFlags)
                 init = { ...init, body: JSON.stringify(body) }
               } catch {
                 /* malformed body — fall through to original fetch */

@@ -1,6 +1,6 @@
 # OpenMeido 记忆系统设计
 
-最后更新：v0.0.30 (2026-05-22)
+最后更新：v0.0.33 (2026-05-22) — Option B 死代码清理
 
 OpenMeido 的"记忆"不是一件东西，而是 **独立但配合的子系统**。这份文档梳理它们各自的职责、数据形态、触发时机，以及关键的"工作 / 关系"二分。
 
@@ -107,12 +107,12 @@ OpenMeido 的"记忆"不是一件东西，而是 **独立但配合的子系统**
 - 展示：Settings → 人物 → 记忆 (有 🗑 单条删除)
 - 注入：`[关于用户的已知事实]` 段进 system prompt
 
-**Work facts（工作上下文 — 已于 v0.0.30 废弃与移除）**：
+**Work facts（工作上下文 — 已于 v0.0.31 废弃，v0.0.33 完全清理）**：
 > [!WARNING]
-> 为了防止过时且频繁变动的临时性工作/工单上下文污染模型的长期记忆，并避免过期的 L3 工作事实造成提示词膨胀，系统已在 **v0.0.30** 全面废弃并移除了工作事实轨道（Option B）。
+> 工作事实轨道在 **v0.0.31 (Option B)** 全面废弃，在 **v0.0.33** 完成代码清理。
 - **废弃原因**：临时性工作信息（如任务清单、邮件主题、工单状态）具有极高的波动性。用慢速的 LLM Reflection 提取并写入 SQLite 极易导致记忆陈旧滞后，且长期堆积会严重稀释模型的感情人格和注意力。
-- **替代方案**：改为通过 L1/L2 Raw Episodic 对话历史（自然携带了前面的邮件与文件读写记录）和动态 Tool Calling 机制在当前回合的工作上下文中进行即时、并行的拼装与回显，不再生成 L3 临时工作事实。
-- **废弃组件**：`reflectProductivityOnce()` 已经退化为安全占位返回 `0`；`factsBlock()` 中完全不再注入 `[最近工作上下文]` 提示词块。
+- **替代方案**：改为通过 L1/L2 Raw Episodic 对话历史（自然携带了前面的邮件与文件读写记录）和动态 Tool Calling 机制在当前回合的工作上下文中进行即时、并行的拼装与回显。
+- **清理细节**：v0.0.33 移除了 `reflectProductivityOnce()` 接口、`WORK_PROMPT_HEADER` prompt 常量、`memory:reflectWorkNow` IPC handler。`FactCategory` 收窄到 `'personal'` 单值。打开 sqlite 时一次性 `DELETE FROM facts WHERE category = 'work'` 清掉老数据（启动日志会打印清理条数）。`persona_affinity.work_turns_since_reflection` 列出于 schema 稳定保留但永远是 0。
 
 ## 5. Affinity（好感度）
 
@@ -246,11 +246,13 @@ src/main/
 ## 13. 如果要扩展
 
 加一条新的"记忆轨道"（比如"健康记忆"track）的步骤：
-1. `FactCategory` 加新值
-2. `reflection.ts` 加一个 `XXX_PROMPT_HEADER` 和 `buildReflectionPrompt` 的 kind 分支
+1. `FactCategory` 加新值（当前是 `'personal'` 单值；扩成 union）
+2. `reflection.ts` 加一个 `XXX_PROMPT_HEADER`，把 `buildReflectionPrompt` 改成接 `kind` 参数（v0.0.33 因为只剩一个 track 已经把这个参数去掉了）
 3. `service.ts` 加 `reflectXxxOnce()`
 4. `chat.ts` 加触发条件（检测到特定工具或特定词触发）
 5. `factsBlock` 拼新的段（如 `[健康相关]`）
 6. UI：决定是否展示（personal 在 UI 里，其他可以不展示）
+
+历史教训：上一次的 work track 就是这么加的，最终因为信息过期太快被废弃。加新 track 前先想清楚：这层信息几天内会不会失效？如果会，更适合走 L1/L2 raw episodes + tool 回显，不要走 L3。
 
 每一步都是表面变化，不会改 schema 也不会动 retrieval 的核心。这是为什么 reflection 在设计上是 prompt-driven 而非 hardcoded 抽取规则。

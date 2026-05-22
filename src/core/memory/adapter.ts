@@ -104,15 +104,18 @@ export interface MemoryAdapter {
    * Upsert a fact for `key` under this persona. Same key but a different
    * persona is a different fact — facts about the user can drift per-relationship
    * (e.g. she only knows your work nickname after you mentioned it to her).
-   * `category` defaults to 'personal' (relationship-line memory). Pass
-   * 'work' for productivity-line facts; the two are isolated even when
-   * they share a key.
+   *
+   * Special case: when `input.value === 'DELETE'`, the matching key's
+   * supersession chain is wiped and the method returns `null`. This is
+   * the negation pipeline — reflection emits a DELETE marker when the
+   * user retracts a fact, and the adapter cleans up the chain in one
+   * transaction so subsequent reads don't see the stale value.
    */
   upsertFact(
     personaId: string,
     input: NewFact,
     category?: FactCategory,
-  ): Promise<Fact>
+  ): Promise<Fact | null>
 
   /** All facts currently active under this persona, newest first.
    *  `category` defaults to 'personal'. */
