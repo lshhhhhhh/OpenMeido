@@ -89,38 +89,48 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
     }
   }
 
-  /** Best-effort plain-text snippet from a fetched body part. */
-  function extractSnippet(raw: Buffer | undefined): string {
-    if (!raw) return ''
-    const text = raw.toString('utf8')
-    // Collapse whitespace + trim. Email bodies often have lots of `\r\n` and
-    // long signature blocks; we just want a readable preview line.
-    return text
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, SNIPPET_LEN)
-  }
-
-  /** Look up a body part from imapflow's response Map. When the fetch
-   *  asks for `{key:'TEXT', start:0, maxLength:1024}` the IMAP server
-   *  responds with `BODY[TEXT]<0>` and imapflow's parser stores it
-   *  under the lowercased key with the offset suffix preserved (e.g.
-   *  `text<0>`), NOT under the bare `TEXT` we requested. To handle
-   *  both partial and full fetches with one helper, we scan for any
-   *  entry whose key starts with the lowercased part name. */
-  function getBodyPart(
-    bodyParts: Map<string, Buffer> | undefined,
-    partKey: string,
-  ): Buffer | undefined {
-    if (!bodyParts) return undefined
-    const direct = bodyParts.get(partKey)
-    if (direct) return direct
-    const target = partKey.toLowerCase()
-    for (const [k, v] of bodyParts) {
-      const lk = k.toLowerCase()
-      if (lk === target || lk.startsWith(target + '<')) return v
+  /**
+   * Extract a clean plain-text snippet from a fetched RFC822 source
+   * (full or partial). Defers all MIME work — multipart boundaries,
+   * Content-Transfer-Encoding, charset, HTML entities — to
+   * `mailparser.simpleParser`, which is already a project dep and
+   * already used by the full-message read path. Returns at most
+   * `SNIPPET_LEN` characters of whitespace-collapsed plaintext.
+   *
+   * Partial source: imapflow's `source: { maxLength: N }` returns the
+   * first N bytes of RFC822 source. simpleParser is forgiving of
+   * truncation — it parses the headers + whatever body it has and
+   * exposes `text` for the plain-text part it found. Truncation in
+   * the middle of base64 / qp typically yields a slightly clipped
+   * `text`, which is fine for a 200-char snippet.
+   *
+   * If simpleParser fails (extremely malformed source, or the chunk
+   * is too small to contain any usable body), returns `''` — caller's
+   * UI just shows the subject + date and an empty snippet, which is
+   * far better than leaking raw MIME bytes to the LLM.
+   */
+  async function extractSnippet(source: Buffer | undefined): Promise<string> {
+    if (!source || source.length === 0) return ''
+    try {
+      const parsed = await simpleParser(source, {
+        // Don't waste cycles materializing attachment buffers — we only
+        // want the body text for the snippet.
+        skipImageLinks: true,
+        skipHtmlToText: false,
+      })
+      // Prefer the plaintext part; fall back to HTML-derived text (mailparser
+      // auto-converts unless skipHtmlToText is set) and finally to the raw
+      // text/plain field (sometimes set on edge cases).
+      const text = (parsed.text ?? '').trim()
+      if (text) return text.replace(/\s+/g, ' ').slice(0, SNIPPET_LEN)
+      return ''
+    } catch (err) {
+      // Truncated source mid-MIME-structure can throw on rare inputs.
+      // Empty snippet is the safest fallback — the LLM will work off
+      // the subject line instead of choking on raw bytes.
+      console.warn('[imap] extractSnippet failed:', err)
+      return ''
     }
-    return undefined
   }
 
   /**
@@ -327,20 +337,25 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
         if (recent.length === 0) return [] as MailSummary[]
 
         const out: MailSummary[] = []
-        // **C. Partial body fetch.** Pre-2026-05 this was `bodyParts:
-        // ['TEXT']` — server streamed the FULL message body of every
-        // listed email, even though snippet uses only the first ~200
-        // chars. On a 10-email listing with average ~5KB bodies, that's
-        // ~50KB of network for nothing. Now we ask for the first 1024
-        // bytes of TEXT only; extractSnippet still trims to ~200 chars.
-        // imapflow's bodyParts accepts either a string id or an object
-        // {key, start, maxLength} per its API (see node_modules/imapflow).
+        // **C. Partial source fetch.** Pre-2026-05 this fetched the full
+        // body via `bodyParts: ['TEXT']` — 5KB+ per email × 10 emails
+        // for a 200-char snippet. Then we tried `bodyParts: TEXT<0.8192>`
+        // (BODY[TEXT] only, partial), but BODY[TEXT] strips the outer
+        // Content-Type / boundary headers — without them simpleParser
+        // can't reconstruct the multipart structure and we got back
+        // raw MIME bytes in the snippet (the bug users hit).
+        //
+        // Current: partial `source` fetch — first 8KB of RFC822 source,
+        // which IS the top-level headers + start of body. simpleParser
+        // gets the multipart boundary + Content-Type from the outer
+        // envelope and correctly extracts plaintext. ~6-8KB per email
+        // × 10 = ~80KB total, still cheap vs the LLM round-trip cost.
         for await (const msg of c.fetch(
           recent,
           {
             envelope: true,
             flags: true,
-            bodyParts: [{ key: 'TEXT', start: 0, maxLength: 1024 }] as unknown as string[],
+            source: { start: 0, maxLength: 8192 },
             // Pull these two headers so we can correlate replies → parents
             // without re-fetching. Cheap (one extra RFC822 line each).
             headers: ['in-reply-to'],
@@ -352,7 +367,7 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
           const fromStr = from
             ? `${from.name ? `${from.name} ` : ''}<${from.address ?? ''}>`.trim()
             : ''
-          const snippet = extractSnippet(getBodyPart(msg.bodyParts, 'TEXT'))
+          const snippet = await extractSnippet(msg.source)
           // headers in imapflow comes back as a Buffer of the raw RFC822
           // lines. We parse out In-Reply-To with a regex; full-fledged
           // header parsing is overkill for a single line.
@@ -412,9 +427,7 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
                 String(parentUid),
                 {
                   envelope: true,
-                  bodyParts: [
-                    { key: 'TEXT', start: 0, maxLength: 1024 },
-                  ] as unknown as string[],
+                  source: { start: 0, maxLength: 8192 },
                 },
                 { uid: true },
               )
@@ -427,7 +440,7 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
               const fromStr = from
                 ? `${from.name ? `${from.name} ` : ''}<${from.address ?? ''}>`.trim()
                 : ''
-              const psnippet = extractSnippet(getBodyPart(pmsg.bodyParts, 'TEXT'))
+              const psnippet = await extractSnippet(pmsg.source)
               item.parent = {
                 id: `sent:${parentUid}`,
                 from: fromStr,
