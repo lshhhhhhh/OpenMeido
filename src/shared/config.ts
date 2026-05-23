@@ -347,15 +347,18 @@ export const configSchema = z.object({
   window: z
     .object({
       alwaysOnTop: z.boolean().default(true),
-      // Default window dimensions: portrait but slightly less narrow
-      // (~1:1.50) so Settings tabs / multi-input sections (邮箱, 关于's
-      // danger zone, voice / TTS tabs with credential fields) have
-      // breathing room. The earlier 420×820 phone-shape was unobtrusive
-      // but cramped — users hit the rightmost Settings tabs running off
-      // the edge in narrow zoom-1.15 layouts. Main process clamps to
-      // 90% of work-area on smaller screens — see main/index.ts
-      // createWindow's fit-to-screen guard.
-      width: z.number().int().min(260).default(560),
+      // Default window dimensions. 600×840 leaves enough room for:
+      //   - the 8-tab Settings header (with breathing room at zoom 1.15)
+      //   - the setup wizard card (420 CSS px) to sit comfortably
+      //     centered with margin on both sides instead of edge-to-edge
+      //   - multi-field forms (邮箱 / TTS credentials) without input
+      //     fields crammed against each other
+      // Previously 420×820 (phone-shape) was unobtrusive but cramped,
+      // then 560×840 fixed the tabs but the wizard at 480 fixed-width
+      // still overflowed at zoom 1.15. 600 gives proper breathing room.
+      // Main process clamps to 90% of work-area on smaller screens —
+      // see main/index.ts createWindow's fit-to-screen guard.
+      width: z.number().int().min(260).default(600),
       height: z.number().int().min(400).default(840),
       /**
        * Launch OpenMeido automatically when the user logs in.

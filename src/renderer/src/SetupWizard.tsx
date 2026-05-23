@@ -158,46 +158,56 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
     >
       <div
         style={{
-          width: 480,
-          maxWidth: '90vw',
+          // Fluid width up to 420 — older 480 fixed-width was wider
+          // than a 560-default window at zoom 1.15 could accommodate
+          // (effective viewport ~487, with outer padding subtracting
+          // ~37 more — the 480 card overflowed). Fluid + maxWidth
+          // adapts to any window without ever exceeding it.
+          width: '100%',
+          maxWidth: 420,
           margin: '0 auto',
           background: '#1f2128',
           color: '#eee',
           borderRadius: 10,
-          // padding-top: 0 so the sticky × header can hug the card top
-          // edge cleanly. Internal sections add their own top margin.
-          padding: '0 22px 20px',
+          // padding-top: 0 so the sticky × / drag header can hug the
+          // card top edge cleanly. Internal sections add their own
+          // top margin.
+          padding: '0 20px 18px',
           boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
           position: 'relative',
+          boxSizing: 'border-box',
         }}
       >
-        {/* Sticky × — stays pinned to the top of the card even when the
-            outer container scrolls, so users on shorter viewports can
-            always exit. Replaces the previous absolute-positioned ×
-            which scrolled out of view when content grew past viewport
-            height (the persona-pick added in v0.1.3 was enough to push
-            users on 720p screens past that threshold).
-
-            Wrapper row + sticky position(rather than position:fixed)
-            keeps the visual anchor — × reads as "close THIS card", not
-            "close something somewhere on screen". top:0 + negative
-            margin-x cancels the card's horizontal padding so the
-            header background can extend edge-to-edge of the card. */}
+        {/* Sticky × + drag header. Two jobs in one row:
+            1. × button — always visible exit affordance, sticky to
+               card top so it survives content scroll (the persona-pick
+               added in v0.1.3 was enough to push users on 720p screens
+               past viewport height with absolute positioning).
+            2. Drag region — the app window has frame:false + no native
+               title bar, so without an explicit -webkit-app-region:drag
+               surface the user can't move the window while the wizard
+               is open. The wizard's empty header bar is the natural
+               drag surface; × itself is marked no-drag so clicks still
+               register on it.
+            top:0 + negative margin-x cancels card horizontal padding
+            so header background extends edge-to-edge. */}
         <div
           style={{
             position: 'sticky',
             top: 0,
-            margin: '0 -22px',
+            margin: '0 -20px',
             padding: '8px 12px',
             background: '#1f2128',
             borderTopLeftRadius: 10,
             borderTopRightRadius: 10,
             display: 'flex',
             justifyContent: 'flex-end',
+            alignItems: 'center',
             zIndex: 1,
-            // Soft separator under the header when content scrolls under.
             borderBottom: '1px solid rgba(255,255,255,0.04)',
-          }}
+            WebkitAppRegion: 'drag',
+            cursor: 'move',
+          } as React.CSSProperties & { WebkitAppRegion?: 'drag' | 'no-drag' }}
         >
           <button
             onClick={onSkip}
@@ -217,7 +227,10 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
               cursor: 'pointer',
               borderRadius: 4,
               padding: 0,
-            }}
+              // Carve a no-drag island out of the otherwise-draggable
+              // header bar so this button is still clickable.
+              WebkitAppRegion: 'no-drag',
+            } as React.CSSProperties & { WebkitAppRegion?: 'drag' | 'no-drag' }}
             onMouseEnter={(e) => {
               e.currentTarget.style.background = 'rgba(255,255,255,0.08)'
               e.currentTarget.style.color = '#eee'
