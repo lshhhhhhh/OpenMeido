@@ -29,6 +29,21 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
   const [apiKey, setApiKey] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Personalization fields — both optional. Even leaving both blank
+  // still lets the user finish setup; we only seed facts when the
+  // user actually typed something. Default callAs comes from the
+  // active persona's address (主人 / 哥 / 你) so the placeholder
+  // already feels right.
+  const personaAddress =
+    initial.persona.preset === 'maid'
+      ? '主人'
+      : initial.persona.preset === 'imouto'
+        ? '哥'
+        : initial.persona.preset === 'ojou'
+          ? '你'
+          : '你'
+  const [callAs, setCallAs] = useState('')
+  const [occupation, setOccupation] = useState('')
 
   // Auto-derive a sensible default model for the picked provider. We always
   // Prefer the perf-tier default (the recommended chat model for that
@@ -67,6 +82,24 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
           searchEnabled: initial.backend.searchEnabled,
         },
       })
+      // Seed personalization facts AFTER config save (which initializes
+      // memory) so the very first greeting can reference them. Both
+      // fields are optional — empty/blank values skip the write.
+      // upsertFact auto-picks scope from key prefix:
+      //   - user.preferred_address → 'persona' (each persona has its own)
+      //   - user.occupation        → 'shared'  (applies across personas)
+      const trimmedCallAs = callAs.trim()
+      const trimmedOccupation = occupation.trim()
+      if (trimmedCallAs) {
+        await window.api.memory.upsertFact('user.preferred_address', trimmedCallAs).catch(
+          (err) => console.warn('[wizard] seed preferred_address failed:', err),
+        )
+      }
+      if (trimmedOccupation) {
+        await window.api.memory.upsertFact('user.occupation', trimmedOccupation).catch(
+          (err) => console.warn('[wizard] seed occupation failed:', err),
+        )
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setSaving(false)
@@ -206,6 +239,73 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
             boxSizing: 'border-box',
           }}
         />
+
+        {/* Personalization — both optional. The point isn't to gather
+            data; it's to let the FIRST greeting reference something
+            real about you so the app feels alive on minute 1 instead
+            of "you, generic AI user". Skipping both is fine. */}
+        <div
+          style={{
+            marginBottom: 14,
+            padding: '10px 12px',
+            background: 'rgba(120,160,255,0.06)',
+            border: '1px solid rgba(120,160,255,0.18)',
+            borderRadius: 6,
+          }}
+        >
+          <div style={{ fontSize: 12, color: '#bbb', marginBottom: 8 }}>
+            ③ 让她第一眼就觉得"认识你"（选填，留空也行）
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>
+                她可以叫你
+              </div>
+              <input
+                type="text"
+                value={callAs}
+                onChange={(e) => setCallAs(e.target.value)}
+                placeholder={personaAddress}
+                disabled={saving}
+                style={{
+                  width: '100%',
+                  padding: '6px 8px',
+                  background: '#2a2d36',
+                  border: '1px solid #3a3e48',
+                  color: '#eee',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>
+                你做什么的
+              </div>
+              <input
+                type="text"
+                value={occupation}
+                onChange={(e) => setOccupation(e.target.value)}
+                placeholder="程序员 / 学生 / 设计师..."
+                disabled={saving}
+                style={{
+                  width: '100%',
+                  padding: '6px 8px',
+                  background: '#2a2d36',
+                  border: '1px solid #3a3e48',
+                  color: '#eee',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
+          </div>
+          <div style={{ fontSize: 10, color: '#666' }}>
+            稍后在 Settings → 人物 → 记忆 里随时改。
+          </div>
+        </div>
 
         {error && (
           <div

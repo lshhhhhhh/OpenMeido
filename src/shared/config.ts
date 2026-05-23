@@ -431,15 +431,22 @@ export const configSchema = z.object({
        * When true, every proactive evaluation also captures the current
        * screen(s) and sends them to the gating LLM. Lets the character
        * comment on what the user is actually looking at instead of only
-       * reasoning from time-of-day + idle. Default OFF — capturing the
-       * screen is sensitive (password fields, private chats, banking)
-       * and must be opt-in.
+       * reasoning from time-of-day + idle.
+       *
+       * **Default ON since v0.0.39** — earlier we shipped this off for
+       * privacy reasons, but it turned out most users never discovered
+       * the feature in Settings and the proactive mode felt blind
+       * without it. Users who care about screen privacy can opt out in
+       * Settings → 主动模式 (one click) or exclude specific displays
+       * via `excludedScreenIds`. Sensitive content (password fields,
+       * banking, private chats) is still the user's responsibility to
+       * avoid capturing.
        *
        * Requires a vision-capable model. If the user's backend exposes
        * a vision-capable lightweight tier we'll use it; otherwise we
        * fall back to their main chat model.
        */
-      includeScreen: z.boolean().default(false),
+      includeScreen: z.boolean().default(true),
       /**
        * Screens to EXCLUDE when capturing the user's display(s). Empty
        * array (default) = capture all available displays. Stores the
@@ -458,8 +465,15 @@ export const configSchema = z.object({
        */
       notifListener: z
         .object({
-          /** Master switch. Default OFF (privacy + permission prompt). */
-          enabled: z.boolean().default(false),
+          /** Master switch.
+           *  **Default ON since v0.0.39** — the feature is one of the
+           *  most user-visible "she pays attention to my life" moments
+           *  (QQ message comes in → she mentions it without you asking),
+           *  but defaulted off meant most users never enabled it. The
+           *  Windows system permission dialog still fires on first
+           *  subscribe; if user declines there, nothing happens.
+           *  Allowlist below filters out ads / system noise. */
+          enabled: z.boolean().default(true),
           /**
            * Apps to surface, matched case-insensitively as substrings against
            * the OS-reported app name. Empty array = surface everything (very

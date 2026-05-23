@@ -28,6 +28,7 @@ import { getMemoryService } from '../memory-host.js'
 import { createTextDeltaFilter } from '../chat-text-filter.js'
 import { classifyAndApply } from '../emotion-classifier.js'
 import { transformOpenAIBody, needsBodyTransform } from '../openai-compat-body.js'
+import { isMailEnabled } from '../mail-host.js'
 
 import { setActiveEmit } from './active-emit.js'
 import {
@@ -273,7 +274,11 @@ export async function runChat(
     // need to be exposed to the model — otherwise the synthetic data is
     // unreachable. mail-host.ts also reads OPENMEIDO_FAKE_MAIL; the two must
     // agree, hence the same env-var check here.
-    const mailEnabled = cfg.mail.enabled || process.env.OPENMEIDO_FAKE_MAIL === '1'
+    // Mail is enabled if either cfg.mail.enabled OR .env has full IMAP
+    // creds (host + user + password) — the latter is the post-reset
+    // fallback so Settings-wipe doesn't break the mail tool path. See
+    // mail-host.resolveMailConfig().
+    const mailEnabled = isMailEnabled()
     console.log(
       `[chat] streamText about to fire · model="${modelId}" temp=${resolveTemperature(modelId, 0.6) ?? 'omit'} mailEnabled=${mailEnabled}`,
     )

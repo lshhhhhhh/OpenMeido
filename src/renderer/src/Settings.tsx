@@ -804,6 +804,12 @@ export function Settings({ initial, onClose }: SettingsProps) {
             reflection cadence, and any other system-level memory settings
             live inside MemoryTab. Shown ONLY when the 人物 tab is open. */}
         {activeTab === 'persona' && (
+          <Section title="关系发展（解锁预览）">
+            <TierLadder personaId={draft.persona.preset} />
+          </Section>
+        )}
+
+        {activeTab === 'persona' && (
           <Section title="记忆系统（高级）">
             <MemoryTab personaId={draft.persona.preset} />
           </Section>
@@ -1227,6 +1233,10 @@ export function Settings({ initial, onClose }: SettingsProps) {
                   </li>
                 </ul>
               </div>
+            </Section>
+
+            <Section title="⚠️ 危险区">
+              <DangerZone />
             </Section>
           </>
         )}
@@ -3007,6 +3017,281 @@ function EmbedModelPanel(): React.ReactElement {
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * Reset / clear-local-state buttons. Useful for dev / testing the
+ * fresh-install + first-launch experience without uninstalling the app
+ * and reinstalling. Each option calls into the main process which
+ * relaunches with a --reset-* flag; the next process boot wipes the
+ * relevant files BEFORE any module grabs a sqlite/electron-store
+ * handle on them (see main/index.ts top-level handleResetFlags).
+ *
+ * Three flavors of increasing destructiveness, each with confirm()
+ * dialogs (typed-confirmation reserved for the nuclear option in the
+ * future if abuse becomes a concern — for now, plain confirm matches
+ * the rest of the app's destructive-action UX).
+ */
+function DangerZone() {
+  const [open, setOpen] = useState(false)
+  async function resetConfig(): Promise<void> {
+    const ok = await confirm(
+      '清空所有配置（API key、人设、窗口大小、语音设置等），但保留聊天记忆。app 将立即重启。继续吗？',
+    )
+    if (!ok) return
+    await window.api.reset.config()
+  }
+  async function resetMemory(): Promise<void> {
+    const ok = await confirm(
+      '清空聊天记忆（对话历史、好感度、提炼的事实），但保留 API key + 设置。app 将立即重启。继续吗？',
+    )
+    if (!ok) return
+    await window.api.reset.memory()
+  }
+  async function resetAll(): Promise<void> {
+    const ok = await confirm(
+      '⚠️ 全部清空——删除 %APPDATA%/openmeido/ 下所有内容（设置 + 记忆 + 下载的字体 + embedding 模型 + Live2D 模型）。app 将立即重启，进入首次安装流程。无法撤销。继续吗？',
+    )
+    if (!ok) return
+    await window.api.reset.all()
+  }
+  return (
+    <>
+      <div style={{ fontSize: 12, color: '#bbb', marginBottom: 8, lineHeight: 1.5 }}>
+        遇到问题想从头开始？或者想测试一下首次安装的体验？这里一键清空本地数据。
+        每个选项**都会立即重启 app**，操作不可撤销。
+      </div>
+      {!open && (
+        <button
+          onClick={() => setOpen(true)}
+          style={{
+            ...btnStyle('subtle'),
+            fontSize: 12,
+            padding: '6px 14px',
+          }}
+        >
+          展开危险操作
+        </button>
+      )}
+      {open && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <ResetOption
+            title="重置设置"
+            desc="清空 config.json — API key / 人设选择 / 窗口大小 / 语音 / 主动模式都会回到默认。聊天记忆保留。"
+            buttonLabel="重置设置"
+            onClick={resetConfig}
+          />
+          <ResetOption
+            title="清空记忆"
+            desc="清空 memory.sqlite — 聊天历史 / 好感度 / 提炼的事实全删，重启后她不记得你。设置保留。"
+            buttonLabel="清空记忆"
+            onClick={resetMemory}
+          />
+          <ResetOption
+            title="全部清空（factory reset）"
+            desc="删 %APPDATA%/openmeido/ 下所有内容。设置 + 记忆 + 下载的字体 + 用户导入的 Live2D 模型全没。**重启后看到首次安装引导窗**。"
+            buttonLabel="全部清空"
+            onClick={resetAll}
+            destructive
+          />
+        </div>
+      )}
+    </>
+  )
+}
+
+function ResetOption({
+  title,
+  desc,
+  buttonLabel,
+  onClick,
+  destructive = false,
+}: {
+  title: string
+  desc: string
+  buttonLabel: string
+  onClick: () => Promise<void> | void
+  destructive?: boolean
+}) {
+  return (
+    <div
+      style={{
+        padding: '10px 12px',
+        borderRadius: 8,
+        background: destructive ? 'rgba(248,81,73,0.06)' : 'rgba(255,255,255,0.03)',
+        border: destructive
+          ? '1px solid rgba(248,81,73,0.3)'
+          : '1px solid rgba(255,255,255,0.08)',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: destructive ? '#f88' : '#eee' }}>
+          {title}
+        </span>
+        <button
+          onClick={() => void onClick()}
+          style={{
+            fontSize: 11,
+            padding: '4px 12px',
+            background: destructive ? 'rgba(248,81,73,0.3)' : 'rgba(255,255,255,0.08)',
+            color: destructive ? '#fff' : '#ccc',
+            border: destructive ? '1px solid rgba(248,81,73,0.5)' : '1px solid rgba(255,255,255,0.15)',
+            borderRadius: 6,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {buttonLabel}
+        </button>
+      </div>
+      <div style={{ fontSize: 11, color: '#999', lineHeight: 1.5 }}>{desc}</div>
+    </div>
+  )
+}
+
+/**
+ * Visible "skill tree" of what each affinity tier unlocks for the
+ * currently active persona. Reduces the "I don't know what this
+ * number means" problem — users see Lv.5 has撒娇 / 顶嘴 / 自由话题
+ * waiting and have a concrete goal to chat toward.
+ *
+ * Reads:
+ *   - persona traits at each tier from personaPresets (already part of
+ *     config schema, no IPC needed for the static data)
+ *   - current affinity score via window.api.affinity.get() for the
+ *     "you're here" indicator + locked/unlocked styling
+ *
+ * Listens to affinity:changed broadcast so the ladder updates live as
+ * the user chats and earns points.
+ */
+function TierLadder({ personaId }: { personaId: string }) {
+  const [score, setScore] = useState<number>(0)
+  const persona = personaPresets[personaId as keyof typeof personaPresets]
+  const traits = persona?.traits
+
+  const reload = async (): Promise<void> => {
+    const rec = await window.api.affinity.get(personaId)
+    if (rec) setScore(rec.score)
+  }
+  useEffect(() => {
+    void reload()
+    const off = window.api.affinity.onChanged((i) => {
+      if (i.personaId === personaId) setScore(i.score)
+    })
+    return () => off()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [personaId])
+
+  // Tier bands (mirrors shared/affinity.ts TIERS).
+  const tiers: Array<{ id: 'tier1' | 'tier2' | 'tier3' | 'tier4' | 'tier5'; label: string; min: number; max: number; name: string; perks: string[] }> = [
+    { id: 'tier1', label: 'Lv.1', min: 0,  max: 19,  name: '生疏', perks: ['礼貌应答', '用"您"称呼', '不主动开话题'] },
+    { id: 'tier2', label: 'Lv.2', min: 20, max: 39,  name: '初熟', perks: [
+      ...(traits?.tier2.address ? [`称呼解锁："${traits.tier2.address}"`] : []),
+      ...(traits?.tier2.traits ?? ['轻微展露性格']),
+    ] },
+    { id: 'tier3', label: 'Lv.3', min: 40, max: 59,  name: '熟络', perks: [
+      ...(traits?.tier3.traits ?? ['展露中等性格']),
+      '可反问 / 追问',
+      '偶尔分享自己的看法',
+    ] },
+    { id: 'tier4', label: 'Lv.4', min: 60, max: 79,  name: '亲近', perks: [
+      ...(traits?.tier4.traits ?? ['原型态度全开']),
+      '主动开话题',
+      '可表达不同意见',
+    ] },
+    { id: 'tier5', label: 'Lv.5', min: 80, max: 100, name: '默契', perks: [
+      ...(traits?.tier5.traits ?? [`${persona?.name ?? '她'}独有的小习惯`]),
+      '内部梗 / 试探性玩笑',
+      '可顶嘴 / 坚持自己的观点',
+    ] },
+  ]
+
+  // Score is clamped 0..100 by the engine and tiers[] covers the
+  // full range, so find() always matches; the !! assertion is just
+  // for TS — there's no runtime case where this is undefined.
+  const currentTier = tiers.find((t) => score >= t.min && score <= t.max) ?? tiers[0]!
+  if (!persona) {
+    return <div style={{ fontSize: 12, color: '#888' }}>这个人物没有预设的关系阶梯。</div>
+  }
+
+  return (
+    <>
+      <div style={{ fontSize: 12, color: '#bbb', marginBottom: 10, lineHeight: 1.5 }}>
+        跟她聊得越多，好感度越高，**她的反应会自然变化**——不只是换个称呼。下面是各阶段她会解锁的行为。
+        当前好感度：<b style={{ color: '#fff' }}>{score.toFixed(1)}</b> / 100，
+        在 <b style={{ color: '#ffd566' }}>{currentTier.label} {currentTier.name}</b> 阶段。
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {tiers.map((t) => {
+          const isCurrent = t.id === currentTier.id
+          const isUnlocked = score >= t.min
+          const pointsToGo = isUnlocked ? 0 : t.min - score
+          return (
+            <div
+              key={t.id}
+              style={{
+                position: 'relative',
+                padding: '10px 12px 10px 14px',
+                borderRadius: 8,
+                background: isCurrent
+                  ? 'rgba(255,213,102,0.10)'
+                  : isUnlocked
+                    ? 'rgba(120,200,140,0.05)'
+                    : 'rgba(0,0,0,0.12)',
+                border: isCurrent
+                  ? '1px solid rgba(255,213,102,0.4)'
+                  : '1px solid rgba(255,255,255,0.05)',
+                opacity: isUnlocked ? 1 : 0.55,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                <span
+                  style={{
+                    fontSize: 14,
+                    fontWeight: 700,
+                    color: isCurrent ? '#ffd566' : isUnlocked ? '#7be489' : '#888',
+                  }}
+                >
+                  {isUnlocked ? '🔓' : '🔒'} {t.label} · {t.name}
+                </span>
+                <span style={{ fontSize: 10, color: '#888' }}>
+                  {t.min}-{t.max} 分
+                </span>
+                {isCurrent && (
+                  <span
+                    style={{
+                      fontSize: 10,
+                      color: '#ffd566',
+                      background: 'rgba(255,213,102,0.18)',
+                      padding: '1px 6px',
+                      borderRadius: 999,
+                      marginLeft: 'auto',
+                    }}
+                  >
+                    ★ 当前
+                  </span>
+                )}
+                {!isUnlocked && (
+                  <span style={{ fontSize: 10, color: '#aaa', marginLeft: 'auto' }}>
+                    还差 {pointsToGo.toFixed(1)} 分
+                  </span>
+                )}
+              </div>
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: '#ccc', lineHeight: 1.6 }}>
+                {t.perks.map((p, i) => (
+                  <li key={i}>{p}</li>
+                ))}
+              </ul>
+            </div>
+          )
+        })}
+      </div>
+      <div style={{ fontSize: 10, color: '#666', marginTop: 10, lineHeight: 1.5 }}>
+        提升好感度的方式：跟她聊天 + 让她做有用的事 + 长时间陪她 + 偶尔的关心。
+        反过来：长时间忽略 / 冷淡 / 一直让她当工具会让分数微降（不会低于 30 分，除非全新没聊过）。
+      </div>
+    </>
   )
 }
 

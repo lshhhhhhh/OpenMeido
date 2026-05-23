@@ -304,9 +304,24 @@ function broadcastAffinityChanged(
 
 /** Initial wiring: seed cache for the active persona and start the decay timer. */
 export function initAffinity(activePersona: string): void {
+  // If the user just clicked any reset button, they want to test
+  // post-reset behavior — the DEV_AFFINITY env-var pin would override
+  // that and defeat the test. Suppress for this one session; next
+  // normal startup (no --reset-* in argv) honors the env var again.
+  const justReset = process.argv.some((a) =>
+    a === '--reset-all' || a === '--reset-config' || a === '--reset-memory',
+  )
+  console.log(
+    `[affinity] initAffinity for "${activePersona}" · justReset=${justReset} · ` +
+      `OPENMEIDO_DEV_AFFINITY=${process.env.OPENMEIDO_DEV_AFFINITY ?? '(unset)'}`,
+  )
   void seedInitialIfFresh(activePersona)
     .then(() => refreshCachedScore(activePersona))
     .then(() => {
+      if (justReset) {
+        console.log('[affinity] post-reset session — skipping OPENMEIDO_DEV_AFFINITY override')
+        return
+      }
       // Dev convenience: OPENMEIDO_DEV_AFFINITY=N at boot overrides the
       // active persona's score so we can preview Lv.1 / Lv.5 prompt
       // behavior without grinding chat. Silently ignored when unset,

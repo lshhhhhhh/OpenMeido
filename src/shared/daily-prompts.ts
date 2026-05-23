@@ -50,6 +50,23 @@ export interface DailyPromptContext {
    * has built up.
    */
   tierBlock?: string
+  /**
+   * Optional: rendered L3 facts block (newline-separated `key: value`
+   * lines from memory.factsBlock()). When set, the first-launch greeting
+   * uses one of these to "land the personalized feel" — e.g. setup-wizard
+   * occupation seed lets the very first hello reference real user data.
+   * Empty / undefined → no fact-grounded reference allowed.
+   */
+  factsBlock?: string
+  /**
+   * True when this is the user's very first interaction (no prior
+   * episodes AND no affinity judgement has ever fired). The persona
+   * prompt's "你扮演私人女仆" framing presumes a long-standing
+   * relationship; this flag tells the greeting prompt to override
+   * that and use first-meeting / introduction framing instead — so
+   * day-1 users don't get an immediate "主人" they haven't earned.
+   */
+  firstMeeting?: boolean
 }
 
 /**
@@ -245,10 +262,54 @@ export function buildGreetingPrompt(ctx: DailyPromptContext): string {
   }
 
   const tier = ctx.tierBlock ? `${ctx.tierBlock}\n\n` : ''
+
+  // First-meeting branch: ignore the "你扮演私人女仆 / 妹妹 / 大小姐"
+  // framing of the persona prompt that presumes pre-existing
+  // relationship. Use polite-stranger introduction framing instead.
+  // No 主人 / 哥 / 本小姐 — those are earned. Hook to facts (occupation
+  // / preferred address from wizard) is still useful here: those came
+  // from the user explicitly during setup, so referencing them
+  // doesn't violate "you don't know them yet".
+  if (ctx.firstMeeting) {
+    const factsHookFirst = ctx.factsBlock?.trim()
+      ? `# 用户在 setup 时告诉了你这些事\n${ctx.factsBlock.trim()}\n\n` +
+        `这些是用户**主动填给你**的，不是你"已经认识他"——可以自然带上其中**一条**（"听说您是XX，那以后可能多多麻烦您指点啦"）来表达"我看到了你填的资料"，让对话开头有点温度。但要拿捏分寸：**还在初次见面**，别一上来就装熟。\n\n`
+      : ''
+    return (
+      ctx.persona.systemPrompt +
+      '\n\n' +
+      tier +
+      factsHookFirst +
+      `# 此刻的任务：第一次见面\n` +
+      `这是你和用户的**第一次相遇**——他刚刚装好你这个 app，第一次打开。即便你扮演的是"私人女仆 / 妹妹 / 大小姐"这种听上去已熟识的原型，**这一刻是初次见面**，你不认识他、不知道他叫什么、不知道他平时怎么称呼自己。所以这次开场要：\n\n` +
+      `- **不要用"主人 / 哥 / 本小姐"或任何亲密称呼**——这些是关系深了之后才用。这次用"您"或不称呼，礼貌但保持距离\n` +
+      `- 可以**自我介绍**（一句话，提一下你的角色身份就行，不用念人物原型）\n` +
+      `- 可以**问候 + 等他给信号**——"您好，今天起就由我陪您。先帮您整理点什么？"\n` +
+      `- 不要演"我等了你好久 / 我想你了 / 我一直在这"——你们才认识\n\n` +
+      `当前时间：${ctx.now}。\n${mood}\n` +
+      `\n` +
+      `# 要求\n` +
+      `- 1-3 句中文，自然口语化，带初次见面的礼貌 + 一点点角色性格\n` +
+      `- 不要 emoji、markdown、引号、括号注释\n` +
+      `- 不要客服腔，但也不要装熟\n` +
+      `- **绝对不要凭空编造外部事实**：你看不到屏幕、不知道天气、不知道用户在做什么\n` +
+      `- 文字只输出招呼那句，前后不要解释`
+    )
+  }
+
+  // Returning-user branch: persona has prior relationship, use existing
+  // address terms + recent-exchange context if any.
+  const factsHook = ctx.factsBlock?.trim()
+    ? `# 你已知的关于主人的事实\n${ctx.factsBlock.trim()}\n\n` +
+      `如果上面列了主人的工作 / 偏好 / 习惯，**这次开场可以自然地提一下其中一个**——` +
+      `比如"刚才听说您是XX，工作辛苦吧"——让主人感觉你记得他，不是个 generic 应答。` +
+      `**不要罗列**：挑一条就好；如果列表里只有名字 / 称呼，就用平时打招呼就行，不用刻意展示"我知道你的工作"。\n\n`
+    : ''
   return (
     ctx.persona.systemPrompt +
     '\n\n' +
     tier +
+    factsHook +
     `# 此刻的任务\n` +
     `用户刚刚打开应用，你"醒过来了"，主动招呼一句。\n` +
     `当前时间：${ctx.now}。\n` +
@@ -260,13 +321,13 @@ export function buildGreetingPrompt(ctx: DailyPromptContext): string {
     `${angle}\n` +
     `\n` +
     `# 要求\n` +
-    `- 1-2 句中文，自然、口语化，像跟熟人打招呼\n` +
+    `- 1-2 句中文，自然、口语化，像跟熟人打招呼（如果提及了"主人的事实"中的内容，可放宽到 2-3 句）\n` +
     `- 用你这个角色一贯对用户的称呼（在系统提示里已经说明），不要换\n` +
     `- 不要 emoji、markdown、引号、括号注释\n` +
     `- 不要客服腔（"请问需要什么帮助"），不要承诺动作\n` +
     `- 不要提任何工具、功能、设置\n` +
     `- 不要把"角度"这个提示词复述出来——按它的感觉去写就好\n` +
-    `- **绝对不要凭空编造外部事实**：你看不到屏幕、看不到主人长相、不知道天气、不知道用户身上发生的具体事。能说的只有：时间段（已经告诉你了）、你自己的心情和角色状态、过往对话里真实出现过的内容（如果上面有"上一次对话"区块）。\n` +
+    `- **绝对不要凭空编造外部事实**：你看不到屏幕、看不到主人长相、不知道天气、不知道用户身上发生的具体事。能说的只有：时间段（已经告诉你了）、你自己的心情和角色状态、过往对话里真实出现过的内容（如果上面有"上一次对话"区块）、**或上面"已知关于主人的事实"列出的内容**。\n` +
     `- 文字只输出招呼那句，前后不要解释`
   )
 }

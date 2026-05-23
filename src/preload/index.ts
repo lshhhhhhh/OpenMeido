@@ -307,6 +307,25 @@ const api = {
     },
   },
 
+  reset: {
+    /** Wipe %APPDATA%/openmeido/config.json and relaunch. Keeps
+     *  memory + Live2D models + everything else. */
+    config(): Promise<void> {
+      return ipcRenderer.invoke('reset:config') as Promise<void>
+    },
+    /** Wipe %APPDATA%/openmeido/memory.sqlite (+ WAL/SHM sidecars)
+     *  and relaunch. Keeps config + models. */
+    memory(): Promise<void> {
+      return ipcRenderer.invoke('reset:memory') as Promise<void>
+    },
+    /** Wipe everything under %APPDATA%/openmeido/ and relaunch.
+     *  Truly factory state — including downloaded fonts +
+     *  embedding model (will re-download on demand). */
+    all(): Promise<void> {
+      return ipcRenderer.invoke('reset:all') as Promise<void>
+    },
+  },
+
   fonts: {
     /** Snapshot of optional fonts + per-font installed status.
      *  Returns: Array<{ id, label, approxBytes, url, filename, installed }>. */
@@ -509,6 +528,17 @@ const api = {
     },
     deleteFact(factId: number): Promise<boolean> {
       return ipcRenderer.invoke('memory:deleteFact', factId) as Promise<boolean>
+    },
+    /** Seed a fact directly (no LLM extraction). Setup wizard uses this
+     *  to record user-supplied callAs / occupation so the first greeting
+     *  can reference them. Scope (shared vs persona) is auto-picked
+     *  from the key prefix server-side. */
+    upsertFact(key: string, value: string): Promise<{ ok: boolean; id?: number | null; error?: string }> {
+      return ipcRenderer.invoke('memory:upsertFact', { key, value }) as Promise<{
+        ok: boolean
+        id?: number | null
+        error?: string
+      }>
     },
     /** Force a reflection cycle on demand (Settings → 记忆 → "提取事实"). */
     reflectNow(): Promise<number> {

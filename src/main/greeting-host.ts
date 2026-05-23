@@ -130,16 +130,43 @@ export async function greetOnLaunch(): Promise<void> {
   const memory = getMemoryService()
   const userName = memory ? await memory.getUserName().catch(() => null) : null
   const recentExchange = memory ? await getRecentExchange(memory) : []
+  // Facts block — set by setup wizard (preferred_address / occupation)
+  // and by long-term L3 extraction. First-time users with wizard-seeded
+  // facts get a personalized opener ("听说您是程序员…") instead of a
+  // generic hello. Empty string when memory has nothing yet.
+  const factsBlock = memory ? await memory.factsBlock().catch(() => '') : ''
   // Affinity tier block — without this the greeting plays "stranger
   // defaults" even for long-term users, so morning hellos to someone
   // at affinity 70 feel as cold as day-one.
   const affinity = memory ? await memory.getAffinity().catch(() => null) : null
   const tierBlock = buildTierPromptBlock(affinity?.score ?? 0, persona.name, persona.traits)
+  // First-meeting detection: NO prior assistant/user episodes for this
+  // persona. Earlier this also checked `affinity.lastReason === null`,
+  // but presence-host fires an immediate tick on init that writes a
+  // reason like "她注意到你最近一直在身边" BEFORE the greeting runs,
+  // making lastReason non-null even on a freshly-reset install.
+  // Episode count is the more reliable signal — presence ticks don't
+  // create episodes; only real user/assistant turns do.
+  const firstMeeting = recentExchange.length === 0
+  console.log(
+    `[greeting] firstMeeting=${firstMeeting} · ` +
+      `recentExchange.length=${recentExchange.length} · ` +
+      `affinity.score=${affinity?.score ?? 'null'} · ` +
+      `affinity.lastReason=${JSON.stringify(affinity?.lastReason ?? null)}`,
+  )
 
   let line = ''
   try {
     const raw = await runExtraction(
-      buildGreetingPrompt({ persona, now, userName, recentExchange, tierBlock }),
+      buildGreetingPrompt({
+        persona,
+        now,
+        userName,
+        recentExchange,
+        tierBlock,
+        factsBlock,
+        firstMeeting,
+      }),
       // High creative temperature — with the same persona + same userName
       // + same time-of-day window, anything < 0.9 still produces a near-
       // verbatim greeting from launch to launch. The other lever was the

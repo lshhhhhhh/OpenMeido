@@ -1,9 +1,106 @@
 import { app, BrowserWindow, ipcMain, protocol, dialog, shell, screen } from 'electron'
 import { join, extname } from 'node:path'
-import { createReadStream } from 'node:fs'
+import {
+  createReadStream,
+  existsSync,
+  rmSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
+
+// Reset-flags pass: handle --reset-config / --reset-memory / --reset-all
+// BEFORE any module-init side effects touch userData. The renderer
+// triggers a reset by calling `app.relaunch({ args: [...argv,
+// '--reset-...'] })` then `app.exit(0)`; on the next launch we land
+// here with the flag and wipe the relevant files before electron-store
+// / better-sqlite3 grab any handles. Keeping this at the very top of
+// the entry file (above `import { runChat }` etc.) is intentional —
+// later imports trigger module initialization that may write to
+// userData.
+;(function handleResetFlags(): void {
+  const argv = process.argv
+  // Use app.getPath after app is "ready" — but `app.getPath('userData')`
+  // works pre-ready in newer Electron too. Force it now so the flag
+  // handler runs before any other code expects the dir to exist.
+  const dir = app.getPath('userData')
+  console.log(`[reset] handleResetFlags entry · userData=${dir} · argv=${JSON.stringify(argv)}`)
+
+  // Sentinel file fallback for dev mode. `app.relaunch + app.exit` is
+  // unreliable under electron-vite (the dev server doesn't always
+  // restart the Electron child), so the reset IPC writes a `.pending-reset`
+  // file containing the flag instead. On the next manual `npm run dev`
+  // we pick it up here, treat it as if it were an argv flag, and
+  // delete the sentinel after handling.
+  let sentinelFlag: string | null = null
+  try {
+    const sentinelPath = join(dir, '.pending-reset')
+    if (existsSync(sentinelPath)) {
+      sentinelFlag = String(readFileSync(sentinelPath, 'utf8')).trim()
+      rmSync(sentinelPath, { force: true })
+      console.log(`[reset] sentinel FOUND at ${sentinelPath} · content="${sentinelFlag}" (deleted after read)`)
+      // Surface it on argv so downstream "did we just reset?" checks
+      // (e.g. affinity-host suppressing DEV_AFFINITY) see it.
+      if (sentinelFlag.startsWith('--reset-')) {
+        process.argv.push(sentinelFlag)
+        console.log(`[reset] pushed "${sentinelFlag}" onto process.argv`)
+      }
+    } else {
+      console.log(`[reset] no sentinel at ${sentinelPath}`)
+    }
+  } catch (err) {
+    console.warn('[reset] sentinel read failed:', err)
+  }
+
+  const wipeAll = argv.includes('--reset-all') || sentinelFlag === '--reset-all'
+  const wipeConfig =
+    wipeAll || argv.includes('--reset-config') || sentinelFlag === '--reset-config'
+  const wipeMemory =
+    wipeAll || argv.includes('--reset-memory') || sentinelFlag === '--reset-memory'
+  if (!wipeAll && !wipeConfig && !wipeMemory) {
+    console.log(`[reset] no reset triggers, exiting handler`)
+    return
+  }
+  console.log(`[reset] wiping · all=${wipeAll} config=${wipeConfig} memory=${wipeMemory}`)
+
+  function tryDelete(absPath: string): void {
+    if (!existsSync(absPath)) return
+    try {
+      rmSync(absPath, { recursive: true, force: true })
+      console.log(`[reset] removed ${absPath}`)
+    } catch (err) {
+      console.warn(`[reset] failed to remove ${absPath}:`, err)
+    }
+  }
+
+  if (wipeAll) {
+    // Delete every file inside userData (NOT the dir itself — Electron
+    // wrote config to it during the relaunch hand-off; we can wipe
+    // CONTENTS but not the dir itself reliably mid-process).
+    try {
+      for (const name of readdirSync(dir)) {
+        tryDelete(join(dir, name))
+      }
+      console.log(`[reset] wiped contents of ${dir}`)
+    } catch (err) {
+      console.warn(`[reset] wipe-all readdir failed:`, err)
+    }
+  } else {
+    if (wipeConfig) {
+      tryDelete(join(dir, 'config.json'))
+    }
+    if (wipeMemory) {
+      // Sqlite WAL mode produces -wal / -shm sidecar files. Kill the
+      // trio so the next better-sqlite3 open() creates a truly blank db.
+      tryDelete(join(dir, 'memory.sqlite'))
+      tryDelete(join(dir, 'memory.sqlite-wal'))
+      tryDelete(join(dir, 'memory.sqlite-shm'))
+    }
+  }
+})()
 
 import { runChat } from './chat.js'
 import { getConfig, setConfig, onConfigChange } from './config.js'
@@ -768,6 +865,89 @@ ipcMain.handle('memory:deleteFact', async (_event, factId: number) => {
   if (!svc) return false
   return svc.deleteFact(factId)
 })
+
+// Dev / testing convenience: nuke local state and relaunch into the
+// fresh-install flow. Three flavors:
+//   - reset:config  — wipe config.json (lose API keys, persona pick,
+//                     window position, voice setting etc.)
+//   - reset:memory  — wipe memory.sqlite (lose chat history, facts,
+//                     affinity)
+//   - reset:all     — wipe entire userData contents (everything
+//                     including downloaded fonts + embedding model)
+// Implementation hands off to the --reset-* argv branch at the very
+// top of this file: we relaunch with the flag and the next process
+// deletes the files BEFORE any module grabs a file handle.
+//
+// In dev mode (`!app.isPackaged`), `app.relaunch + app.exit` doesn't
+// work cleanly — electron-vite manages the Electron process as its
+// child, and our exit usually tears down the whole dev session
+// without a new window coming back. Show an explicit dialog instead
+// so the user knows to run `npm run dev` again. In prod (.exe) the
+// auto-relaunch path is fine.
+async function performReset(flag: '--reset-config' | '--reset-memory' | '--reset-all'): Promise<void> {
+  if (app.isPackaged) {
+    app.relaunch({ args: [...process.argv.slice(1), flag] })
+    app.exit(0)
+    return
+  }
+  // Dev mode — show a heads-up before exiting so the user isn't
+  // staring at a dead dev server wondering what happened. Attach to
+  // mainWindow so it renders ON TOP of the always-on-top window
+  // (otherwise the dialog opens behind and the user never sees it).
+  await dialog.showMessageBox(mainWindow ?? undefined as never, {
+    type: 'info',
+    title: '重置完成 — 请手动重启',
+    message: `dev 模式下的 reset 不能自动重启。\n\n应用即将退出。请回到终端重新运行：\n\n    npm run dev\n\n下次启动会自动完成清空 (sentinel: ${flag})。`,
+    buttons: ['好，我去重启'],
+    defaultId: 0,
+  })
+  // Write a sentinel arg into a file so the next dev launch picks it
+  // up — argv won't carry across electron-vite's restart. Loaded by
+  // handleResetFlags at the top of this file.
+  try {
+    const userData = app.getPath('userData')
+    // Defensive: userData may not exist yet on first run, or could have
+    // been wiped by a previous reset cycle. Create before write.
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(userData, { recursive: true })
+    const sentinelPath = join(userData, '.pending-reset')
+    writeFileSync(sentinelPath, flag, 'utf8')
+    console.log(`[reset] sentinel WRITTEN → ${sentinelPath} (content="${flag}")`)
+  } catch (err) {
+    console.warn('[reset] failed to write sentinel:', err)
+  }
+  app.exit(0)
+}
+ipcMain.handle('reset:config', () => performReset('--reset-config'))
+ipcMain.handle('reset:memory', () => performReset('--reset-memory'))
+ipcMain.handle('reset:all', () => performReset('--reset-all'))
+
+// Set a single fact directly (vs the LLM-extraction path). Used by
+// the setup wizard to seed user-supplied personalization (preferred
+// address / occupation) so the very first greeting can reference
+// them. Scope (shared vs persona) is auto-inferred from the key
+// prefix inside upsertFact — see sqlite-memory-adapter.
+ipcMain.handle(
+  'memory:upsertFact',
+  async (_event, payload: { key: string; value: string }) => {
+    const adapter = getMemoryAdapter()
+    if (!adapter) return { ok: false, error: 'memory not ready' }
+    if (!payload?.key || typeof payload.value !== 'string') {
+      return { ok: false, error: 'key + value required' }
+    }
+    try {
+      const personaId = getConfig().persona.preset
+      const fact = await adapter.upsertFact(
+        personaId,
+        { key: payload.key, value: payload.value.trim() },
+        'personal',
+      )
+      return { ok: true, id: fact?.id ?? null }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  },
+)
 
 // Persist a mute-button feedback line as an assistant episode. The
 // renderer already displayed the line locally (zero-latency); this just

@@ -17,12 +17,71 @@ let service: MailService | null = null
 let configuredHash = ''
 
 /** Hash of the bits we care about; if they change we rebuild the adapter. */
-function mailHash(cfg: Config['mail']): string {
+function mailHash(cfg: ResolvedMailConfig): string {
   return [cfg.enabled, cfg.host, cfg.port, cfg.secure, cfg.username, cfg.password].join('|')
 }
 
-function isConfigured(cfg: Config['mail']): boolean {
-  return cfg.enabled && !!cfg.host && !!cfg.username && !!cfg.password
+interface ResolvedMailConfig {
+  enabled: boolean
+  host: string
+  port: number
+  secure: boolean
+  username: string
+  /** Plaintext password — already decrypted (if cfg) / read directly (if env). */
+  password: string
+}
+
+/**
+ * Resolve effective mail config by merging cfg + .env fallback. Lets
+ * the user wipe Settings (reset:config) and still have mail working
+ * from the .env on next launch — useful for testing the fresh-install
+ * flow without re-entering IMAP credentials every time.
+ *
+ * Field-by-field fallback (cfg wins per-field if non-empty), plus a
+ * smart `enabled`: if cfg.enabled is false but env has a complete
+ * credential set, we treat mail as enabled too. The Settings UI still
+ * shows cfg values only — env stays invisible to the renderer.
+ */
+export function resolveMailConfig(): ResolvedMailConfig {
+  const cfg = getConfig().mail
+  const envHost = process.env.MAIL_HOST?.trim() ?? ''
+  const envPortRaw = process.env.MAIL_PORT?.trim()
+  const envPort = envPortRaw ? parseInt(envPortRaw, 10) : NaN
+  const envUser = process.env.MAIL_USER?.trim() ?? ''
+  const envPass = process.env.MAIL_PASSWORD?.trim() ?? ''
+  const envSecureRaw = process.env.MAIL_SECURE?.trim().toLowerCase()
+  const envSecure = envSecureRaw === undefined ? true : envSecureRaw !== 'false'
+
+  const host = cfg.host || envHost
+  // cfg.port defaults to 993 even when user never set anything — so we
+  // can't tell "user picked 993" from "user picked nothing". Use env
+  // only when cfg.host is empty (i.e. user hasn't configured cfg.mail
+  // at all). Same logic for `secure`.
+  const cfgConfigured = !!cfg.host
+  const port = cfgConfigured ? cfg.port : Number.isFinite(envPort) ? envPort : 993
+  const secure = cfgConfigured ? cfg.secure : envSecure
+  const username = cfg.username || envUser
+  const cfgPass = cfg.passwordEncrypted ? decryptMailPassword() : cfg.password
+  const password = cfgPass || envPass
+
+  // Enabled if EITHER the user explicitly turned it on (cfg.enabled)
+  // OR cfg is blank but env has full creds. The env-only path is the
+  // post-reset "fallback still works" use case.
+  const hasFullEnvCreds = !!envHost && !!envUser && !!envPass
+  const enabled = cfg.enabled || (!cfgConfigured && hasFullEnvCreds)
+
+  return { enabled, host, port, secure, username, password }
+}
+
+/** Convenience for chat/run.ts gating: returns true if mail tools
+ *  should be exposed to the model. Includes the FAKE_MODE override. */
+export function isMailEnabled(): boolean {
+  if (process.env.OPENMEIDO_FAKE_MAIL === '1') return true
+  return resolveMailConfig().enabled
+}
+
+function isConfigured(resolved: ResolvedMailConfig): boolean {
+  return resolved.enabled && !!resolved.host && !!resolved.username && !!resolved.password
 }
 
 /** When set, mail-host uses a hardcoded in-memory adapter with synthetic
@@ -47,18 +106,18 @@ export function getMailService(): MailService | null {
     return service
   }
 
-  const cfg = getConfig().mail
-  if (!isConfigured(cfg)) return null
+  const resolved = resolveMailConfig()
+  if (!isConfigured(resolved)) return null
 
-  const hash = mailHash(cfg)
+  const hash = mailHash(resolved)
   if (hash !== configuredHash || !service) {
     void teardown()
     adapter = createImapAdapter({
-      host: cfg.host,
-      port: cfg.port,
-      secure: cfg.secure,
-      user: cfg.username,
-      pass: decryptMailPassword(),
+      host: resolved.host,
+      port: resolved.port,
+      secure: resolved.secure,
+      user: resolved.username,
+      pass: resolved.password,
     })
     service = createMailService(adapter)
     configuredHash = hash
@@ -79,8 +138,11 @@ async function teardown(): Promise<void> {
 }
 
 // Rebuild on any config change so the next mail call uses fresh credentials.
-onConfigChange((next) => {
-  const hash = mailHash(next.mail)
+// Hashes the RESOLVED config (cfg + env fallback), not cfg.mail directly —
+// otherwise edits that touch only the resolved env-fallback side would
+// not invalidate the cache.
+onConfigChange(() => {
+  const hash = mailHash(resolveMailConfig())
   if (hash !== configuredHash) {
     void teardown()
     configuredHash = ''
