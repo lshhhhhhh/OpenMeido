@@ -1128,6 +1128,73 @@ export function Settings({ initial, onClose }: SettingsProps) {
               </div>
             </Section>
 
+            <Section title="字体">
+              <div style={{ fontSize: 12, color: '#bbb', marginBottom: 8, lineHeight: 1.5 }}>
+                3 个内置开源字体，跟系统字体比有「二次元 / 手书」感。每个字体下面预览那行文字看效果，再点按钮切换。
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {([
+                  {
+                    id: 'system',
+                    label: '系统字体',
+                    family: 'system-ui, sans-serif',
+                    hint: '默认 · 跟 OS 一致',
+                  },
+                  {
+                    id: 'xiaolai',
+                    label: '小赖字体',
+                    family: '"Xiaolai", system-ui, sans-serif',
+                    hint: '濑户字体衍生 · 日系手书 · 最 二次元',
+                  },
+                  {
+                    id: 'lxgw-wenkai',
+                    label: 'LXGW 文楷',
+                    family: '"LXGW WenKai Lite", system-ui, sans-serif',
+                    hint: '手书楷体 · 柔和文气',
+                  },
+                  {
+                    id: 'smiley-sans',
+                    label: '得意黑',
+                    family: '"Smiley Sans", system-ui, sans-serif',
+                    hint: '现代圆角 + 微斜 · 活泼',
+                  },
+                ] as const).map((f) => {
+                  const active = draft.ui.fontFamily === f.id
+                  return (
+                    <button
+                      key={f.id}
+                      onClick={() =>
+                        setDraft({ ...draft, ui: { ...draft.ui, fontFamily: f.id } })
+                      }
+                      style={{
+                        ...btnStyle(active ? 'primary' : 'secondary'),
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'flex-start',
+                        textAlign: 'left',
+                        padding: '8px 12px',
+                        gap: 4,
+                      }}
+                    >
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', width: '100%' }}>
+                        <span style={{ fontSize: 13, fontWeight: 600 }}>{f.label}</span>
+                        <span style={{ fontSize: 10, opacity: 0.7 }}>{f.hint}</span>
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: f.family,
+                          fontSize: 14,
+                          opacity: 0.95,
+                        }}
+                      >
+                        主人，今天也辛苦了。我泡杯茶给您吧？
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            </Section>
+
             <Section title="Demo 模式">
               <div style={{ fontSize: 12, color: '#bbb', marginBottom: 8, lineHeight: 1.5 }}>
                 每条 demo 配一个热键，按下播台词 + Live2D 表情 + TTS。

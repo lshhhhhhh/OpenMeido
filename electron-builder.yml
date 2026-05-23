@@ -76,6 +76,14 @@ extraResources:
     filter:
       - "**/*"
       - "!live2d-models/haitu_vts/**"
+  # App icon — shipped OUTSIDE the asar so BrowserWindow's `icon`
+  # option can read a real file path at runtime (taskbar / Alt-Tab /
+  # window icon). electron-builder also auto-embeds build/icon.png
+  # into the .exe metadata as the executable's icon for File Explorer
+  # / installer — that path is detected from buildResources, this
+  # extraResources copy is just for the BrowserWindow runtime use.
+  - from: build/icon.png
+    to: build/icon.png
 
 win:
   target:

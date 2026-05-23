@@ -1,7 +1,16 @@
 node_modules
 dist
 out
-build
+# build/* (NOT bare `build`) so the !build/icon.png negation works —
+# git can't re-include files inside a fully-ignored directory. With
+# build/* we ignore contents but the dir itself stays traversable.
+# electron-builder reads its buildResources from build/, and the app
+# icon must ship with the repo so cloners get the right .exe icon.
+build/*
+!build/icon.png
+# icon/ is my working directory for icon source files (full-res PNGs
+# before resize) — not needed for build, kept out of git to avoid bloat.
+icon/
 *.log
 *.tsbuildinfo
 .DS_Store

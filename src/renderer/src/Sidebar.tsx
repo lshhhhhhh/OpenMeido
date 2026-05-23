@@ -310,6 +310,9 @@ export function Sidebar({
         style={{
           ...stripStyle,
           position: 'absolute',
+          // Flush right edge — sidebar glues to the window border.
+          // Only the LEFT side gets rounded so it reads as a card
+          // peeking out from the right edge.
           right: 0,
           top: 28,
           bottom: 0,
@@ -317,6 +320,10 @@ export function Sidebar({
           // remains clickable across its full height — without this,
           // the chat panel covers the bottom segment of the strip.
           zIndex: 2,
+          borderTopLeftRadius: 10,
+          borderBottomLeftRadius: 10,
+          borderLeft: 'none',
+          boxShadow: '-2px 0 8px rgba(0, 0, 0, 0.06)',
         }}
       >
         ▶ 侧栏
@@ -329,6 +336,9 @@ export function Sidebar({
       style={{
         ...noDrag,
         position: 'absolute',
+        // Flush right edge — sidebar glues to the window border.
+        // Only the LEFT side is rounded so it reads as a card peeking
+        // out from the right (matching the collapsed strip's look).
         right: 0,
         top: 28,
         bottom: 0,
@@ -340,9 +350,12 @@ export function Sidebar({
         zIndex: 2,
         display: 'flex',
         flexDirection: 'row',
-        fontFamily: 'system-ui, sans-serif',
         fontSize: 12,
         color: '#333',
+        borderTopLeftRadius: 16,
+        borderBottomLeftRadius: 16,
+        overflow: 'hidden',
+        boxShadow: '-4px 0 16px rgba(0, 0, 0, 0.08)',
       }}
     >
       <button onClick={onToggle} title="收起侧栏" style={{ ...stripStyle, flex: '0 0 18px' }}>
@@ -354,7 +367,6 @@ export function Sidebar({
           minWidth: 0,
           background: 'rgba(255,255,255,0.92)',
           backdropFilter: 'blur(12px)',
-          boxShadow: '-2px 0 8px rgba(0,0,0,0.05)',
           overflowY: 'auto',
         }}
       >

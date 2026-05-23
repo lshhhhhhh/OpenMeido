@@ -143,6 +143,15 @@ function createWindow(): void {
   const fittedWidth = Math.min(cfg.window.width, Math.floor(work.width * 0.9))
   const fittedHeight = Math.min(cfg.window.height, Math.floor(work.height * 0.9))
 
+  // Resolve the icon path for both dev and prod. In dev __dirname is
+  // out/main/, in prod it's <asar>/out/main/ — but the icon ships
+  // OUTSIDE the asar via electron-builder buildResources, so we have
+  // to walk up to <resources>/. In dev there's no asar; the file is
+  // at project root build/icon.png.
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, 'build', 'icon.png')
+    : join(__dirname, '../../build/icon.png')
+
   const win = new BrowserWindow({
     width: fittedWidth,
     height: fittedHeight,
@@ -152,6 +161,7 @@ function createWindow(): void {
     frame: false,
     resizable: true,
     alwaysOnTop: cfg.window.alwaysOnTop,
+    icon: iconPath,
     // Explicit fully-transparent backgroundColor. Electron defaults to
     // '#FFFFFF' which paints opaque white before the renderer's CSS even
     // loads — on Windows that white sometimes "wins" against transparent.

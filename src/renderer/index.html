@@ -10,13 +10,36 @@
     <style>
       /* The Electron BrowserWindow is { transparent: true, frame: false }.
          Browsers default body/html to white — clear them so the desktop
-         shows through everywhere we don't explicitly paint. */
+         shows through everywhere we don't explicitly paint.
+
+         Font chain biased toward softer / rounder Chinese fonts. Order:
+         1. HarmonyOS Sans SC — modern, friendly, increasingly common
+         2. PingFang SC — macOS default, very soft
+         3. Microsoft YaHei UI — Windows, slightly rounder than 微软雅黑
+         4. Hiragino Sans GB — alternate macOS
+         5. fallback to system-ui / sans-serif
+         For a real "二次元" cuteness we'd need to bundle 思源圆体 or
+         similar (~5-8 MB) — see TODO. This is a system-fonts-only
+         intermediate that's measurably softer than the bare default. */
       html, body, #root {
         margin: 0;
         padding: 0;
         height: 100%;
         background: transparent;
         overflow: hidden;
+        /* font-family reads from the --meido-font CSS variable that
+           App.tsx updates based on cfg.ui.fontFamily. Defaults to the
+           softer system fonts chain when no bundled font is picked. */
+        font-family: var(--meido-font,
+          'HarmonyOS Sans SC',
+          'PingFang SC',
+          'Microsoft YaHei UI',
+          'Hiragino Sans GB',
+          'Helvetica Neue',
+          system-ui,
+          sans-serif);
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
       }
       /* Native <option> doesn't inherit color/background from the parent
          <select> on most platforms — the OS draws the popup. Force dark on

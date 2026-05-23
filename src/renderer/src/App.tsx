@@ -286,6 +286,26 @@ export default function App() {
     warmupAudioContext()
   }, [])
 
+  // Apply the user's chosen UI font by writing a CSS variable on the
+  // <html> element. index.html's `font-family: var(--meido-font, ...)`
+  // reads this; everything inherits from there. 'system' clears the
+  // variable so the fallback chain in index.html kicks in.
+  useEffect(() => {
+    if (!config) return
+    const fontMap: Record<string, string> = {
+      system: '',
+      xiaolai: '"Xiaolai", "HarmonyOS Sans SC", "Microsoft YaHei UI", sans-serif',
+      'lxgw-wenkai': '"LXGW WenKai Lite", "HarmonyOS Sans SC", "Microsoft YaHei UI", sans-serif',
+      'smiley-sans': '"Smiley Sans", "HarmonyOS Sans SC", "Microsoft YaHei UI", sans-serif',
+    }
+    const family = fontMap[config.ui.fontFamily] ?? ''
+    if (family) {
+      document.documentElement.style.setProperty('--meido-font', family)
+    } else {
+      document.documentElement.style.removeProperty('--meido-font')
+    }
+  }, [config?.ui.fontFamily])
+
   // Rotate the onboarding tip placeholder every TIP_ROTATE_MS so users
   // discover features passively. Always runs — the placeholder is
   // only visible when the input is idle anyway, so silent rotation
@@ -1001,6 +1021,12 @@ export default function App() {
         // Without overflow:hidden, a zoom > 1 background layer would
         // visually leak outside the window edges.
         overflow: 'hidden',
+        // Rounded outer frame. The BrowserWindow's actual rectangle
+        // stays — corners are just transparent pixels showing the
+        // desktop. Anything painted (top bar / bg layer / sidebar /
+        // chat panel) gets clipped to this rounded shape. Result:
+        // looks like a rounded card sitting on the desktop.
+        borderRadius: 16,
       }}
     >
       {showBackground && backgroundUrl && (
@@ -1247,7 +1273,7 @@ export default function App() {
           </button>
           <button
             onClick={() => window.close()}
-            title="Close"
+            title="关闭"
             style={{
               width: 20,
               height: 20,
@@ -1255,13 +1281,21 @@ export default function App() {
               borderRadius: 10,
               background: 'rgba(0,0,0,0.25)',
               color: 'white',
-              fontSize: 13,
-              lineHeight: '20px',
+              // The "×" / "✕" glyphs sit visually high above the
+              // baseline in most fonts, so vertical lineHeight
+              // centering looked off. Flex-center the glyph and use
+              // ✕ (U+2715) which has a more rectangular bounding
+              // box than × (U+00D7).
+              fontSize: 12,
               cursor: 'pointer',
               padding: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              lineHeight: 1,
             }}
           >
-            ×
+            ✕
           </button>
         </div>
       </div>
@@ -1322,18 +1356,31 @@ export default function App() {
         style={{
           ...noDragRegion,
           position: 'absolute',
-          left: 0,
-          right: 0,
-          bottom: 0,
+          // Small inset on all sides so the chat panel reads as a
+          // floating card with rounded corners, not a card glued to
+          // the window edges. The transparent gap shows the desktop
+          // beneath — that's the desktop-companion visual language.
+          //
+          // Right inset DEPENDS on sidebar state. Sidebar is flush
+          // right: open=260px, closed=18px strip. Chat panel needs to
+          // sit clear of whichever is showing, with 6px breathing
+          // room so the rounded corners read.
+          left: 6,
+          right: sidebarOpen ? 266 : 24,
+          bottom: 6,
           height: chatHeight,
           background: 'rgba(255, 255, 255, 0.88)',
           backdropFilter: 'blur(8px)',
-          borderRadius: '14px 14px 0 0',
+          borderRadius: 16,
           display: 'flex',
           flexDirection: 'column',
-          fontFamily: 'system-ui, sans-serif',
+          // fontFamily inherits from html — softer chain in index.html.
           overflow: 'hidden',
+          boxShadow: '0 4px 24px rgba(0, 0, 0, 0.12)',
           zIndex: 2,
+          // Smooth the sidebar open/close transition so the chat panel
+          // glides rather than jumps when right edge changes.
+          transition: 'right 0.2s ease-out',
         }}
       >
         {/* Resize strip — lives INSIDE the chat panel's top so its 6px height
@@ -1727,10 +1774,19 @@ export default function App() {
             <button
               onClick={send}
               disabled={!input.trim() && attachments.length === 0}
-              title={busy ? '女仆还在回复，按 Send 会排队，等她说完自动发出' : 'Send'}
-              style={{ padding: '6px 14px' }}
+              title={busy ? '女仆还在回复，按发送会排队，等她说完自动发出' : '发送'}
+              style={{
+                padding: '6px 16px',
+                background: '#5a8edf',
+                color: '#fff',
+                fontWeight: 600,
+                fontSize: 13,
+                borderRadius: 8,
+                flexShrink: 0,
+                marginRight: 2,
+              }}
             >
-              {busy ? '…' : 'Send'}
+              {busy ? '…' : '发送'}
             </button>
           </div>
         </div>

@@ -663,6 +663,17 @@ export const configSchema = z.object({
        * modern hi-DPI displays.
        */
       fontScale: z.number().min(0.8).max(2.0).default(1.15),
+      /**
+       * UI font family. 'system' = use the fallback chain in index.html
+       * (which biases toward softer system fonts like HarmonyOS Sans /
+       * PingFang / 微软雅黑 UI). The other three are bundled — see
+       * src/renderer/public/fonts/ and the @font-face declarations in
+       * src/renderer/src/index.css. App.tsx writes `--meido-font` CSS
+       * variable when this changes; html/body inherit from there.
+       */
+      fontFamily: z
+        .enum(['system', 'xiaolai', 'lxgw-wenkai', 'smiley-sans'])
+        .default('system'),
     })
     .default({}),
 })

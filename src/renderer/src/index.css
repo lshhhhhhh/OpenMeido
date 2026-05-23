@@ -1,0 +1,85 @@
+/*
+ * Bundled fonts. Three open-source Chinese fonts cover the cute /
+ * 二次元 spectrum:
+ *   - Xiaolai (小赖字体)       — derived from Japanese Seto Font, most
+ *                                 anime-handwritten feel
+ *   - LXGW WenKai Lite (文楷)  — handwritten serif elegance
+ *   - Smiley Sans (得意黑)     — playful italic modern
+ *
+ * Loaded from src/renderer/public/fonts/ which electron-builder
+ * extracts to <resources>/public/fonts/ (see electron-builder.yml
+ * `extraResources`). The renderer picks one at runtime via the
+ * cfg.ui.fontFamily setting; CSS variable `--meido-font` is updated
+ * by App.tsx and inherited everywhere.
+ */
+@font-face {
+  font-family: 'Xiaolai';
+  src: url('/fonts/Xiaolai-Regular.ttf') format('truetype');
+  font-display: swap;
+}
+@font-face {
+  font-family: 'LXGW WenKai Lite';
+  src: url('/fonts/LXGWWenKaiLite-Regular.ttf') format('truetype');
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Smiley Sans';
+  src: url('/fonts/SmileySans-Oblique.ttf') format('truetype');
+  font-display: swap;
+}
+
+/*
+ * Global UI defaults.
+ *
+ * Most of the app uses inline React styles with explicit `borderRadius`
+ * everywhere — chip = 999, button = 6, bubble = 10. These defaults only
+ * catch the "bare" elements that were never given an inline style:
+ * the chat input, the Send button, the four debug live2d buttons,
+ * various Settings inputs. Anything with an inline `borderRadius:` still
+ * wins (inline beats stylesheet).
+ *
+ * Range / color / checkbox / radio are excluded — their browser-native
+ * presentation is the right one, rounding them would look weird.
+ */
+
+button,
+input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']),
+textarea,
+select {
+  border-radius: 6px;
+}
+
+/* Inputs / textareas: also give them a sane border + inherited font so
+   the bare ones (e.g. mail / persona Settings forms) don't fall back to
+   the browser's chunky default border + Times-like serif. */
+input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']),
+textarea,
+select {
+  font-family: inherit;
+  font-size: inherit;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.65);
+}
+
+/* Buttons: minimal consistent baseline. Inline-styled buttons keep
+   their specific look; bare buttons (debug live2d controls / a few
+   in dialogs) get a translucent dark pill that matches the chip
+   family up top. */
+button {
+  border: none;
+  background: rgba(0, 0, 0, 0.18);
+  color: #444;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.12s ease-out;
+}
+button:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.28);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
