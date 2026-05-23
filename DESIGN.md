@@ -182,6 +182,6 @@ If you don't object to any of these, I'll proceed with the ⭐ row across all th
 
 ---
 
-## License & licensing notes (TBD, leaning Apache-2.0)
+## License & licensing notes
 
-To match desktop-kanojo and align with the broader OSS AI ecosystem (Vercel AI SDK is Apache-2.0, Cubism JS components have their own Live2D Free Material License). Final call before public release.
+App code: **GPL-3.0** (see `LICENSE` at repo root). Copyleft was chosen so derivative desktop-companion forks must also stay open source. Third-party components keep their own terms — notably the Cubism JS runtime (MIT), the Live2D Cubism Core (proprietary Cubism SDK Release License), and the bundled Hiyori / Haru models (Live2D Free Material License Agreement v1.6).

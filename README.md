@@ -146,4 +146,4 @@ Full build guide in [BUILD.md](./BUILD.md).
 
 ### License
 
-App code: TBD (leaning Apache-2.0). 3rd-party licensing covered above.
+App code: [GPL-3.0](./LICENSE). 3rd-party licensing covered above.
