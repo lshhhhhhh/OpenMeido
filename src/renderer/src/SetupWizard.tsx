@@ -142,16 +142,17 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
         // wizard is visible (blurred + softly dimmed) so the user feels
         // her presence while configuring AI. The cold-start greeting +
         // TTS also fire during this window, so the user HEARS her too.
-        // Previously this was rgba(0,0,0,0.65) which fully obscured the
-        // model and turned the first 30 seconds of the app into a dark
-        // form — making first impression "is this thing alive?" instead
-        // of "oh she's already here".
         background: 'rgba(0,0,0,0.35)',
         backdropFilter: 'blur(6px)',
         WebkitBackdropFilter: 'blur(6px)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
+        // OUTER container scrolls when content exceeds viewport height.
+        // Previously this was a flex-center, which vertically centered
+        // the card — when the card grew taller than viewport (persona
+        // pick + provider list + personalization), centering pushed
+        // both the top × and the bottom Save/Skip buttons off-screen.
+        // Scroll + top-anchored layout keeps every part reachable.
+        overflowY: 'auto',
+        padding: '24px 16px 32px',
         fontFamily: 'system-ui, sans-serif',
       }}
     >
@@ -159,54 +160,77 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
         style={{
           width: 480,
           maxWidth: '90vw',
+          margin: '0 auto',
           background: '#1f2128',
           color: '#eee',
           borderRadius: 10,
-          padding: '20px 22px',
+          // padding-top: 0 so the sticky × header can hug the card top
+          // edge cleanly. Internal sections add their own top margin.
+          padding: '0 22px 20px',
           boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
-          // position:relative so the absolutely-positioned close × can
-          // anchor to the card's corner instead of the viewport.
           position: 'relative',
         }}
       >
-        {/* Top-right × — same affordance as "稍后再说" but in the canonical
-            "this is a closable modal" position. Without it, a user who
-            reaches this dialog accidentally has no obvious way out
-            besides reading to the bottom and finding 稍后再说. */}
-        <button
-          onClick={onSkip}
-          aria-label="跳过设置"
-          title="跳过设置（稍后可在 Settings → AI 配）"
+        {/* Sticky × — stays pinned to the top of the card even when the
+            outer container scrolls, so users on shorter viewports can
+            always exit. Replaces the previous absolute-positioned ×
+            which scrolled out of view when content grew past viewport
+            height (the persona-pick added in v0.1.3 was enough to push
+            users on 720p screens past that threshold).
+
+            Wrapper row + sticky position(rather than position:fixed)
+            keeps the visual anchor — × reads as "close THIS card", not
+            "close something somewhere on screen". top:0 + negative
+            margin-x cancels the card's horizontal padding so the
+            header background can extend edge-to-edge of the card. */}
+        <div
           style={{
-            position: 'absolute',
-            top: 10,
-            right: 12,
-            width: 28,
-            height: 28,
+            position: 'sticky',
+            top: 0,
+            margin: '0 -22px',
+            padding: '8px 12px',
+            background: '#1f2128',
+            borderTopLeftRadius: 10,
+            borderTopRightRadius: 10,
             display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'transparent',
-            border: 'none',
-            color: '#888',
-            fontSize: 20,
-            lineHeight: 1,
-            cursor: 'pointer',
-            borderRadius: 4,
-            padding: 0,
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(255,255,255,0.08)'
-            e.currentTarget.style.color = '#eee'
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'transparent'
-            e.currentTarget.style.color = '#888'
+            justifyContent: 'flex-end',
+            zIndex: 1,
+            // Soft separator under the header when content scrolls under.
+            borderBottom: '1px solid rgba(255,255,255,0.04)',
           }}
         >
-          ×
-        </button>
-        <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>
+          <button
+            onClick={onSkip}
+            aria-label="跳过设置"
+            title="跳过设置（稍后可在 Settings → AI 配）"
+            style={{
+              width: 28,
+              height: 28,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: 'transparent',
+              border: 'none',
+              color: '#888',
+              fontSize: 20,
+              lineHeight: 1,
+              cursor: 'pointer',
+              borderRadius: 4,
+              padding: 0,
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(255,255,255,0.08)'
+              e.currentTarget.style.color = '#eee'
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'transparent'
+              e.currentTarget.style.color = '#888'
+            }}
+          >
+            ×
+          </button>
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 600, marginTop: 4, marginBottom: 4 }}>
           👋 欢迎，先选一位陪伴你的角色
         </div>
         <div style={{ fontSize: 12, color: '#aaa', marginBottom: 12 }}>
