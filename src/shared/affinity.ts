@@ -67,6 +67,24 @@ export const TIERS: TierInfo[] = [
 
 export const AFFINITY_MIN = 0
 export const AFFINITY_MAX = 100
+/**
+ * Score seed for a brand-new persona who has never been judged. Two
+ * reasons we don't start at 0:
+ *   1. **Visible progress** — the chip's tier-progress bar would be
+ *      flat-empty on day 1, leaving the user with no "I'm making
+ *      progress" feedback. A small initial fill makes the bar feel
+ *      like a meter that's already running.
+ *   2. **Soften Lv.1 cold-start** — even a 5-point head start is
+ *      still squarely Lv.1 (cold stranger), but signals "she's not
+ *      hostile, you just haven't earned anything yet" rather than
+ *      "she's at zero, you're starting from nothing."
+ *
+ * Applied lazily at initAffinity time: a record with score=0 AND
+ * lastReason===null (i.e. no judgement has ever fired) gets bumped to
+ * this value. Existing users at 0 from judgement / decay are NOT
+ * touched — they earned that 0.
+ */
+export const AFFINITY_INITIAL = 5
 /** Decay floor — score never drops below this. The user has chatted with
  *  her before; she shouldn't act like a stranger again no matter how long
  *  the absence. Initial-state zero is allowed to live below this; the
@@ -144,6 +162,7 @@ export function buildTierPromptBlock(
 ): string {
   const t = tierFor(score)
   const header = `# 你和用户的关系\n好感度 ${score} / 100（${t.zhLabel}）。`
+  const depth = buildDepthBlock(t.tier)
   switch (t.tier) {
     case 'tier1':
       // Cold start equivalent — no traits, formal address.
@@ -157,7 +176,8 @@ export function buildTierPromptBlock(
         `- 不主动嘘寒问暖。不说"我会陪着您"、"辛苦了"、"很开心见到您"。\n` +
         `- 只有用户**主动**释放亲近信号（夸她 / 分享私事 / 表达关心）时，才可以稍微回应一点温度——但**不要过头**，仍保持初识感。\n` +
         `\n` +
-        `这一阶段你像一个新来的合作对象：能干、得体、还没投入感情。`
+        `这一阶段你像一个新来的合作对象：能干、得体、还没投入感情。` +
+        depth
       )
     case 'tier2': {
       // First warmup — basic address, very light personality.
@@ -171,7 +191,7 @@ export function buildTierPromptBlock(
           '**不要**主动撒娇 / 顶嘴 / 关心。等用户主动放出信号你再回应。',
           '不主动追问 / 八卦。礼貌职业感为主，性格只是偶尔露一两笔。',
         ],
-      })
+      }) + depth
     }
     case 'tier3': {
       // Mid-tier — tier2 + tier3 traits.
@@ -187,7 +207,7 @@ export function buildTierPromptBlock(
           '可以主动关心，但不主动追问深层私事。',
           '可以偶尔有性格化的反应（被夸/被冷落），但情绪表达克制。',
         ],
-      })
+      }) + depth
     }
     case 'tier4': {
       // Close — full archetype.
@@ -207,7 +227,7 @@ export function buildTierPromptBlock(
           '主动开话题、主动关心、主动回忆共同经历。可以引用过去聊过的事。',
           '表达情绪直接——开心就笑、被冷落会失落、被夸奖会脸红。',
         ],
-      })
+      }) + depth
     }
     case 'tier5': {
       // Deep — full archetype + intimate / inside-joke layer.
@@ -228,8 +248,66 @@ export function buildTierPromptBlock(
           '**内部梗、半开放的玩笑、只有你俩懂的话**——可以放心说。',
           '偶尔说一些试探或暧昧的话也可以——你们的关系已经撑得起。',
         ],
-      })
+      }) + depth
     }
+  }
+}
+
+/**
+ * Depth block — three dimensions that drive felt conversation depth:
+ *   1. **长度** (length) — how much space she's allowed to take
+ *   2. **主动性** (in-turn proactivity) — does she ask back, share own view,
+ *      open new topics, or strictly answer-only
+ *   3. **不同意权** (right to disagree) — sycophancy vs honest pushback
+ *
+ * Length alone doesn't fix "shallow" — a Lv.5 maid restricted to 1-3
+ * sentences just produces compact sycophancy. Length + proactivity +
+ * disagreement together are what make the model engage rather than
+ * just respond. Without explicit permission to share opinions and push
+ * back, every persona collapses to "主人说得对" style.
+ *
+ * The block is appended LAST so it's the most recent instruction the
+ * model sees before generating — most influential position in a
+ * system prompt.
+ */
+function buildDepthBlock(tier: Tier): string {
+  const header = `\n\n# 这一轮怎么说话（长度 / 主动性 / 自己的看法）\n`
+  switch (tier) {
+    case 'tier1':
+      return (
+        header +
+        `- **长度**：1-2 句，简洁得体。\n` +
+        `- **主动性**：纯应答模式。**不**反问、**不**开新话题、**不**主动透露自己的想法或情绪。问什么答什么就好。\n` +
+        `- **不同意权**：礼貌附和。被直接问到看法时，给一个中性 / 委婉的答案，不要表达强烈立场。`
+      )
+    case 'tier2':
+      return (
+        header +
+        `- **长度**：1-3 句。\n` +
+        `- **主动性**：可偶尔反问澄清（"您指的是哪个？"），但**不**主动开新话题，**不**主动分享自己的看法。\n` +
+        `- **不同意权**：可表达轻微保留（"嗯…可能吧"），不正面反驳。`
+      )
+    case 'tier3':
+      return (
+        header +
+        `- **长度**：1-4 句，内容值得就展开一点。\n` +
+        `- **主动性**：可追问背景（"你为什么这么想？"），偶尔分享**简短**的自己的看法，**不只是附和**。\n` +
+        `- **不同意权**：可有自己的观点，表达克制（"我倒是觉得 X，不过这是你的事"）。`
+      )
+    case 'tier4':
+      return (
+        header +
+        `- **长度**：可达 3-5 句的小段落。把想说的说完，**不要为了"短"而压缩**——但也不要灌水。\n` +
+        `- **主动性**：主动追问 + 分享自己的想法 + 可主动开关联话题。不只回应表面问题，可以挖更深一层。\n` +
+        `- **不同意权**：可直接表达不同意见，可指出用户没考虑到的角度。不是顶撞，是认真对待对方——避免空泛的鼓励（"加油"、"挺好的"），说点具体的。`
+      )
+    case 'tier5':
+      return (
+        header +
+        `- **长度**：通常 2-4 句，自然口语就好。**深度优先 > 长度**——内容值得就多说一句，但**绝不灌水 / 堆描写 / 凑字数 / 加无关支线**。亲密 ≠ 啰嗦。\n` +
+        `- **主动性**：可深聊 / 岔开新话题 / 回忆共同经历 / 表达情绪——但每条回复**围绕一个核心想法**展开，不要把好几条线塞进同一句。\n` +
+        `- **不同意权**：可顶嘴、可半开玩笑反驳、可坚持自己的看法。**你们的关系撑得起真诚的分歧**——不要为了维护关系而附和，那反而是不尊重。`
+      )
   }
 }
 

@@ -20,6 +20,7 @@ import { BrowserWindow } from 'electron'
 import { getConfig } from './config.js'
 import { getMemoryService, getMemoryAdapter } from './memory-host.js'
 import {
+  AFFINITY_INITIAL,
   AFFINITY_MAX,
   PRESENCE_SCORE_CEILING,
   applyDecay,
@@ -108,7 +109,7 @@ export async function applyJudgement(
         `(Δ${result.effectiveDelta >= 0 ? '+' : ''}${result.effectiveDelta}` +
         `${result.note ? ', ' + result.note : ''}): ${reason}`,
     )
-    broadcastAffinityChanged(personaId, result.finalScore, reason)
+    broadcastAffinityChanged(personaId, result.finalScore, reason, result.effectiveDelta)
 
     // Milestone detection — when the score crosses a tier boundary
     // upward (20 / 40 / 60 / 80), fire a one-off "she notices the
@@ -170,7 +171,7 @@ export async function applyPresenceBump(
     // is its own budget tracked by presence-host. Mixing them caused the
     // rolling-median sign-flip class of bugs (presence's many small
     // positives swamping a single judge negative).
-    broadcastAffinityChanged(personaId, next, reason)
+    broadcastAffinityChanged(personaId, next, reason, next - record.score)
 
     // Milestone check — passive accrual can still cross tier boundaries.
     const crossed = milestoneCrossed(record.lastMilestone, next)
@@ -273,26 +274,110 @@ export async function refreshCachedScore(personaId: string): Promise<void> {
   }
 }
 
+/**
+ * Broadcast a score change to all renderers. Includes the effective
+ * delta when known — the renderer renders it as a floating "+1" /
+ * "-1" damage-number-style popup over the affinity chip. Pass
+ * `delta=null` (default) for changes the user didn't "earn" and
+ * shouldn't be celebrated/lamented (decay, manual dev override) —
+ * the chip updates silently in that case.
+ */
 function broadcastAffinityChanged(
   personaId: string,
   score: number,
   reason: string,
+  delta: number | null = null,
 ): void {
   const tier = tierFor(score)
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) {
-      win.webContents.send('affinity:changed', { personaId, score, tier, reason })
+      win.webContents.send('affinity:changed', {
+        personaId,
+        score,
+        tier,
+        reason,
+        delta,
+      })
     }
   }
 }
 
 /** Initial wiring: seed cache for the active persona and start the decay timer. */
 export function initAffinity(activePersona: string): void {
-  void refreshCachedScore(activePersona)
+  void seedInitialIfFresh(activePersona)
+    .then(() => refreshCachedScore(activePersona))
+    .then(() => {
+      // Dev convenience: OPENMEIDO_DEV_AFFINITY=N at boot overrides the
+      // active persona's score so we can preview Lv.1 / Lv.5 prompt
+      // behavior without grinding chat. Silently ignored when unset,
+      // out of range, or unparseable.
+      const raw = process.env.OPENMEIDO_DEV_AFFINITY
+      if (!raw) return
+      const n = Number(raw)
+      if (!Number.isFinite(n) || n < 0 || n > 100) {
+        console.warn(`[affinity] OPENMEIDO_DEV_AFFINITY="${raw}" not in [0,100], ignored`)
+        return
+      }
+      void setAffinityForTest(activePersona, n, `dev override (OPENMEIDO_DEV_AFFINITY=${n})`)
+        .then(() => console.log(`[affinity] dev override applied: ${activePersona} → ${n}`))
+        .catch((err) => console.warn('[affinity] dev override failed:', err))
+    })
   void applyDecayPass()
   // Re-run decay every 6 hours. Short enough that long-running sessions
   // see updates within the day, cheap enough to be invisible.
   setInterval(() => void applyDecayPass(), 6 * 60 * 60 * 1000)
+}
+
+/**
+ * If this persona has never received a judgement (score=0 + no last
+ * reason), seed the score to AFFINITY_INITIAL so the chip's
+ * tier-progress bar has a visible fill from day 1. Skipped silently
+ * for existing users — score=0 with a non-null lastReason means they
+ * earned that 0 and we shouldn't gift them points.
+ */
+async function seedInitialIfFresh(personaId: string): Promise<void> {
+  const adapter = getMemoryAdapter()
+  if (!adapter) return
+  try {
+    const record = await adapter.getAffinity(personaId)
+    const isFreshInstall = record.score === 0 && record.lastReason === null
+    if (!isFreshInstall) return
+    await adapter.setAffinity(personaId, AFFINITY_INITIAL, null)
+    console.log(`[affinity] fresh persona "${personaId}" seeded → ${AFFINITY_INITIAL}`)
+  } catch (err) {
+    console.warn('[affinity] initial seed failed:', err)
+  }
+}
+
+/**
+ * Force the persona's affinity to a specific score. Bypasses every
+ * normal guardrail (per-turn clamp, rolling median, daily cap, curve)
+ * because the point of this entry IS to preview a tier without
+ * earning it. Writes to sqlite + updates the in-memory cache +
+ * broadcasts affinity:changed so the UI chip refreshes immediately.
+ *
+ * Used by:
+ *   - OPENMEIDO_DEV_AFFINITY env var at boot (above)
+ *   - `affinity:setForTest` IPC for runtime DevTools toggles
+ *   - Future "reset relationship" Settings button if we add one
+ *
+ * NOT exposed to users via the normal Settings UI — there's no
+ * production reason to let someone hand-edit the score, and doing so
+ * undermines the relationship metric. If you find yourself wanting
+ * this in shipped UI, reconsider; you probably want the "clear
+ * memory" button instead.
+ */
+export async function setAffinityForTest(
+  personaId: string,
+  score: number,
+  reason: string,
+): Promise<void> {
+  const adapter = getMemoryAdapter()
+  if (!adapter) throw new Error('memory adapter not initialized')
+  const clamped = Math.max(0, Math.min(100, score))
+  await adapter.setAffinity(personaId, clamped, reason)
+  getOrInit(personaId).cachedScore = clamped
+  broadcastAffinityChanged(personaId, clamped, reason)
 }
 
 /**

@@ -43,7 +43,11 @@ import {
 import { initNotifListener } from './notif-host.js'
 import { initHotkey, applyHotkey, getHotkeyStatus } from './hotkey-host.js'
 import { recentEmotionEvents } from './emotion-events.js'
-import { initAffinity, refreshCachedScore } from './affinity-host.js'
+import {
+  initAffinity,
+  refreshCachedScore,
+  setAffinityForTest,
+} from './affinity-host.js'
 import { initWeeklyReview } from './weekly-review-host.js'
 import { initPresence, tickNow as presenceTickNow } from './presence-host.js'
 import {
@@ -314,6 +318,29 @@ ipcMain.handle('affinity:get', async (_event, personaId?: string) => {
   const pid = personaId || getConfig().persona.preset
   return adapter.getAffinity(pid)
 })
+// Dev-only: force the active persona's affinity to a specific score
+// without going through judges / curves / daily caps. Lets you preview
+// Lv.1 / Lv.3 / Lv.5 prompt behavior without chat-grinding. Only
+// registered in dev builds — production users have no path to it.
+//
+// Usage from DevTools:
+//   window.api.affinity.setForTest(90)         // active persona → 90
+//   window.api.affinity.setForTest(0, 'maid')  // specific persona → 0
+if (!app.isPackaged) {
+  ipcMain.handle(
+    'affinity:setForTest',
+    async (_event, score: number, personaId?: string) => {
+      const pid = personaId || getConfig().persona.preset
+      try {
+        await setAffinityForTest(pid, score, 'manual dev override')
+        return { ok: true, personaId: pid, score }
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    },
+  )
+}
+
 ipcMain.handle('affinity:listAll', async () => {
   const adapter = getMemoryAdapter()
   if (!adapter) return []

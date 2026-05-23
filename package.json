@@ -36,6 +36,7 @@
     "test:list-inbox": "electron tools/smoke-list-inbox.mjs",
     "test:table-e2e": "electron tools/smoke-table-e2e.mjs",
     "test:tier-conversation": "node --env-file=.env --import tsx tools/smoke-tier-conversation.mjs",
+    "test:tier-depth": "node --env-file=.env --import tsx tools/smoke-tier-depth.mjs",
     "test:elaborate": "node --env-file=.env --import tsx tools/smoke-elaborate-proactive.mjs",
     "test:email-draft": "node --env-file=.env --import tsx tools/smoke-email-draft.mjs",
     "test:email-draft-routing": "node --env-file=.env --import tsx tools/smoke-email-draft-routing.mjs",

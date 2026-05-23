@@ -22,6 +22,35 @@ interface ToolCall {
   result?: unknown
 }
 
+/**
+ * Rotating onboarding tips — shown as the chat input's placeholder when
+ * the input is idle (no typing, no recording, no attachments, not
+ * busy). Cycles every TIP_ROTATE_MS so a new-install user discovers
+ * features without needing a tutorial.
+ *
+ * Keep tips ~1 sentence, action-oriented, and feature-pointing. They
+ * disappear the moment the user starts typing, so brevity matters
+ * more than completeness.
+ */
+const ONBOARDING_TIPS: readonly string[] = [
+  '好感度越高，对话越深',
+  '🔔 一键让她闭嘴',
+  '语音 / 声线可自定义',
+  '拖动她到桌面任意位置',
+  '👀 让她看你的屏幕',
+  'Settings 可以连邮箱',
+  '可以切换 4 种人设',
+  '主动模式跟好感度联动',
+  '台词文件可记事本编辑',
+  'Live2D 模型可自己导入',
+]
+// 15s rather than 5s — the placeholder sits in the user's peripheral
+// vision while they read or think, and short rotations pull the eye
+// every few seconds. 15s makes it feel ambient (one cycle ≈ 2.5min)
+// while still surfacing enough tips for a casual user to discover
+// features within their first session.
+const TIP_ROTATE_MS = 15000
+
 interface DraftCard {
   cardId: string
   replyToUid: string
@@ -171,6 +200,10 @@ export default function App() {
   // anti-repeat ring stays well under the smallest pool size (4) and we
   // never trigger the "every line used" fallback unnecessarily.
   const recentMuteLinesRef = useRef<string[]>([])
+  // Rotating onboarding tip index — drives the chat input's placeholder
+  // when it would otherwise be empty. Cycles via setInterval, see the
+  // useEffect below.
+  const [tipIdx, setTipIdx] = useState<number>(() => Math.floor(Math.random() * ONBOARDING_TIPS.length))
   // Preset台词 from %APPDATA%/openmeido/lines.json (merged with bundled
   // defaults). Fetched once at boot — user edits require app restart.
   // Holds null until the first IPC fetch resolves; the mute button uses
@@ -251,6 +284,17 @@ export default function App() {
   // --autoplay-policy=no-user-gesture-required.
   useEffect(() => {
     warmupAudioContext()
+  }, [])
+
+  // Rotate the onboarding tip placeholder every TIP_ROTATE_MS so users
+  // discover features passively. Always runs — the placeholder is
+  // only visible when the input is idle anyway, so silent rotation
+  // during typing / recording is invisible (and cheap).
+  useEffect(() => {
+    const id = setInterval(() => {
+      setTipIdx((i) => (i + 1) % ONBOARDING_TIPS.length)
+    }, TIP_ROTATE_MS)
+    return () => clearInterval(id)
   }, [])
 
   // Fetch preset台词 from main once at boot. Until this resolves, the
@@ -1635,7 +1679,17 @@ export default function App() {
             >
               {quickScreenBusy ? '…' : '👀'}
             </button>
+            {/* Smaller placeholder font so rotating onboarding tips
+                fit in narrow chat panels. Doesn't shrink user-typed
+                text — only the ::placeholder pseudo-element. */}
+            <style>{`
+              .chat-input::placeholder {
+                font-size: 11px;
+                opacity: 0.7;
+              }
+            `}</style>
             <input
+              className="chat-input"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onFocus={() => console.log('[diag] input FOCUS', new Date().toISOString())}
@@ -1664,7 +1718,9 @@ export default function App() {
                       ? '女仆思考中…可以先写下一句'
                       : attachments.length
                       ? '可以加一句问她（也可以直接 Send）'
-                      : ''
+                      : // Idle: rotate onboarding tips so the empty input
+                        // teaches features instead of staying blank.
+                        ONBOARDING_TIPS[tipIdx] ?? ''
               }
               style={{ flex: 1, padding: '6px 10px', fontSize: 13 }}
             />
@@ -1897,37 +1953,78 @@ function EmailDraftCard({
   )
 }
 
+/** Tier band edges (inclusive). Mirrors src/shared/affinity.ts but kept
+ *  local to avoid a runtime import from the renderer just for one number. */
+const TIER_BANDS: { label: string; min: number; max: number }[] = [
+  { label: 'Lv.1', min: 0,  max: 19 },
+  { label: 'Lv.2', min: 20, max: 39 },
+  { label: 'Lv.3', min: 40, max: 59 },
+  { label: 'Lv.4', min: 60, max: 79 },
+  { label: 'Lv.5', min: 80, max: 100 },
+]
+
+function bandForScore(score: number): (typeof TIER_BANDS)[number] {
+  return TIER_BANDS.find((b) => score >= b.min && score <= b.max) ?? TIER_BANDS[0]!
+}
+
 /**
  * Floating affinity readout pinned top-right of the Live2D pane. Shows
- * the current score + tier label; hover tooltip surfaces the last
- * judge reason. Listens to the affinity:changed broadcast so the chip
- * updates the moment the engine writes a new score (no settings round-
- * trip required).
+ *   - score + tier label
+ *   - progress bar (% to next tier) — gives the early-game user a
+ *     visible sense of "she's warming up" instead of just "current
+ *     number". Without this, Lv.1 users see no signal that they're
+ *     making progress and drop off
+ *   - floating "+N" / "-N" popup on every judge / presence update, like
+ *     MMO damage numbers — makes affinity gain a small dopamine moment
+ *     rather than invisible bookkeeping
+ *
+ * Hover tooltip surfaces the last judge reason + exact score. Listens
+ * to the affinity:changed broadcast so the chip updates the moment the
+ * engine writes a new score (no settings round-trip required).
  */
 function Live2DAffinityBadge() {
   const [info, setInfo] = useState<{
     score: number
-    tierLabel: string
+    band: (typeof TIER_BANDS)[number]
     reason: string | null
   } | null>(null)
+  // Ring of in-flight floating delta animations. Each gets a unique
+  // id so React's diff keeps them stable as they animate; auto-removed
+  // 1.4s after creation (matches the CSS animation duration).
+  const [floaters, setFloaters] = useState<{ id: number; delta: number }[]>([])
+  const floaterIdRef = useRef(0)
+
   const reload = async (): Promise<void> => {
     const rec = await window.api.affinity.get()
     if (!rec) return
     setInfo({
       score: rec.score,
-      tierLabel: tierLabelForScore(rec.score),
+      band: bandForScore(rec.score),
       reason: rec.lastReason,
     })
   }
   useEffect(() => {
     void reload()
-    const offCh = window.api.affinity.onChanged((i) =>
+    const offCh = window.api.affinity.onChanged((i) => {
       setInfo({
         score: i.score,
-        tierLabel: i.tier.zhLabel,
+        band: bandForScore(i.score),
         reason: i.reason,
-      }),
-    )
+      })
+      // Surface the +N / -N animation only when the engine actually
+      // calculated a delta. Decay + dev override pass null → silent
+      // update, by design.
+      if (typeof i.delta === 'number' && Math.abs(i.delta) >= 0.5) {
+        const id = ++floaterIdRef.current
+        // Round so "+0.85" doesn't show as "+0.85" — display +1 / +2.
+        // Sign is preserved.
+        const rounded = i.delta > 0 ? Math.ceil(i.delta) : Math.floor(i.delta)
+        setFloaters((prev) => [...prev, { id, delta: rounded }])
+        setTimeout(() => {
+          setFloaters((prev) => prev.filter((f) => f.id !== id))
+        }, 1400)
+      }
+    })
     const offSw = window.api.affinity.onPersonaSwitched(() => void reload())
     return () => {
       offCh()
@@ -1935,43 +2032,124 @@ function Live2DAffinityBadge() {
     }
   }, [])
   if (!info) return null
+
+  // Progress within the current tier band (0..1). At score=100 the
+  // user is at the top of Lv.5 — show the bar full.
+  const bandWidth = info.band.max - info.band.min || 1
+  const progress = Math.max(
+    0,
+    Math.min(1, (info.score - info.band.min) / bandWidth),
+  )
+  const isMaxTier = info.band.label === 'Lv.5'
+  const toNext = isMaxTier ? null : info.band.max + 1 - info.score
+
   return (
     <div
-      title={`${info.score.toFixed(2)} / 100\n${info.reason ?? '还没有判定记录'}`}
       style={{
         position: 'absolute',
         top: 4,
-        // Clear of the sidebar collapsed-strip (which sits at right:0,
-        // width: 18, zIndex: 2) — without this margin the affinity
-        // chip's last 10px get covered by the strip.
+        // Clear of the sidebar collapsed-strip (right:0, width:18,
+        // zIndex:2) — without this margin the chip's last 10px get
+        // covered.
         right: 24,
-        padding: '3px 8px',
-        borderRadius: 999,
-        background: 'rgba(0,0,0,0.45)',
-        backdropFilter: 'blur(6px)',
-        color: '#fff',
-        fontSize: 11,
-        fontFamily: 'system-ui, sans-serif',
-        display: 'inline-flex',
-        gap: 4,
-        alignItems: 'center',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'stretch',
+        // width: max-content so the column collapses to the chip's
+        // natural width; the bar below sets width:100% to match. This
+        // is what makes the bar exactly as wide as the chip — no more
+        // "差一点点" offset.
+        width: 'max-content',
+        gap: 2,
         pointerEvents: 'auto',
         userSelect: 'none',
       }}
     >
-      <span style={{ color: '#f6a4b3' }}>❤️</span>
-      <span>{Math.round(info.score)}</span>
-      <span style={{ color: '#bbb', fontSize: 10 }}>· {info.tierLabel}</span>
+      {/* Inline keyframes for the floating delta animation. Defined
+          here (vs a global stylesheet) so this component is fully
+          self-contained — no CSS file to thread through Vite. */}
+      <style>{`
+        @keyframes affinityFloat {
+          0%   { opacity: 0; transform: translateY(0) scale(0.85); }
+          15%  { opacity: 1; transform: translateY(-4px) scale(1.08); }
+          80%  { opacity: 1; transform: translateY(-26px) scale(1); }
+          100% { opacity: 0; transform: translateY(-34px) scale(0.95); }
+        }
+      `}</style>
+
+      <div
+        title={
+          `${info.score.toFixed(2)} / 100\n` +
+          `${info.band.label}（${info.band.min}-${info.band.max}）` +
+          (toNext !== null ? `，离下一档还有 ${toNext.toFixed(1)} 分` : '·已封顶') +
+          `\n${info.reason ?? '还没有判定记录'}`
+        }
+        style={{
+          padding: '3px 8px',
+          borderRadius: 999,
+          background: 'rgba(0,0,0,0.45)',
+          backdropFilter: 'blur(6px)',
+          color: '#fff',
+          fontSize: 11,
+          fontFamily: 'system-ui, sans-serif',
+          display: 'inline-flex',
+          gap: 4,
+          alignItems: 'center',
+          position: 'relative',
+        }}
+      >
+        <span style={{ color: '#f6a4b3' }}>❤️</span>
+        <span>{Math.round(info.score)}</span>
+        <span style={{ color: '#bbb', fontSize: 10 }}>· {info.band.label}</span>
+
+        {/* Floating +N / -N animations. Absolute-positioned over the
+            chip; auto-cleared after the CSS animation finishes. */}
+        {floaters.map((f) => (
+          <span
+            key={f.id}
+            style={{
+              position: 'absolute',
+              top: -2,
+              right: 8,
+              color: f.delta > 0 ? '#7be489' : '#f88',
+              fontSize: 13,
+              fontWeight: 700,
+              textShadow: '0 1px 4px rgba(0,0,0,0.5)',
+              pointerEvents: 'none',
+              animation: 'affinityFloat 1.4s ease-out forwards',
+            }}
+          >
+            {f.delta > 0 ? `+${f.delta}` : f.delta}
+          </span>
+        ))}
+      </div>
+
+      {/* Progress bar to next tier. Hidden at Lv.5 max (no "next" to
+          aim at) — chip alone communicates "you made it". width:100%
+          → stretches to match the chip above (parent is width:max-content
+          + alignItems:stretch). */}
+      {!isMaxTier && (
+        <div
+          style={{
+            width: '100%',
+            height: 3,
+            borderRadius: 999,
+            background: 'rgba(0,0,0,0.35)',
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              width: `${(progress * 100).toFixed(1)}%`,
+              height: '100%',
+              background: 'linear-gradient(90deg, #f6a4b3, #ffd3a2)',
+              transition: 'width 0.4s ease-out',
+            }}
+          />
+        </div>
+      )}
     </div>
   )
-}
-
-function tierLabelForScore(score: number): string {
-  if (score >= 80) return 'Lv.5'
-  if (score >= 60) return 'Lv.4'
-  if (score >= 40) return 'Lv.3'
-  if (score >= 20) return 'Lv.2'
-  return 'Lv.1'
 }
 
 function StatusPill({

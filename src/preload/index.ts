@@ -172,6 +172,22 @@ const api = {
         lastReason: string | null
       } | null>
     },
+    /** Dev-only — force the score for a persona (defaults to active).
+     *  Skips all guardrails (per-turn clamp / curve / daily cap). Returns
+     *  `{ ok: false, error: ... }` in production builds where the IPC
+     *  handler isn't registered. Use from DevTools to test tier-driven
+     *  prompts: `window.api.affinity.setForTest(90)` / `(0)` / `(50)`. */
+    setForTest(
+      score: number,
+      personaId?: string,
+    ): Promise<{ ok: boolean; personaId?: string; score?: number; error?: string }> {
+      return ipcRenderer.invoke('affinity:setForTest', score, personaId) as Promise<{
+        ok: boolean
+        personaId?: string
+        score?: number
+        error?: string
+      }>
+    },
     /** All personas (built-in + custom) with their affinity + episode count.
      *  Drives the Settings 人物 tab chip annotations. */
     listAll(): Promise<
@@ -193,13 +209,18 @@ const api = {
         }>
       >
     },
-    /** Subscribe to score changes. Fires on every successful judge update. */
+    /** Subscribe to score changes. Fires on every successful judge update.
+     *  `delta` is the effective change in score (post-guardrail) when the
+     *  update came from a judgement or presence bump — null for decay /
+     *  dev overrides / one-shot writes. Renderers use it to surface a
+     *  floating "+1" / "-1" over the affinity chip; null = silent update. */
     onChanged(
       cb: (info: {
         personaId: string
         score: number
         tier: { tier: string; zhLabel: string; min: number; max: number }
         reason: string
+        delta: number | null
       }) => void,
     ): () => void {
       const handler = (
@@ -209,6 +230,7 @@ const api = {
           score: number
           tier: { tier: string; zhLabel: string; min: number; max: number }
           reason: string
+          delta: number | null
         },
       ): void => cb(info)
       ipcRenderer.on('affinity:changed', handler)
