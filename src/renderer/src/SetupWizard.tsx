@@ -135,8 +135,48 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
           borderRadius: 10,
           padding: '20px 22px',
           boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
+          // position:relative so the absolutely-positioned close × can
+          // anchor to the card's corner instead of the viewport.
+          position: 'relative',
         }}
       >
+        {/* Top-right × — same affordance as "稍后再说" but in the canonical
+            "this is a closable modal" position. Without it, a user who
+            reaches this dialog accidentally has no obvious way out
+            besides reading to the bottom and finding 稍后再说. */}
+        <button
+          onClick={onSkip}
+          aria-label="跳过设置"
+          title="跳过设置（稍后可在 Settings → AI 配）"
+          style={{
+            position: 'absolute',
+            top: 10,
+            right: 12,
+            width: 28,
+            height: 28,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'transparent',
+            border: 'none',
+            color: '#888',
+            fontSize: 20,
+            lineHeight: 1,
+            cursor: 'pointer',
+            borderRadius: 4,
+            padding: 0,
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'rgba(255,255,255,0.08)'
+            e.currentTarget.style.color = '#eee'
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'transparent'
+            e.currentTarget.style.color = '#888'
+          }}
+        >
+          ×
+        </button>
         <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>
           👋 欢迎，先给妹妹/女仆配个大脑
         </div>

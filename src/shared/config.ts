@@ -301,13 +301,16 @@ export const configSchema = z.object({
   window: z
     .object({
       alwaysOnTop: z.boolean().default(true),
-      // Default window dimensions: phone-ish portrait (~1:1.95). Sits
-      // unobtrusively beside other apps on a typical desktop instead of
-      // dominating the screen like a half-window panel. Main process
-      // clamps to 90% of work-area on smaller screens — see
-      // main/index.ts createWindow's fit-to-screen guard.
-      width: z.number().int().min(260).default(420),
-      height: z.number().int().min(400).default(820),
+      // Default window dimensions: portrait but slightly less narrow
+      // (~1:1.50) so Settings tabs / multi-input sections (邮箱, 关于's
+      // danger zone, voice / TTS tabs with credential fields) have
+      // breathing room. The earlier 420×820 phone-shape was unobtrusive
+      // but cramped — users hit the rightmost Settings tabs running off
+      // the edge in narrow zoom-1.15 layouts. Main process clamps to
+      // 90% of work-area on smaller screens — see main/index.ts
+      // createWindow's fit-to-screen guard.
+      width: z.number().int().min(260).default(560),
+      height: z.number().int().min(400).default(840),
       /**
        * Launch OpenMeido automatically when the user logs in.
        * Default ON — OpenMeido is a desktop companion meant to be
