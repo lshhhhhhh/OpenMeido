@@ -101,32 +101,55 @@ export async function initMemory(): Promise<void> {
       },
     })
     if (naiveMode) {
+      const justReset = process.argv.some(
+        (a) =>
+          a === '--reset-all' ||
+          a === '--reset-config' ||
+          a === '--reset-memory',
+      )
       console.log(
         `[memory] ready in NAIVE mode (no embed model on disk) — ` +
           `L1 recall + L3 facts work; L2 semantic recall disabled until ` +
           `user downloads the model${
             resumeId ? ` · resumed session ${resumeId.slice(0, 8)}…` : ' · new session'
-          }`,
+          }${justReset ? ' · post-reset, skipping silent warmup' : ''}`,
       )
-      // Try the remote fallback in the background — transformers.js will
-      // pull from huggingface.co / hf-mirror.com. If that succeeds, exit
-      // naive mode automatically so users on networks that CAN reach HF
-      // don't keep seeing the "model not installed" banner forever.
-      // Reachability failures (offline, GFW without mirror) leave
-      // naive mode on, which is the intended behavior.
-      void import('./local-embed.js').then(async (m) => {
-        try {
-          // getExtractor would auto-fallback to remote; we just call embedLocal
-          // once with a trivial input to trigger that path.
-          await m.embedLocal('warmup')
-          if (naiveMode) {
-            naiveMode = false
-            console.log('[memory] remote embed reachable — exiting naive mode')
+      // Try the remote fallback in the background — transformers.js pulls
+      // ~95MB from huggingface.co / hf-mirror.com. If that succeeds, exit
+      // naive mode + broadcast to renderer so banner hides without a
+      // restart. Reachability failures (offline, GFW without mirror)
+      // leave naive mode on, which is the intended behavior.
+      //
+      // Skip the warmup when --reset-* was on argv. Otherwise a user
+      // who clicked 全部清空 expecting a true clean slate would see the
+      // model auto-redownload within seconds, defeating the purpose of
+      // the reset (and making the cold-start demo flow untestable).
+      // Same pattern as the affinity dev-override skip-on-reset.
+      if (!justReset) {
+        void import('./local-embed.js').then(async (m) => {
+          try {
+            // getExtractor would auto-fallback to remote; we just call embedLocal
+            // once with a trivial input to trigger that path.
+            await m.embedLocal('warmup')
+            if (naiveMode) {
+              naiveMode = false
+              console.log('[memory] remote embed reachable — exiting naive mode')
+              // Tell the renderer so the chat-panel banner can hide and
+              // the Settings panel can refresh. We re-use the existing
+              // embed:downloadComplete channel — the App.tsx + Settings
+              // subscriptions both already listen and update state on
+              // {ok: true}.
+              for (const w of BrowserWindow.getAllWindows()) {
+                if (!w.isDestroyed()) {
+                  w.webContents.send('embed:downloadComplete', { ok: true })
+                }
+              }
+            }
+          } catch (err) {
+            console.warn('[memory] remote embed unreachable, staying naive:', err)
           }
-        } catch (err) {
-          console.warn('[memory] remote embed unreachable, staying naive:', err)
-        }
-      })
+        })
+      }
     } else {
       console.log(
         `[memory] ready (sqlite, local bge-small-zh, dim=${LOCAL_EMBED_DIM})${

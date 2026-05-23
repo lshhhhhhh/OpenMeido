@@ -115,7 +115,17 @@ async function runDownload(): Promise<{ ok: true } | { ok: false; error: string 
     return { ok: false, error: '已经在下载中' }
   }
   if (findBundledModel()) {
-    return { ok: false, error: '模型已经存在，无需下载' }
+    // From the user's POV "model already on disk" is success, not an
+    // error. Without this broadcast the renderer's banner (which only
+    // hides on a complete-with-ok event) would stay stuck saying
+    // "暂未启用长期记忆" forever even though Settings shows the model
+    // installed. The exitNaiveMemoryMode is also defensive — if the
+    // model arrived via transformers.js's silent remote warmup, main's
+    // naiveMode flag may already be false, but calling again is a
+    // cheap no-op.
+    exitNaiveMemoryMode()
+    broadcast('embed:downloadComplete', { ok: true })
+    return { ok: true }
   }
   state.inProgress = true
   state.totalBytes = 0

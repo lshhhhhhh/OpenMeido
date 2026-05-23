@@ -197,7 +197,11 @@ function createWindow(): void {
     transparent: true,
     frame: false,
     resizable: true,
-    alwaysOnTop: cfg.window.alwaysOnTop,
+    // Deliberately NOT setting alwaysOnTop here — the constructor's
+    // alwaysOnTop flag combined with transparent:true + frame:false
+    // intermittently fails on Windows 11 (window opens NOT on top
+    // despite the flag). We re-apply it post-create with the explicit
+    // 'screen-saver' z-level below; that path is reliable.
     icon: iconPath,
     // Explicit fully-transparent backgroundColor. Electron defaults to
     // '#FFFFFF' which paints opaque white before the renderer's CSS even
@@ -225,6 +229,21 @@ function createWindow(): void {
   win.webContents.on('did-finish-load', () => {
     const c = getConfig()
     win.webContents.setZoomFactor(c.ui.fontScale)
+  })
+
+  // Re-apply alwaysOnTop AFTER the window is shown. Setting it in the
+  // BrowserWindow constructor on transparent+frameless windows is flaky
+  // on Windows 11 — the window can open beneath other windows even
+  // though the flag is set. Re-issuing setAlwaysOnTop with an explicit
+  // z-level ('screen-saver' is one above 'normal' that survives the
+  // transparent-window quirk) after ready-to-show fixes the first-launch
+  // case reliably.
+  win.once('ready-to-show', () => {
+    if (win.isDestroyed()) return
+    const c = getConfig()
+    if (c.window.alwaysOnTop) {
+      win.setAlwaysOnTop(true, 'screen-saver')
+    }
   })
 
   // Persist the user's manual resize so next launch opens at the same size.
@@ -303,7 +322,11 @@ let lastPersona: string = getConfig().persona.preset
 
 onConfigChange((next) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.setAlwaysOnTop(next.window.alwaysOnTop)
+    // Pass 'screen-saver' z-level explicitly — same defensive workaround
+    // as ready-to-show. Without it, toggling alwaysOnTop in Settings
+    // while the window is transparent+frameless can produce the same
+    // "flag set but window not on top" bug as cold-start.
+    mainWindow.setAlwaysOnTop(next.window.alwaysOnTop, 'screen-saver')
     mainWindow.webContents.setZoomFactor(next.ui.fontScale)
   }
   applyStartAtLogin(next.window.startAtLogin)
