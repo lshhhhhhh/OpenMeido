@@ -76,6 +76,32 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
     setError(null)
     try {
       const trimmed = apiKey.trim()
+      // Verify the key actually works BEFORE persisting. Without this gate
+      // we celebrated +5 the moment the user clicked save, even when the
+      // pasted key was wrong (typo, leading whitespace, wrong provider's
+      // key, expired) — the user got the dopamine then immediately hit a
+      // 401 on first chat, which broke the "she remembers me" promise of
+      // the celebration. Now the test IS the rewarded action: pass → save
+      // → celebration overlay fires from setConfig diff; fail → inline
+      // error, no persist, no flag flip, user fixes and retries.
+      //
+      // keyOptional (local self-hosted endpoints) ALSO go through the test
+      // — local servers respond to standard OpenAI-compat pings, so the
+      // check is meaningful there too.
+      const draftBackend = {
+        ...initial.backend,
+        baseUrl: preset.url,
+        model: defaultModel,
+        apiKey: trimmed,
+      }
+      const testResult = await window.api.chat.test(draftBackend)
+      if (!testResult.ok) {
+        setError(
+          `连接测试失败：${testResult.error ?? '未知错误'}。可能 key 错了 / 网络不通 / 模型名不对。`,
+        )
+        setSaving(false)
+        return
+      }
       // Also record this key in the per-baseUrl map so a later provider
       // switch in Settings doesn't drop it. The map exists so users can
       // configure multiple backends and round-trip between them without
@@ -519,7 +545,7 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
               fontWeight: 500,
             }}
           >
-            {saving ? '保存中…' : '开始聊天 →'}
+            {saving ? '测试中…' : '测试连通 →'}
           </button>
         </div>
 
