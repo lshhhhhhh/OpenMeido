@@ -1173,6 +1173,9 @@ export function Settings({ initial, onClose }: SettingsProps) {
 
         {activeTab === 'about' && (
           <>
+            <Section title="版本与更新">
+              <UpdateChecker />
+            </Section>
             <Section title="关于 OpenMeido">
               <div style={{ fontSize: 13, lineHeight: 1.7, color: '#ddd' }}>
                 <div style={{ marginBottom: 12 }}>
@@ -2908,6 +2911,96 @@ function PresetLinesPanel(): React.ReactElement {
         </div>
       )}
     </>
+  )
+}
+
+/**
+ * Manual update-check panel for Settings → 关于. Shows current app
+ * version (so users can verify "did the update actually apply?") and
+ * a "立即检查" button that triggers a one-off updater run instead of
+ * waiting for the 30 s post-boot or 6 h periodic auto-checks.
+ *
+ * Three feedback states from the click:
+ *   - 检查中… (button disabled while in flight)
+ *   - 已是最新版本 (after updater:not-available fires; clears in 4s)
+ *   - 实际下载流程接管 (UpdaterPill in App.tsx surfaces the result
+ *     when updater:downloaded fires — we don't duplicate that here)
+ *
+ * Dev mode caveat: updater-host short-circuits when !app.isPackaged,
+ * so the button click resolves immediately with no event. The button
+ * just gets stuck on "检查中…" briefly. Documented inline so testers
+ * don't think it's broken.
+ */
+function UpdateChecker(): React.ReactElement {
+  const [version, setVersion] = useState<string>('')
+  const [checking, setChecking] = useState(false)
+  const [feedback, setFeedback] = useState<string | null>(null)
+
+  useEffect(() => {
+    void window.api.app.version().then(setVersion)
+    // Subscribe to "no update found" event — the manual check button's
+    // primary success-path feedback. (The "update found" case is handled
+    // by App.tsx's UpdaterPill which renders globally.)
+    const off = window.api.updater.onNotAvailable(() => {
+      setChecking(false)
+      setFeedback('已是最新版本')
+      setTimeout(() => setFeedback(null), 4000)
+    })
+    return off
+  }, [])
+
+  async function check(): Promise<void> {
+    if (checking) return
+    setChecking(true)
+    setFeedback(null)
+    try {
+      await window.api.updater.checkNow()
+      // We don't setChecking(false) here — onNotAvailable / pill will
+      // handle the conclusion. But in case the check silently no-ops
+      // (e.g. dev mode), fall through after 8 s so the button doesn't
+      // hang forever.
+      setTimeout(() => setChecking((c) => (c ? false : c)), 8000)
+    } catch (err) {
+      setChecking(false)
+      setFeedback(`检查失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  return (
+    <div style={{ fontSize: 13, color: '#ddd' }}>
+      <div style={{ marginBottom: 12 }}>
+        <Label>当前版本</Label>
+        <div style={{ fontFamily: 'monospace', fontSize: 14, color: '#7ab8ff' }}>
+          v{version || '...'}
+        </div>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button
+          onClick={() => void check()}
+          disabled={checking}
+          style={{
+            padding: '6px 14px',
+            fontSize: 12,
+            background: checking ? '#2c3140' : 'rgba(120,160,255,0.18)',
+            border: '1px solid ' + (checking ? '#3a3e48' : 'rgba(120,160,255,0.55)'),
+            color: checking ? '#888' : '#aad4ff',
+            borderRadius: 6,
+            cursor: checking ? 'wait' : 'pointer',
+          }}
+        >
+          {checking ? '检查中…' : '立即检查更新'}
+        </button>
+        {feedback && (
+          <span style={{ fontSize: 11, color: feedback.startsWith('检查失败') ? '#f99' : '#8ec98e' }}>
+            {feedback}
+          </span>
+        )}
+      </div>
+      <div style={{ fontSize: 11, color: '#888', marginTop: 10, lineHeight: 1.6 }}>
+        OpenMeido 启动后约 30 秒会自动检查 GitHub Releases。如果发现新版本，会在
+        后台静默下载，下载好后右下角弹一个提示，点"立即重启"即生效。
+      </div>
+    </div>
   )
 }
 

@@ -65,6 +65,7 @@ export function initUpdater(): void {
   })
   autoUpdater.on('update-not-available', (info) => {
     console.log(`[updater] up-to-date (current=${info.version})`)
+    broadcast('updater:not-available', { version: info.version })
   })
   autoUpdater.on('download-progress', (p) => {
     // Quiet log — periodic updates flooding the console isn't useful.
@@ -116,5 +117,19 @@ export function initUpdater(): void {
   ipcMain.handle('updater:install', () => {
     console.log('[updater] user requested install — quit + apply')
     autoUpdater.quitAndInstall(false, true)
+  })
+
+  // IPC: Settings → 关于 has a "检查更新" button that fires this on
+  // demand instead of waiting for the 30 s post-boot or 6 h periodic
+  // check. The result still flows through the same updater:available /
+  // updater:not-available events (we already broadcast both), so the
+  // UI doesn't need a synchronous return value — fire-and-forget plus
+  // event subscription is the pattern.
+  ipcMain.handle('updater:checkNow', () => {
+    console.log('[updater] manual check requested')
+    return autoUpdater.checkForUpdates().catch((err) => {
+      console.warn('[updater] manual check failed:', err)
+      return null
+    })
   })
 }

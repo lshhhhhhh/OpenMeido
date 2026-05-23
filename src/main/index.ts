@@ -382,6 +382,11 @@ ipcMain.handle('window:setIgnoreMouseEvents', (_event, ignore: boolean) => {
 
 ipcMain.handle('window:getHotkeyStatus', () => getHotkeyStatus())
 
+// App version — Settings → 关于 reads this to show "当前版本 v0.X.Y"
+// next to the manual update-check button. Single source of truth is
+// package.json (Electron reads it from the bundled main process).
+ipcMain.handle('app:version', () => app.getVersion())
+
 // ---- Affinity / persona-scoped helpers ----
 ipcMain.handle('affinity:get', async (_event, personaId?: string) => {
   const adapter = getMemoryAdapter()

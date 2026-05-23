@@ -681,11 +681,41 @@ const api = {
       }
     },
     /**
+     * Subscribe to "checked, but no newer version exists" events. Used
+     * by the manual "检查更新" button in Settings to give a quiet "已
+     * 是最新" feedback instead of leaving the user wondering if their
+     * click did anything. Fires after every checkForUpdates() call
+     * where the local version >= remote.
+     */
+    onNotAvailable(cb: (info: { version: string }) => void): () => void {
+      const handler = (_: Electron.IpcRendererEvent, info: { version: string }): void =>
+        cb(info)
+      ipcRenderer.on('updater:not-available', handler)
+      return () => {
+        ipcRenderer.off('updater:not-available', handler)
+      }
+    },
+    /**
      * Tell main to quit + install the staged update. NSIS takes over,
      * swaps the binary, relaunches the app on the new version.
      */
     install(): Promise<void> {
       return ipcRenderer.invoke('updater:install') as Promise<void>
+    },
+    /**
+     * Trigger a one-off update check (vs. waiting for the 30 s post-
+     * boot or 6 h periodic auto-check). Doesn't return the result
+     * directly — subscribe to onDownloaded / onNotAvailable for that.
+     */
+    checkNow(): Promise<void> {
+      return ipcRenderer.invoke('updater:checkNow') as Promise<void>
+    },
+  },
+
+  app: {
+    /** Current app version string from package.json (main process side). */
+    version(): Promise<string> {
+      return ipcRenderer.invoke('app:version') as Promise<string>
     },
   },
 
