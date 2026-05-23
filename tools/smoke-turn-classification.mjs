@@ -43,15 +43,25 @@ async function main() {
   check('work tool call (readEmail) is work', classifyTurnType([{ toolName: 'readEmail' }]) === 'work')
   check('work tool call (google_search) is work', classifyTurnType([{ toolName: 'google_search' }]) === 'work')
   check('work tool call (readFile) is work', classifyTurnType([{ toolName: 'readFile' }]) === 'work')
+  // presentTable counts as work — iterating on a structured table is
+  // continuing a productivity flow, not personal chat. Fixed alongside
+  // the UI 💼 indicator (was missing for table-only edit turns).
+  check('work tool call (presentTable) is work', classifyTurnType([{ toolName: 'presentTable' }]) === 'work')
 
   check('neutral tool call (addTask) is neutral', classifyTurnType([{ toolName: 'addTask' }]) === 'neutral')
   check('neutral tool call (listTasks) is neutral', classifyTurnType([{ toolName: 'listTasks' }]) === 'neutral')
   check('neutral tool call (readClipboard) is neutral', classifyTurnType([{ toolName: 'readClipboard' }]) === 'neutral')
-  check('neutral tool call (presentTable) is neutral', classifyTurnType([{ toolName: 'presentTable' }]) === 'neutral')
 
   check(
     'mixed work and neutral tool calls is work',
     classifyTurnType([{ toolName: 'listTasks' }, { toolName: 'readEmail' }]) === 'work'
+  )
+  // A presentTable-only turn following an earlier work turn (e.g. "再筛
+  // 一下" / "只列出广告") would historically classify as neutral and
+  // miss the 💼. Now it's work consistently.
+  check(
+    'presentTable-only turn (table edit) is work',
+    classifyTurnType([{ toolName: 'presentTable' }]) === 'work'
   )
 
   // ---------- 2. Integration test Memory Service reflection counters ----------

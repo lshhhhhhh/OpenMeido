@@ -28,7 +28,11 @@ const note = (ok, label, detail = '') => {
 const adapter = createFakeMailAdapter()
 
 console.log('\n[listInbox shape]')
-const list = await adapter.listInbox({ limit: 20 })
+// Pass includeParents:true explicitly — the adapter's contract is
+// "parents are opt-in" (matches the IMAP adapter, where attaching parents
+// costs one extra search per reply). The "skip parent lookup" path
+// below tests the false case.
+const list = await adapter.listInbox({ limit: 20, includeParents: true })
 note(list.length >= 7, `returns ≥7 inbox items (got ${list.length})`)
 
 const byId = new Map(list.map((m) => [m.id, m]))
