@@ -268,6 +268,41 @@ const api = {
     },
   },
 
+  mute: {
+    /**
+     * Persist a mute-toggle feedback line as an assistant episode so the
+     * NEXT chat turn has it in context (otherwise her "主人你回来了啊"
+     * would be invisible to the model when the user replies "是啊我回来
+     * 了" — model gets a dangling user message).
+     *
+     * Deliberately does NOT trigger the affinity classifier or emotion
+     * apply — these are UI acknowledgement lines, not real conversation,
+     * and multiplying them through the warmth-judging pipeline would
+     * drift the score every time the user toggles mute.
+     */
+    announce(text: string): Promise<{ ok: boolean }> {
+      return ipcRenderer.invoke('mute:announce', { text }) as Promise<{ ok: boolean }>
+    },
+  },
+
+  lines: {
+    /** Fetch the merged preset台词 structure (bundled defaults ∪ user
+     *  overrides from lines.json). Renderer calls once at boot and
+     *  caches; user edits require app restart to take effect. */
+    get(): Promise<unknown> {
+      return ipcRenderer.invoke('lines:get') as Promise<unknown>
+    },
+    /** Open the user-editable lines.json in the OS default editor.
+     *  Seeds the file with defaults on first call. */
+    openFile(): Promise<{ ok: boolean; path?: string; error?: string }> {
+      return ipcRenderer.invoke('lines:openFile') as Promise<{ ok: boolean; path?: string; error?: string }>
+    },
+    /** Where the file lives. Used by Settings hint text. */
+    path(): Promise<string> {
+      return ipcRenderer.invoke('lines:path') as Promise<string>
+    },
+  },
+
   tts: {
     /** Microsoft Edge voice catalog. Cached server-side so this is fast on repeat calls. */
     listVoices(): Promise<

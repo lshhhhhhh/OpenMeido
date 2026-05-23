@@ -809,6 +809,12 @@ export function Settings({ initial, onClose }: SettingsProps) {
           </Section>
         )}
 
+        {activeTab === 'persona' && (
+          <Section title="预制台词">
+            <PresetLinesPanel />
+          </Section>
+        )}
+
         {/* ---- Live2D ---- */}
         {activeTab === 'live2d' && (
           <Live2DTab
@@ -1285,51 +1291,39 @@ function ProactiveTab({
   draft: Config['proactive']
   onChange: (next: Config['proactive']) => void
 }) {
+  const MODES: { id: 'mute' | 'auto' | 'chatty'; label: string; hint: string }[] = [
+    { id: 'mute', label: '闭嘴', hint: '完全不主动开口' },
+    { id: 'auto', label: '自动', hint: '由好感度决定频率（推荐）' },
+    { id: 'chatty', label: '多话', hint: '不管好感度都常在' },
+  ]
   return (
     <Section title="主动模式">
-      <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
-        <input
-          type="checkbox"
-          checked={draft.enabled}
-          onChange={(e) => onChange({ ...draft, enabled: e.target.checked })}
-        />
-        <span>启用主动搭话（后台轮询，LLM 决定是否说话）</span>
-      </label>
-      {draft.enabled && (
+      <Label>她什么时候主动开口</Label>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+        {MODES.map((m) => (
+          <button
+            key={m.id}
+            onClick={() => onChange({ ...draft, mode: m.id })}
+            style={{
+              ...btnStyle(draft.mode === m.id ? 'primary' : 'subtle'),
+              padding: '4px 12px',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-start',
+              lineHeight: 1.2,
+            }}
+          >
+            <span style={{ fontSize: 12 }}>{m.label}</span>
+            <span style={{ fontSize: 10, opacity: 0.7 }}>{m.hint}</span>
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: '#888', marginBottom: 12, lineHeight: 1.5 }}>
+        节奏（多久来一句、冷却多久）由模式 + 当前好感度自动决定。
+        Lv.1-2 几乎不开口；Lv.3 大约 10 分钟一次；Lv.5 更频繁。
+      </div>
+      {draft.mode !== 'mute' && (
         <>
-          <Label>定时间隔（分钟）—— {Math.round(draft.timerSec / 60)}</Label>
-          <input
-            type="range"
-            min={60}
-            max={3600}
-            step={60}
-            value={draft.timerSec}
-            onChange={(e) => onChange({ ...draft, timerSec: Number(e.target.value) })}
-            style={{ width: '100%', marginBottom: 12 }}
-          />
-
-          <Label>空闲阈值（分钟）—— {Math.round(draft.idleThresholdSec / 60)}</Label>
-          <input
-            type="range"
-            min={60}
-            max={3600}
-            step={60}
-            value={draft.idleThresholdSec}
-            onChange={(e) => onChange({ ...draft, idleThresholdSec: Number(e.target.value) })}
-            style={{ width: '100%', marginBottom: 12 }}
-          />
-
-          <Label>冷却（两次主动至少间隔，分钟）—— {Math.round(draft.cooldownSec / 60)}</Label>
-          <input
-            type="range"
-            min={60}
-            max={3600}
-            step={60}
-            value={draft.cooldownSec}
-            onChange={(e) => onChange({ ...draft, cooldownSec: Number(e.target.value) })}
-            style={{ width: '100%', marginBottom: 12 }}
-          />
-
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
             <input
               type="checkbox"
@@ -2579,6 +2573,63 @@ function SttPanel({
   )
 }
 
+/**
+ * Preset-lines editor panel. Surfaces a one-click "open lines.json"
+ * button so users can edit her mute / unmute feedback lines (and
+ * future preset content) in their OS default editor.
+ *
+ * File lives at %APPDATA%/openmeido/lines.json. Edits take effect on
+ * next app restart — we don't watch the file (notepad's save would
+ * fire mid-edit on every keystroke save), and the lines are loaded
+ * once at boot for predictability.
+ */
+function PresetLinesPanel(): React.ReactElement {
+  const [path, setPath] = useState<string>('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    void window.api.lines?.path().then((p) => setPath(p))
+  }, [])
+  async function openFile(): Promise<void> {
+    if (busy) return
+    setBusy(true)
+    try {
+      const r = await window.api.lines?.openFile()
+      if (r && !r.ok) alert(`打不开文件：${r.error ?? '未知错误'}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <>
+      <div
+        style={{
+          fontSize: 11,
+          color: '#666',
+          background: 'rgba(0,0,0,0.04)',
+          padding: '6px 8px',
+          borderRadius: 4,
+          marginBottom: 8,
+          lineHeight: 1.5,
+        }}
+      >
+        她在闭嘴 / 解除闭嘴 时说的话来自一个 JSON 文件，你可以编辑她的台词风格。
+        当前覆盖：mute / unmute 反馈（按人设 × 好感度档分类）。
+        <br />
+        <strong>编辑后重启 app 生效。</strong>
+        删掉文件就是恢复默认。
+      </div>
+      <button onClick={openFile} disabled={busy} style={btnStyle('secondary')}>
+        {busy ? '打开中…' : '打开 lines.json'}
+      </button>
+      {path && (
+        <div style={{ fontSize: 10, color: '#888', marginTop: 6, wordBreak: 'break-all' }}>
+          路径：{path}
+        </div>
+      )}
+    </>
+  )
+}
+
 function EmbedModelPanel(): React.ReactElement {
   const [s, setS] = useState<{
     naive: boolean
@@ -2790,7 +2841,10 @@ function MemoryTab({ personaId }: { personaId: string }) {
         {episodes.length === 0 ? (
           <div style={{ color: '#777', padding: 8 }}>还没有任何对话记录。聊几句就有了。</div>
         ) : (
-          episodes.map((e) => (
+          // Newest at top — scrolling a long list to find recent activity
+          // by hand was wrong UX. Slice before reverse so we don't
+          // mutate the state array (would break React's diff).
+          episodes.slice().reverse().map((e) => (
             <div
               key={e.id}
               style={{

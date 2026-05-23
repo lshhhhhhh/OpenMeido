@@ -25,6 +25,12 @@ import { readDemos, getDemosPath } from './demos-host.js'
 import { captureAllScreensPng } from './screen-host.js'
 import { listVoices as ttsListVoices, synthesize as ttsSynthesize } from './tts-host.js'
 import {
+  initLines,
+  getLines,
+  ensureLinesFile,
+  getLinesFilePath,
+} from './lines-host.js'
+import {
   transcribeSamples as sttTranscribe,
   getSttStatus,
   startSttDownload,
@@ -703,6 +709,50 @@ ipcMain.handle('memory:deleteFact', async (_event, factId: number) => {
   return svc.deleteFact(factId)
 })
 
+// Persist a mute-button feedback line as an assistant episode. The
+// renderer already displayed the line locally (zero-latency); this just
+// writes it to memory so the NEXT user reply doesn't land as a dangling
+// turn (model would otherwise have no context that she said "主人你回来了"
+// before the user said "是啊我回来了").
+//
+// Deliberately doesn't trigger affinity / emotion classifiers — these
+// are UI acknowledgement lines, not conversation, and feeding them
+// through warmth-judging would drift the score every toggle. L3
+// reflection still sees the episodes but the LLM naturally ignores
+// content-free mechanical turns when distilling facts.
+// Preset lines — renderer fetches once at boot to feed pickMuteFeedback
+// (and future "preset" consumers like persona prompts when we expand).
+ipcMain.handle('lines:get', () => {
+  return getLines()
+})
+// Trigger the OS default editor on the lines file. Seeds the file with
+// bundled defaults on first call so notepad doesn't open empty.
+ipcMain.handle('lines:openFile', async () => {
+  try {
+    const path = await ensureLinesFile()
+    await shell.openPath(path)
+    return { ok: true, path }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+ipcMain.handle('lines:path', () => {
+  return getLinesFilePath()
+})
+
+ipcMain.handle('mute:announce', async (_event, payload: { text: string }) => {
+  if (!payload?.text || typeof payload.text !== 'string') return { ok: false }
+  const svc = getMemoryService()
+  if (!svc) return { ok: false }
+  try {
+    await svc.addEpisode('assistant', payload.text.trim())
+    return { ok: true }
+  } catch (err) {
+    console.warn('[mute] persist failed:', err)
+    return { ok: false }
+  }
+})
+
 // Diagnostic — fire a presence tick on demand. Used from DevTools when
 // you don't want to wait 10 minutes between ticks while investigating
 // why presence isn't accruing.
@@ -915,6 +965,10 @@ void app.whenReady().then(async () => {
   // session-id injection in add(). Migrates legacy reminders.sqlite on
   // first run if found.
   await initTasks()
+  // Preset台词 file — loaded once at boot; user edits + restart picks
+  // up the new values. Bundled defaults serve as fallback for missing
+  // / malformed file, so the renderer always gets a valid structure.
+  await initLines()
   initProactive(onConfigChange)
   initNotifListener()
   initAffinity(getConfig().persona.preset)

@@ -10,16 +10,27 @@ import Store from 'electron-store'
 import { BrowserWindow, safeStorage } from 'electron'
 
 import { configSchema, ConfigIPC, type Config } from '../shared/config.js'
+import { migrateProactiveLegacyKnobs } from '../shared/config-migrations.js'
 
 const store = new Store<Config>({
   name: 'config',
   defaults: configSchema.parse({}),
 })
 
+// Pre-Zod migrations for shape changes between releases. Zod silently
+// strips unknown keys, which is fine for additions but loses information
+// when a boolean field is replaced by an enum (e.g. proactive.enabled →
+// proactive.mode). Translate before parsing so opt-outs survive the
+// upgrade.
+migrateProactiveLegacyKnobs(store.store as unknown as Record<string, unknown>)
+
 // Re-validate on load — recovers gracefully if a previous version wrote a
 // shape we no longer accept, or if the user hand-edited the JSON badly.
 let current: Config = configSchema.parse(store.store)
 store.store = current
+
+// Migration body lives in src/shared/config-migrations.ts so it stays
+// unit-testable from plain Node (no Electron module-load side effects).
 
 type ChangeListener = (next: Config) => void
 const mainListeners = new Set<ChangeListener>()

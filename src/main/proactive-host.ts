@@ -2,18 +2,18 @@
  * Proactive observer — drives spontaneous remarks from the desktop maid.
  *
  * Polling loop:
- *   - Every `pollIntervalSec`, evaluate triggers:
+ *   - Every PROACTIVE_POLL_INTERVAL_SEC (fixed 5s), evaluate triggers.
+ *   - Cadence (idle / timer / cooldown / silence thresholds) is resolved
+ *     at every tick from cfg.proactive.mode + the current affinity tier
+ *     via cadenceFor() in shared/proactive-cadence.ts. Mute mode returns
+ *     null and the loop bails out immediately.
+ *   - Trigger types:
  *       timer  → N seconds since last assistant remark
- *       idle   → system idle >= idleThresholdSec (uses Electron powerMonitor)
- *   - Apply cooldowns: cooldownSec global, minSilenceSec since last user input.
+ *       idle   → system idle ≥ threshold (uses Electron powerMonitor)
  *   - If any trigger fires, ask the LLM (via runExtraction) whether to speak.
  *   - On `shouldSpeak: true`, persist as an assistant episode and broadcast
  *     a 'proactive:remark' event to renderer windows so the chat panel
  *     can render it inline.
- *
- * Why not include screen capture in v1: the existing screen tool already
- * works user-initiated, and proactive vision adds privacy concerns that
- * deserve their own settings toggle. Future task.
  */
 
 import { BrowserWindow, powerMonitor } from 'electron'
@@ -23,7 +23,14 @@ import { runExtraction, runExtractionWithImages } from './chat-host.js'
 import { getMemoryService } from './memory-host.js'
 import { captureAllScreensPng } from './screen-host.js'
 import { classifyAndApplyEmotion } from './emotion-classifier.js'
+import { currentTier } from './affinity-host.js'
 import { buildTierPromptBlock, tierFor } from '../shared/affinity.js'
+import {
+  cadenceFor,
+  PROACTIVE_POLL_INTERVAL_SEC,
+  type ProactiveCadence,
+} from '../shared/proactive-cadence.js'
+import { evaluateTriggers } from '../shared/proactive-triggers.js'
 import { resolvePersona } from '../shared/config.js'
 import { buildProactiveRemarkPrompt } from '../shared/daily-prompts.js'
 import { formatLocalNow } from '../shared/time-format.js'
@@ -109,29 +116,22 @@ export function noteAssistantActivity(): void {
   lastAssistantAt = Date.now()
 }
 
-function collectTriggers(cfg: Config['proactive']): Trigger[] {
-  const triggers: Trigger[] = []
-  const now = Date.now()
+function collectTriggers(cadence: ProactiveCadence): Trigger[] {
+  // Read Electron-side state once, hand it to the pure evaluator. The
+  // idle-armed latch flip stays here (it's host-side mutable module
+  // state, not part of the math) — we flip it after the pure call sees
+  // it as `true`, which preserves the original "fire once per idle
+  // window" semantic.
   const idleSec = powerMonitor.getSystemIdleTime()
-  // Idle trigger — fires once when threshold is first crossed; latches
-  // until any user activity rearms it.
-  if (idleArmed && idleSec >= cfg.idleThresholdSec) {
+  const sinceAssistantSec = (Date.now() - lastAssistantAt) / 1000
+  const triggers = evaluateTriggers({
+    cadence,
+    idleSec,
+    idleArmed,
+    sinceAssistantSec,
+  })
+  if (triggers.some((t) => t.kind === 'idle')) {
     idleArmed = false
-    triggers.push({
-      kind: 'idle',
-      at: new Date().toISOString(),
-      note: `用户已经 ${Math.floor(idleSec / 60)} 分钟没有任何输入`,
-    })
-  }
-  // Timer trigger — fires when N seconds have passed since the last
-  // assistant remark (proactive OR user-driven).
-  const sinceAssistant = (now - lastAssistantAt) / 1000
-  if (sinceAssistant >= cfg.timerSec) {
-    triggers.push({
-      kind: 'timer',
-      at: new Date().toISOString(),
-      note: `距离你上一句已经 ${Math.floor(sinceAssistant / 60)} 分钟`,
-    })
   }
   return triggers
 }
@@ -175,13 +175,21 @@ function parseDecision(
 
 async function evaluate(): Promise<void> {
   const cfg = getConfig()
-  if (!cfg.proactive.enabled) return
+  // Resolve cadence from the user's mode + current affinity tier. Mute
+  // mode short-circuits; auto + chatty get tier- or fixed-density numbers
+  // from proactive-cadence.ts. currentTier() is the cached sync reader
+  // populated by affinity-host; no DB hit on the polling path. (We can't
+  // reuse the `tier` const declared later in this function — that one's
+  // a TierInfo from tierFor(affinity.score), pulled after the awaits.)
+  const cadenceTier = currentTier(cfg.persona.preset).tier
+  const cadence = cadenceFor(cfg.proactive.mode, cadenceTier)
+  if (!cadence) return
   const now = Date.now()
   const sinceLastFire = (now - lastFiredAt) / 1000
   const sinceLastUser = (now - lastUserAt) / 1000
-  if (sinceLastFire < cfg.proactive.cooldownSec) return
-  if (sinceLastUser < cfg.proactive.minSilenceSec) return
-  const triggers = collectTriggers(cfg.proactive)
+  if (sinceLastFire < cadence.cooldownSec) return
+  if (sinceLastUser < cadence.minSilenceSec) return
+  const triggers = collectTriggers(cadence)
   if (triggers.length === 0) return
 
   // We tentatively claim the cooldown slot BEFORE the LLM call returns —
@@ -369,11 +377,14 @@ async function evaluate(): Promise<void> {
 export function startProactive(): void {
   stopProactive()
   const cfg = getConfig()
-  if (!cfg.proactive.enabled) return
-  // Initial wait so we don't fire one second after startup.
+  if (cfg.proactive.mode === 'mute') return
+  // Initial wait so we don't fire one second after startup. Poll interval
+  // is now a hard-coded 5s (moved out of user-facing config, see
+  // proactive-cadence.ts) — evaluate() itself bails fast on cooldown so
+  // the loop is cheap.
   pollTimer = setInterval(() => {
     void evaluate()
-  }, cfg.proactive.pollIntervalSec * 1000)
+  }, PROACTIVE_POLL_INTERVAL_SEC * 1000)
 }
 
 export function stopProactive(): void {
@@ -383,7 +394,7 @@ export function stopProactive(): void {
 
 /**
  * Wire to main. Call once after app.whenReady. Re-starts on config change
- * so toggling `proactive.enabled` from Settings takes effect immediately.
+ * so toggling `proactive.mode` from Settings takes effect immediately.
  */
 export function initProactive(onConfigChange: (cb: (cfg: Config) => void) => void): void {
   startProactive()

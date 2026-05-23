@@ -12,6 +12,9 @@ import { useConfig } from './useConfig'
 import { ConfirmHost } from './confirm'
 import { matchHotkey } from '../../shared/demos'
 import { stripMarkdown } from '../../shared/strip-markdown'
+import { pickMuteFeedback } from '../../shared/mute-feedback'
+import { PRESET_LINES_DEFAULTS } from '../../shared/preset-lines-defaults'
+import { isWorkToolName } from '../../shared/work-tools'
 
 interface ToolCall {
   name: string
@@ -164,6 +167,16 @@ export default function App() {
   // Currently-playing TTS handle. Tapping speaker on another bubble (or
   // starting a new send) stops this one so audio doesn't overlap.
   const ttsHandleRef = useRef<PlayHandle | null>(null)
+  // Last few mute-feedback lines used, oldest first. Bounded to 3 so the
+  // anti-repeat ring stays well under the smallest pool size (4) and we
+  // never trigger the "every line used" fallback unnecessarily.
+  const recentMuteLinesRef = useRef<string[]>([])
+  // Preset台词 from %APPDATA%/openmeido/lines.json (merged with bundled
+  // defaults). Fetched once at boot — user edits require app restart.
+  // Holds null until the first IPC fetch resolves; the mute button uses
+  // bundled defaults as a fallback for that brief window so an early
+  // click before lines arrive still works.
+  const linesRef = useRef<import('../../shared/preset-lines-defaults').PresetLines | null>(null)
   // Which message index is currently speaking (for UI highlight).
   const [speakingIdx, setSpeakingIdx] = useState<number | null>(null)
   const config = useConfig()
@@ -238,6 +251,18 @@ export default function App() {
   // --autoplay-policy=no-user-gesture-required.
   useEffect(() => {
     warmupAudioContext()
+  }, [])
+
+  // Fetch preset台词 from main once at boot. Until this resolves, the
+  // mute button falls back to bundled defaults; both are valid
+  // structures so there's no broken state during the brief window
+  // before the IPC returns.
+  useEffect(() => {
+    void window.api.lines?.get().then((data) => {
+      // Defensive cast — main validates with Zod, so this is the
+      // already-merged structure.
+      linesRef.current = data as typeof PRESET_LINES_DEFAULTS
+    })
   }, [])
 
   useEffect(() => {
@@ -1023,6 +1048,104 @@ export default function App() {
           />
         </div>
         <div style={{ ...noDragRegion, display: 'flex', gap: 6, alignItems: 'center' }}>
+          {/* Proactive mute toggle. Persists immediately (no Settings
+              round-trip) — "shut her up right now" is too common a
+              reflex to bury in a 4-click navigation.
+              Binary: mute ⇄ auto. The 'chatty' mode lives in Settings
+              for users who explicitly opt in; the button's job is the
+              urgent case. 🔕 = currently muted; 🔔 = she'll speak up. */}
+          <button
+            onClick={async () => {
+              if (!config) return
+              const next = config.proactive.mode === 'mute' ? 'auto' : 'mute'
+              const direction: 'mute' | 'unmute' =
+                next === 'mute' ? 'mute' : 'unmute'
+              // Persist mode immediately so the engine state matches the
+              // button visual even if the feedback line / TTS still fires
+              // a tick later.
+              void window.api.config.set({
+                ...config,
+                proactive: { ...config.proactive, mode: next },
+              })
+              // Score read for tier bucketing. Failure (no memory yet on a
+              // fresh install) silently falls to 0, which lands in the
+              // "low" bucket — appropriate for a stranger relationship.
+              let score = 0
+              try {
+                const rec = await window.api.affinity.get()
+                if (rec) score = rec.score
+              } catch {
+                /* keep 0 */
+              }
+              const line = pickMuteFeedback(
+                linesRef.current ?? PRESET_LINES_DEFAULTS,
+                config.persona.preset,
+                direction,
+                score,
+                recentMuteLinesRef.current,
+              )
+              recentMuteLinesRef.current = [
+                ...recentMuteLinesRef.current,
+                line,
+              ].slice(-3)
+              // Inject as if she said it — display locally so the user
+              // sees instant feedback (zero IPC latency).
+              const idx = messagesRef.current.length
+              setMessages((prev) => [...prev, { role: 'assistant', text: line }])
+              // Mute direction → never speak (the user just asked for
+              // silence; TTS-ing the "I'll be quiet" line is exactly the
+              // wrong move). Unmute → speak if autoPlay is on.
+              //
+              // Fire TTS BEFORE the persist call so a missing
+              // window.api.mute (e.g. running against an old preload
+              // bundle in dev where the namespace hasn't been rebuilt
+              // yet) can't kill the speech path. Both calls are
+              // independent; do persist as best-effort.
+              if (
+                direction === 'unmute' &&
+                config.tts.enabled &&
+                config.tts.autoPlay
+              ) {
+                void speakRef.current(line, idx)
+              }
+              // Persist to memory via mute:announce so the NEXT user
+              // reply has this turn in context — without it, "主人你
+              // 回来了" → user replies "是啊我回来了" lands as a
+              // dangling turn with no antecedent and her next response
+              // gets confused. Best-effort; failure here only loses
+              // context for ONE turn, not the whole feature.
+              try {
+                void window.api.mute?.announce(line)
+              } catch (err) {
+                console.warn('[mute] announce failed:', err)
+              }
+            }}
+            title={
+              config?.proactive.mode === 'mute'
+                ? '她现在闭着嘴。点击让她可以主动开口'
+                : config?.proactive.mode === 'chatty'
+                  ? '多话模式 · 点击改成闭嘴'
+                  : '自动模式（按好感度决定频率）· 点击改成闭嘴'
+            }
+            style={{
+              width: 26,
+              height: 22,
+              border: 'none',
+              borderRadius: 6,
+              background:
+                config?.proactive.mode === 'mute'
+                  ? 'rgba(248,81,73,0.22)'
+                  : 'rgba(0,0,0,0.18)',
+              color: '#444',
+              fontSize: 13,
+              lineHeight: '22px',
+              cursor: 'pointer',
+              padding: 0,
+              fontWeight: 600,
+            }}
+          >
+            {config?.proactive.mode === 'mute' ? '🔕' : '🔔'}
+          </button>
           {/* Background-mode toggle. Persists immediately (no Settings round-
               trip) so the user can flip it in 1 click. The icon flips:
               ◐ when bg is shown (suggesting "make me transparent"),
@@ -1927,19 +2050,15 @@ function MessageBubble({
   // out of long-term reflection. Surfacing a small 💼 next to the bubble
   // makes that boundary visible to the user (so they don't worry their
   // work chatter is "training her" the way personal chat is).
+  //
+  // Inclusion list lives in shared/work-tools.ts so the main-side
+  // classifyTurnType and this UI flag agree. Earlier they diverged on
+  // `presentTable`, causing iterative table-edit turns (e.g. "只列出
+  // 广告" → only calls presentTable) to render without the 💼.
   const isWorkTurn =
     !isUser &&
     (message.toolCalls?.length ?? 0) > 0 &&
-    message.toolCalls!.some(
-      (tc) =>
-        ![
-          'addTask',
-          'listTasks',
-          'markTaskDone',
-          'readClipboard',
-          'presentTable',
-        ].includes(tc.name),
-    )
+    message.toolCalls!.some((tc) => isWorkToolName(tc.name))
   // Strip markdown formatting from assistant text before display — the
   // model sometimes emits `**bold**` / `- bullets` / `# headers` and we
   // don't render markdown, so those would show as raw asterisks/hashes.

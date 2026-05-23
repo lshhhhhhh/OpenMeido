@@ -1,22 +1,16 @@
+import { isWorkToolName } from '../../shared/work-tools.js'
+
 /**
  * Classify a chat turn type based on the tool calls invoked during that turn.
+ *
+ * The work-tools list is shared with the renderer's `isWorkTurn` 💼
+ * indicator — see src/shared/work-tools.ts. Keeping one source of
+ * truth prevents the previous mismatch where the renderer and main
+ * disagreed about whether `presentTable` counted as work.
  */
 export function classifyTurnType(calls: { toolName: string }[]): 'personal' | 'work' | 'neutral' {
   if (calls.length === 0) return 'personal'
-
-  const workTools = [
-    'listMailFolders',
-    'listRecentEmails',
-    'readEmail',
-    'draftEmailReply',
-    'readFile',
-    'readWebPage',
-    'google_search'
-  ]
-
-  const hasWork = calls.some(c => workTools.includes(c.toolName))
-  if (hasWork) return 'work'
-
+  if (calls.some((c) => isWorkToolName(c.toolName))) return 'work'
   return 'neutral'
 }
 

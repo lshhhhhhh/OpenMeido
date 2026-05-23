@@ -410,23 +410,23 @@ export const configSchema = z.object({
   proactive: z
     .object({
       /**
-       * Master switch. Default ON — a desktop companion that NEVER talks
-       * on her own feels broken-by-default; users who hate it can flip it
-       * off in Settings → 主动 within seconds. The default poll/cooldown
-       * are conservative (15 min timer, 10 min idle, 10 min cooldown)
-       * so it's not noisy.
+       * How the spontaneous-remark engine should behave. Replaces the
+       * old grab-bag of 5 timing knobs (timer / idle / cooldown / poll /
+       * silence) — 99% of users never touched them, and the few who did
+       * usually just wanted "more" or "less" not specific seconds.
+       *
+       *   'mute'   — engine off; never speaks unprompted.
+       *   'auto'   — cadence is derived from the current affinity tier
+       *              (cold ⇒ nearly silent, warm ⇒ steady presence). See
+       *              src/shared/proactive-cadence.ts.
+       *   'chatty' — dense cadence regardless of affinity; for users who
+       *              want her around even before the relationship has
+       *              earned it.
+       *
+       * Migration: legacy configs with `enabled: false` are translated to
+       * 'mute' in src/main/config.ts before Zod parses.
        */
-      enabled: z.boolean().default(true),
-      /** Seconds between trigger evaluations. 5s is plenty for chat cadence. */
-      pollIntervalSec: z.number().int().min(2).max(60).default(5),
-      /** Timer trigger: spontaneous remark every N seconds (since last reply). */
-      timerSec: z.number().int().min(60).max(7200).default(900),
-      /** Idle trigger: fire once when system has been idle this many seconds. */
-      idleThresholdSec: z.number().int().min(30).max(3600).default(600),
-      /** Don't fire if the user just spoke within this many seconds. */
-      minSilenceSec: z.number().int().min(5).max(600).default(30),
-      /** Hard cooldown between any two proactive remarks, regardless of trigger. */
-      cooldownSec: z.number().int().min(60).max(7200).default(600),
+      mode: z.enum(['auto', 'chatty', 'mute']).default('auto'),
       /**
        * When true, every proactive evaluation also captures the current
        * screen(s) and sends them to the gating LLM. Lets the character

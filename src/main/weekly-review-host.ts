@@ -47,7 +47,10 @@ export function stopWeeklyReview(): void {
 async function maybeFire(): Promise<void> {
   try {
     const cfg = getConfig()
-    if (!cfg.proactive.enabled) return
+    // Weekly review piggybacks on the proactive gate — when the user has
+    // explicitly muted spontaneous remarks, surfacing a multi-paragraph
+    // review card is the same intrusion they opted out of.
+    if (cfg.proactive.mode === 'mute') return
     const personaId = cfg.persona.preset
 
     const adapter = getMemoryAdapter()
