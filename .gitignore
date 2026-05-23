@@ -43,3 +43,7 @@ models/
 # Project-root background/ is author-only working storage. The actual
 # assets shipped with the renderer live at src/renderer/public/background/.
 /background/
+
+# Claude Code workspace metadata + local release-notes scratch.
+.claude/
+dist-build/
