@@ -43,11 +43,26 @@ export interface ProactiveCadence {
  * mid-tier today see no behavior change after the migration.
  */
 const AUTO_CADENCE: Record<Tier, ProactiveCadence> = {
-  tier1: { idleThresholdSec: 1800, timerSec: 2400, cooldownSec: 1500, minSilenceSec: 60 },
-  tier2: { idleThresholdSec: 1500, timerSec: 1800, cooldownSec: 1200, minSilenceSec: 60 },
-  tier3: { idleThresholdSec: 600,  timerSec: 900,  cooldownSec: 600,  minSilenceSec: 30 },
-  tier4: { idleThresholdSec: 420,  timerSec: 600,  cooldownSec: 420,  minSilenceSec: 30 },
-  tier5: { idleThresholdSec: 300,  timerSec: 420,  cooldownSec: 300,  minSilenceSec: 30 },
+  // Cadence rebalanced in v0.1.5: tier1 was 1800/2400/1500/60 = ~40 min
+  // silence between remarks for a fresh-install user, which made the
+  // Day-1 experience feel abandoned after the onboarding peek. New
+  // numbers target "fresh user feels her presence every 15-20 min"
+  // without flipping over to the "she chatters constantly" zone.
+  //
+  // Strictly monotonic — every param decreases as tier rises — so the
+  // user still sees a clear "she's getting more present" arc as
+  // affinity grows. tier5 left unchanged because it was already in
+  // the right zone for intimate-tier presence; tightening it more
+  // would brush against chatty mode's territory.
+  //
+  // Persona / character distinction comes from the prompt's tier
+  // trait pack, NOT cadence — so "polite stranger" feel at tier1 is
+  // preserved by the prompt even though she speaks more often.
+  tier1: { idleThresholdSec: 600,  timerSec: 1200, cooldownSec: 600, minSilenceSec: 60 },
+  tier2: { idleThresholdSec: 540,  timerSec: 960,  cooldownSec: 540, minSilenceSec: 45 },
+  tier3: { idleThresholdSec: 480,  timerSec: 780,  cooldownSec: 480, minSilenceSec: 30 },
+  tier4: { idleThresholdSec: 360,  timerSec: 540,  cooldownSec: 360, minSilenceSec: 30 },
+  tier5: { idleThresholdSec: 300,  timerSec: 420,  cooldownSec: 300, minSilenceSec: 30 },
 }
 
 /**

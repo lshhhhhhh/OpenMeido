@@ -85,21 +85,28 @@ console.log('\n[3] auto cadence is monotonic — quieter at low tiers')
       a4.timerSec >= a5.timerSec,
     `timer: ${[a1, a2, a3, a4, a5].map((c) => c.timerSec).join(' / ')}`,
   )
-  // Lv.1 should be noticeably quieter than Lv.3 (the prior global default).
+  // Lv.1 is quieter than Lv.5 but the gap is no longer extreme — the
+  // v0.1.5 rebalance pulled tier1 from 1800/2400/1500/60 down to
+  // 600/1200/600/60 so fresh-install users feel her presence in the
+  // 15-20 min range instead of being abandoned for 40 min after the
+  // onboarding peek. Hierarchy still holds — just less stretched.
   check(
-    'tier1 idle threshold is at least 2x the tier3 baseline',
-    a1.idleThresholdSec >= 2 * a3.idleThresholdSec,
-    `tier1=${a1.idleThresholdSec} vs tier3=${a3.idleThresholdSec}`,
+    'tier1 idle threshold is at most 3x the tier5 baseline',
+    a1.idleThresholdSec <= 3 * a5.idleThresholdSec,
+    `tier1=${a1.idleThresholdSec} vs tier5=${a5.idleThresholdSec}`,
   )
 }
 
-console.log('\n[4] auto-Lv.3 preserves the old global defaults (no surprise migration)')
+console.log('\n[4] auto-Lv.5 anchors intimate-tier presence (chatty mode still tighter)')
 {
-  const a3 = cadenceFor('auto', 'tier3')
-  check('idleThresholdSec stays at 600s (10 min)', a3.idleThresholdSec === 600)
-  check('timerSec stays at 900s (15 min)', a3.timerSec === 900)
-  check('cooldownSec stays at 600s (10 min)', a3.cooldownSec === 600)
-  check('minSilenceSec stays at 30s', a3.minSilenceSec === 30)
+  const a5 = cadenceFor('auto', 'tier5')
+  // tier5 was untouched in the v0.1.5 rebalance — it was already in
+  // the right zone for "she's clearly around" and tightening more
+  // would overlap with chatty mode's territory.
+  check('tier5 idleThresholdSec stays at 300s (5 min)', a5.idleThresholdSec === 300)
+  check('tier5 timerSec stays at 420s (7 min)', a5.timerSec === 420)
+  check('tier5 cooldownSec stays at 300s (5 min)', a5.cooldownSec === 300)
+  check('tier5 minSilenceSec stays at 30s', a5.minSilenceSec === 30)
 }
 
 console.log('\n[5] cadenceForScore tier mapping is correct at boundaries')

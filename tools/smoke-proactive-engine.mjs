@@ -62,50 +62,53 @@ console.log('\n[1] mute mode produces zero triggers regardless of state')
   }
 }
 
-console.log('\n[2] auto × Lv.1 (cold stranger) is patient')
+console.log('\n[2] auto × Lv.1 (cold stranger) — present but measured')
 {
-  // tier1 idle threshold is 30 min, timer is 40 min.
-  // 15 min idle, 30 min since assistant → nothing should fire.
+  // tier1 since v0.1.5 rebalance: idle 10 min, timer 20 min.
+  // Was previously 30/40 min — too quiet for Day-1 users staring at
+  // the app after onboarding peek and getting silence for half an hour.
+  // 5 min idle / 5 min silent → nothing fires.
   const quiet = tickEngine({
     mode: 'auto',
     tier: 'tier1',
-    idleSec: 15 * 60,
-    sinceAssistantSec: 30 * 60,
+    idleSec: 5 * 60,
+    sinceAssistantSec: 5 * 60,
   })
-  check('15min idle + 30min silent → no trigger at Lv.1', quiet.length === 0, `got ${quiet.length}`)
+  check('Lv.1 5min idle/silent → no trigger', quiet.length === 0, `got ${quiet.length}`)
 
-  // 35 min idle, 30 min since assistant → idle fires, timer doesn't yet.
+  // 11 min idle, 11 min silent → idle fires (10 min threshold), timer doesn't (20 min).
   const idleOnly = tickEngine({
     mode: 'auto',
     tier: 'tier1',
-    idleSec: 35 * 60,
-    sinceAssistantSec: 30 * 60,
+    idleSec: 11 * 60,
+    sinceAssistantSec: 11 * 60,
   })
-  check('35min idle alone → idle trigger fires', idleOnly.some((t) => t.kind === 'idle'))
-  check('35min idle alone → timer does NOT fire (timer=40min at Lv.1)', !idleOnly.some((t) => t.kind === 'timer'))
+  check('Lv.1 11min idle → idle trigger fires', idleOnly.some((t) => t.kind === 'idle'))
+  check('Lv.1 11min silent → timer NOT fired yet (timer=20min)', !idleOnly.some((t) => t.kind === 'timer'))
 
-  // 45 min idle + 45 min silent → both fire.
+  // 21 min idle / 21 min silent → both fire.
   const both = tickEngine({
     mode: 'auto',
     tier: 'tier1',
-    idleSec: 45 * 60,
-    sinceAssistantSec: 45 * 60,
+    idleSec: 21 * 60,
+    sinceAssistantSec: 21 * 60,
   })
-  check('45min idle + 45min silent → both triggers fire', both.length === 2)
+  check('Lv.1 21min idle+silent → both triggers fire', both.length === 2)
 }
 
-console.log('\n[3] auto × Lv.3 preserves the old 10/15 min defaults')
+console.log('\n[3] auto × Lv.3 — moderate presence (8/13 min after rebalance)')
 {
+  // tier3 since v0.1.5: idle 8 min (480s), timer 13 min (780s).
   // 5 min — nothing.
   const quiet = tickEngine({ mode: 'auto', tier: 'tier3', idleSec: 5 * 60, sinceAssistantSec: 5 * 60 })
   check('Lv.3 5min idle/silent → no trigger', quiet.length === 0)
-  // 11 min idle → idle fires (threshold 10 min). Timer threshold 15 min — not yet.
-  const idleOnly = tickEngine({ mode: 'auto', tier: 'tier3', idleSec: 11 * 60, sinceAssistantSec: 11 * 60 })
-  check('Lv.3 11min idle → idle fires', idleOnly.some((t) => t.kind === 'idle'))
-  check('Lv.3 11min silent → timer NOT fired yet', !idleOnly.some((t) => t.kind === 'timer'))
-  // 16 min — timer fires too.
-  const both = tickEngine({ mode: 'auto', tier: 'tier3', idleSec: 16 * 60, sinceAssistantSec: 16 * 60 })
-  check('Lv.3 16min idle+silent → both triggers', both.length === 2)
+  // 9 min idle → idle fires (threshold 8 min). Timer threshold 13 min — not yet.
+  const idleOnly = tickEngine({ mode: 'auto', tier: 'tier3', idleSec: 9 * 60, sinceAssistantSec: 9 * 60 })
+  check('Lv.3 9min idle → idle fires', idleOnly.some((t) => t.kind === 'idle'))
+  check('Lv.3 9min silent → timer NOT fired yet', !idleOnly.some((t) => t.kind === 'timer'))
+  // 14 min — both fire.
+  const both = tickEngine({ mode: 'auto', tier: 'tier3', idleSec: 14 * 60, sinceAssistantSec: 14 * 60 })
+  check('Lv.3 14min idle+silent → both triggers', both.length === 2)
 }
 
 console.log('\n[4] auto × Lv.5 is responsive (5/7 min)')
