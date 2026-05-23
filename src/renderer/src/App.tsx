@@ -2387,105 +2387,254 @@ function CelebrationOverlay() {
 }
 
 /**
- * Bottom-right pill that appears when electron-updater has finished
- * downloading a new version in the background. Two states:
- *   - hidden (default — no update ready)
- *   - prompting ("v0.X.Y 已就绪 — 立即重启更新" + dismiss ×)
+ * Bottom-right banner for the auto-update lifecycle. Three states the
+ * user can be in, each with its own affordance:
  *
- * Clicking restart calls `window.api.updater.install()` which fires
- * the main-process `quitAndInstall` — NSIS takes over, the app
- * relaunches on the new version. Dismissing just hides the pill for
- * this session; the staged update still installs on next normal app
- * quit (autoInstallOnAppQuit=true in updater-host).
+ *   1. 'available' — main detected a new GitHub release. Banner says
+ *      "发现新版本 v0.X.Y — 立即更新?" + 更新 button + ×. Click → moves
+ *      to (2). Dismiss → banner hides, no download starts.
+ *   2. 'downloading' — user consented; download in flight. Banner
+ *      shows live "下载中 v0.X.Y · 23% · 8.4 MB/s" with a progress
+ *      bar. No dismiss during download (the user already opted in;
+ *      we'd just throw the bytes away).
+ *   3. 'downloaded' — download complete. Banner says "v0.X.Y 已就绪
+ *      — 立即重启" + restart button + ×. Click → quitAndInstall.
  *
- * Subscribed in dev too — but updater-host short-circuits in dev so
- * no event will ever fire. Cheap idle component there.
+ * We DO NOT auto-download (autoDownload=false in main). Surprise
+ * 395 MB downloads on metered networks would be hostile. The banner's
+ * 更新 button is the consent step.
+ *
+ * Dismissing 'available' clears state for the session; if the
+ * periodic 6h check finds the same version again later, banner
+ * reappears (cheap re-prompt; if user really doesn't want it they
+ * stay on the dismiss).
  */
+type UpdaterState =
+  | { kind: 'hidden' }
+  | { kind: 'available'; version: string }
+  | {
+      kind: 'downloading'
+      version: string
+      percent: number
+      bytesPerSecond: number
+    }
+  | { kind: 'downloaded'; version: string }
+
 function UpdaterPill() {
-  const [pending, setPending] = useState<{ version: string } | null>(null)
-  const [installing, setInstalling] = useState(false)
+  const [state, setState] = useState<UpdaterState>({ kind: 'hidden' })
+  const [busy, setBusy] = useState(false)
   useEffect(() => {
-    const off = window.api.updater.onDownloaded((info) => {
-      setPending(info)
+    // Catch-up query — if an updater event already fired before this
+    // component mounted (e.g. download completed during boot), main's
+    // lastState replay lets us recover. v0.1.6 missed pill broadcasts
+    // because there was no replay; queryState fixes it.
+    void window.api.updater.queryState().then((s) => {
+      if (s.kind === 'idle') return
+      if (s.kind === 'available') {
+        setState({ kind: 'available', version: s.version })
+      } else if (s.kind === 'progress') {
+        setState({
+          kind: 'downloading',
+          version: s.version,
+          percent: s.percent,
+          bytesPerSecond: s.bytesPerSecond,
+        })
+      } else if (s.kind === 'downloaded') {
+        setState({ kind: 'downloaded', version: s.version })
+      }
     })
-    return off
+    const offA = window.api.updater.onAvailable((info) => {
+      setState({ kind: 'available', version: info.version })
+    })
+    const offP = window.api.updater.onProgress((info) => {
+      setState((prev) => {
+        // Use whatever version we currently know about. If we somehow
+        // missed the 'available' event (rare race) fall back to '?'.
+        const version =
+          prev.kind === 'available' ||
+          prev.kind === 'downloading' ||
+          prev.kind === 'downloaded'
+            ? prev.version
+            : '?'
+        return {
+          kind: 'downloading',
+          version,
+          percent: info.percent,
+          bytesPerSecond: info.bytesPerSecond,
+        }
+      })
+    })
+    const offD = window.api.updater.onDownloaded((info) => {
+      setState({ kind: 'downloaded', version: info.version })
+      setBusy(false)
+    })
+    return () => {
+      offA()
+      offP()
+      offD()
+    }
   }, [])
-  if (!pending) return null
+
+  if (state.kind === 'hidden') return null
+
+  const styleBase: React.CSSProperties = {
+    position: 'fixed',
+    right: 16,
+    bottom: 16,
+    zIndex: 40,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '10px 14px',
+    background: 'rgba(40, 50, 70, 0.94)',
+    border: '1px solid rgba(120, 160, 255, 0.45)',
+    borderRadius: 8,
+    boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+    backdropFilter: 'blur(8px)',
+    color: '#eee',
+    fontSize: 12,
+    fontFamily: 'system-ui, sans-serif',
+    maxWidth: 360,
+  }
+
+  if (state.kind === 'available') {
+    return (
+      <div style={styleBase}>
+        <span style={{ fontSize: 16 }}>✨</span>
+        <span style={{ flex: 1, lineHeight: 1.4 }}>
+          发现新版本 <b>v{state.version}</b>，立即下载？
+        </span>
+        <button
+          onClick={async () => {
+            if (busy) return
+            setBusy(true)
+            try {
+              await window.api.updater.download()
+            } catch (err) {
+              console.warn('[updater] download request failed:', err)
+              setBusy(false)
+            }
+          }}
+          disabled={busy}
+          style={{
+            padding: '4px 12px',
+            fontSize: 11,
+            background: '#5a8edf',
+            color: '#fff',
+            border: 'none',
+            borderRadius: 4,
+            cursor: busy ? 'wait' : 'pointer',
+            fontWeight: 500,
+          }}
+        >
+          {busy ? '准备中…' : '立即更新'}
+        </button>
+        <button
+          onClick={() => setState({ kind: 'hidden' })}
+          title="忽略本次。下次自动检查时如果还有更新会再提示"
+          aria-label="dismiss"
+          style={dismissBtnStyle}
+        >
+          ×
+        </button>
+      </div>
+    )
+  }
+
+  if (state.kind === 'downloading') {
+    const pct = Math.max(0, Math.min(100, state.percent))
+    const mbps = state.bytesPerSecond / (1024 * 1024)
+    return (
+      <div style={{ ...styleBase, flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 16 }}>⬇</span>
+          <span style={{ flex: 1, lineHeight: 1.4 }}>
+            下载中 <b>v{state.version}</b>
+          </span>
+          <span style={{ fontSize: 11, color: '#aad4ff', fontFamily: 'monospace' }}>
+            {pct.toFixed(0)}% · {mbps.toFixed(1)} MB/s
+          </span>
+        </div>
+        <div
+          style={{
+            width: '100%',
+            height: 4,
+            background: 'rgba(255,255,255,0.08)',
+            borderRadius: 2,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              width: `${pct}%`,
+              height: '100%',
+              background: 'linear-gradient(90deg, #5a8edf, #7ab8ff)',
+              transition: 'width 200ms ease-out',
+            }}
+          />
+        </div>
+      </div>
+    )
+  }
+
+  // state.kind === 'downloaded'
   return (
-    <div
-      style={{
-        position: 'fixed',
-        right: 16,
-        bottom: 16,
-        zIndex: 40,
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '8px 12px',
-        background: 'rgba(40, 50, 70, 0.94)',
-        border: '1px solid rgba(120, 160, 255, 0.45)',
-        borderRadius: 8,
-        boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
-        backdropFilter: 'blur(8px)',
-        color: '#eee',
-        fontSize: 12,
-        fontFamily: 'system-ui, sans-serif',
-        maxWidth: 320,
-      }}
-    >
-      <span style={{ fontSize: 14 }}>✨</span>
+    <div style={styleBase}>
+      <span style={{ fontSize: 16 }}>✓</span>
       <span style={{ flex: 1, lineHeight: 1.4 }}>
-        新版本 <b>{pending.version}</b> 已就绪
+        新版本 <b>v{state.version}</b> 已就绪
       </span>
       <button
         onClick={async () => {
-          if (installing) return
-          setInstalling(true)
+          if (busy) return
+          setBusy(true)
           try {
             await window.api.updater.install()
           } catch (err) {
             console.warn('[updater] install request failed:', err)
-            setInstalling(false)
+            setBusy(false)
           }
         }}
-        disabled={installing}
+        disabled={busy}
         style={{
-          padding: '4px 10px',
+          padding: '4px 12px',
           fontSize: 11,
           background: '#5a8edf',
           color: '#fff',
           border: 'none',
           borderRadius: 4,
-          cursor: installing ? 'wait' : 'pointer',
+          cursor: busy ? 'wait' : 'pointer',
           fontWeight: 500,
         }}
       >
-        {installing ? '准备中…' : '立即重启'}
+        {busy ? '准备中…' : '立即重启'}
       </button>
       <button
-        onClick={() => setPending(null)}
+        onClick={() => setState({ kind: 'hidden' })}
         title="本次会话不再提示（下次正常退出时自动安装）"
         aria-label="dismiss"
-        style={{
-          width: 20,
-          height: 20,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          background: 'transparent',
-          border: 'none',
-          color: '#888',
-          fontSize: 16,
-          lineHeight: 1,
-          cursor: 'pointer',
-          padding: 0,
-          borderRadius: 4,
-        }}
+        style={dismissBtnStyle}
       >
         ×
       </button>
     </div>
   )
+}
+
+const dismissBtnStyle: React.CSSProperties = {
+  width: 20,
+  height: 20,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  background: 'transparent',
+  border: 'none',
+  color: '#888',
+  fontSize: 16,
+  lineHeight: 1,
+  cursor: 'pointer',
+  padding: 0,
+  borderRadius: 4,
 }
 
 function StatusPill({

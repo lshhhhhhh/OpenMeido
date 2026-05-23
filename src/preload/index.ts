@@ -696,6 +696,48 @@ const api = {
       }
     },
     /**
+     * Subscribe to "new version detected" — fires when GitHub Releases
+     * reports a version higher than what's installed. We DON'T auto-
+     * download (autoUpdater.autoDownload = false in main); instead the
+     * banner shows "发现新版本 v0.X.Y — 立即更新" and waits for the
+     * user to click. This avoids surprise 395 MB downloads.
+     */
+    onAvailable(cb: (info: { version: string }) => void): () => void {
+      const handler = (_: Electron.IpcRendererEvent, info: { version: string }): void =>
+        cb(info)
+      ipcRenderer.on('updater:available', handler)
+      return () => {
+        ipcRenderer.off('updater:available', handler)
+      }
+    },
+    /**
+     * Subscribe to byte-level download progress. Fires many times per
+     * second while a download is in flight (after user confirmed).
+     * Banner uses `percent` and `bytesPerSecond` for a live readout.
+     */
+    onProgress(
+      cb: (info: {
+        percent: number
+        bytesPerSecond: number
+        transferred: number
+        total: number
+      }) => void,
+    ): () => void {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        info: {
+          percent: number
+          bytesPerSecond: number
+          transferred: number
+          total: number
+        },
+      ): void => cb(info)
+      ipcRenderer.on('updater:progress', handler)
+      return () => {
+        ipcRenderer.off('updater:progress', handler)
+      }
+    },
+    /**
      * Tell main to quit + install the staged update. NSIS takes over,
      * swaps the binary, relaunches the app on the new version.
      */
@@ -703,12 +745,39 @@ const api = {
       return ipcRenderer.invoke('updater:install') as Promise<void>
     },
     /**
+     * User clicked "立即更新" on the banner after seeing the available
+     * notification — main starts the actual file download. Progress
+     * flows via updater:progress; completion via updater:downloaded.
+     */
+    download(): Promise<void> {
+      return ipcRenderer.invoke('updater:download') as Promise<void>
+    },
+    /**
      * Trigger a one-off update check (vs. waiting for the 30 s post-
      * boot or 6 h periodic auto-check). Doesn't return the result
-     * directly — subscribe to onDownloaded / onNotAvailable for that.
+     * directly — subscribe to onAvailable / onNotAvailable for that.
      */
     checkNow(): Promise<void> {
       return ipcRenderer.invoke('updater:checkNow') as Promise<void>
+    },
+    /**
+     * Query the current updater state on mount. Closes the race where
+     * the renderer's React tree isn't subscribed yet when an event
+     * fires (saw this on v0.1.6 where the download finished before
+     * UpdaterPill mounted, so onDownloaded never triggered the pill).
+     */
+    queryState(): Promise<
+      | { kind: 'idle' }
+      | { kind: 'available'; version: string }
+      | { kind: 'progress'; version: string; percent: number; bytesPerSecond: number }
+      | { kind: 'downloaded'; version: string }
+    > {
+      return ipcRenderer.invoke('updater:queryState') as Promise<
+        | { kind: 'idle' }
+        | { kind: 'available'; version: string }
+        | { kind: 'progress'; version: string; percent: number; bytesPerSecond: number }
+        | { kind: 'downloaded'; version: string }
+      >
     },
   },
 

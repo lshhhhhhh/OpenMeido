@@ -33,6 +33,22 @@ const PERIODIC_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
 
 let initialized = false
 
+/**
+ * Last broadcast state from the updater, kept here so a renderer that
+ * mounts AFTER an event was already broadcast can catch up via the
+ * `updater:queryState` IPC. v0.1.6's UpdaterPill missed the
+ * update-downloaded event because download completed before the React
+ * tree was ready — by the time onDownloaded subscribed, the event had
+ * already fired into the void. Replay-via-query fixes that whole class
+ * of race regardless of how fast or slow the update check resolves.
+ */
+type UpdaterReplayState =
+  | { kind: 'idle' }
+  | { kind: 'available'; version: string }
+  | { kind: 'progress'; version: string; percent: number; bytesPerSecond: number }
+  | { kind: 'downloaded'; version: string }
+let lastState: UpdaterReplayState = { kind: 'idle' }
+
 function broadcast(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send(channel, payload)
@@ -50,10 +66,19 @@ export function initUpdater(): void {
     return
   }
 
-  // We want the user to OPT IN to install via the pill click rather
-  // than silently quit + restart mid-session — restarting silently on
-  // a long-form chat session would feel hostile.
-  autoUpdater.autoDownload = true
+  // Opt-in everything. We DON'T auto-download — silently pulling
+  // ~395 MB after detecting a new version feels invasive (especially
+  // on metered connections / mobile hotspots). Flow:
+  //   1. We detect update available, broadcast updater:available
+  //   2. Renderer shows a banner "发现新版本 v0.X.Y — 立即更新"
+  //   3. User clicks the banner button → renderer invokes
+  //      updater:download → main calls autoUpdater.downloadUpdate()
+  //   4. Download starts, progress flows via updater:progress events
+  //   5. On complete, updater:downloaded broadcasts; user clicks
+  //      "立即重启" → updater:install → quitAndInstall
+  autoUpdater.autoDownload = false
+  // If user consents + download finishes + they don't click "立即
+  // 重启" but instead quit normally via X — apply on next launch.
   autoUpdater.autoInstallOnAppQuit = true
 
   autoUpdater.on('checking-for-update', () => {
@@ -61,17 +86,33 @@ export function initUpdater(): void {
   })
   autoUpdater.on('update-available', (info) => {
     console.log(`[updater] update available: ${info.version}`)
+    lastState = { kind: 'available', version: info.version }
     broadcast('updater:available', { version: info.version })
   })
   autoUpdater.on('update-not-available', (info) => {
     console.log(`[updater] up-to-date (current=${info.version})`)
+    // Don't update lastState — `not-available` is transient; we don't
+    // want a renderer that mounts later to think "no update" forever
+    // until the next 6h periodic check. queryState defaults to 'idle'
+    // which is exactly that: no banner, normal state.
     broadcast('updater:not-available', { version: info.version })
   })
   autoUpdater.on('download-progress', (p) => {
     // Quiet log — periodic updates flooding the console isn't useful.
-    // Renderer doesn't currently surface progress (download is silent
-    // background), but we forward it via the channel so a future
-    // version could show a progress bar if user feedback wants one.
+    // The progress events fire many times per second; we update
+    // lastState with the latest so a renderer mounting mid-download
+    // can jump straight to the progress bar.
+    lastState = {
+      kind: 'progress',
+      version:
+        lastState.kind === 'available' ||
+        lastState.kind === 'progress' ||
+        lastState.kind === 'downloaded'
+          ? lastState.version
+          : '?',
+      percent: p.percent,
+      bytesPerSecond: p.bytesPerSecond,
+    }
     broadcast('updater:progress', {
       percent: p.percent,
       bytesPerSecond: p.bytesPerSecond,
@@ -81,6 +122,7 @@ export function initUpdater(): void {
   })
   autoUpdater.on('update-downloaded', (info) => {
     console.log(`[updater] download complete: ${info.version}`)
+    lastState = { kind: 'downloaded', version: info.version }
     broadcast('updater:downloaded', { version: info.version })
   })
   autoUpdater.on('error', (err) => {
@@ -108,6 +150,20 @@ export function initUpdater(): void {
     })
   }, PERIODIC_CHECK_INTERVAL_MS)
 
+  // IPC: renderer banner's "立即更新" button. User saw the available
+  // notification and consented to download — start the actual file
+  // transfer. Progress flows back via the on('download-progress')
+  // listener above into updater:progress events. Completion fires
+  // updater:downloaded.
+  ipcMain.handle('updater:download', async () => {
+    console.log('[updater] user consented — starting download')
+    try {
+      await autoUpdater.downloadUpdate()
+    } catch (err) {
+      console.warn('[updater] download failed:', err)
+    }
+  })
+
   // IPC: renderer pill's "立即重启更新" button. quitAndInstall ends
   // the current Electron process and lets NSIS swap the binary, then
   // launches the new one. We pass `isSilent=false, isForceRunAfter=true`
@@ -132,4 +188,10 @@ export function initUpdater(): void {
       return null
     })
   })
+
+  // IPC: renderer queries this on mount to recover whatever state the
+  // updater is in. Closes the race where update events fire before the
+  // UpdaterPill component subscribes — replay on demand instead of
+  // hoping the subscription beats the event.
+  ipcMain.handle('updater:queryState', () => lastState)
 }
