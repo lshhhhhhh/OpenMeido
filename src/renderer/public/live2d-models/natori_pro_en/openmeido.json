@@ -1,0 +1,22 @@
+{
+  "modelFile": "runtime/natori_pro_t06.model3.json",
+  "fitMode": "portrait",
+  "lipSyncParam": "ParamMouthOpenY",
+  "emotionMapping": {
+    "开心": "Smile",
+    "害羞": "Blushing",
+    "无语": "Normal",
+    "难过": "Sad",
+    "慌张": "Surprised",
+    "震惊": "Surprised",
+    "尴尬": "Blushing",
+    "得意": "Smile"
+  },
+  "motionMapping": {
+    "开心":  { "group": "Tap",            "index": 0 },
+    "害羞":  { "group": "Tap@Head",       "index": 0 },
+    "难过":  { "group": "FlickDown@Body", "index": 0 },
+    "慌张":  { "group": "Flick@Body",     "index": 0 },
+    "震惊":  { "group": "FlickUp@Head",   "index": 0 }
+  }
+}

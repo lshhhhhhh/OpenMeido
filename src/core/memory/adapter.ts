@@ -195,6 +195,15 @@ export interface MemoryAdapter {
    *  facts, affinity). Returns total rows removed. */
   deletePersona(personaId: string): Promise<number>
 
+  /**
+   * Write a clean snapshot of the database to `destPath`. For sqlite
+   * adapters this uses the native online backup API (VACUUM INTO or
+   * better-sqlite3's .backup) so the destination is a single-file
+   * standalone copy — no WAL state to worry about, openable from
+   * another machine. Used by the "导出记忆备份" Settings button.
+   */
+  exportTo(destPath: string): Promise<void>
+
   /** Release resources. After close, all other methods reject. */
   close(): void
 }

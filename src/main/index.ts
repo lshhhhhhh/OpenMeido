@@ -777,6 +777,35 @@ ipcMain.handle('memory:clear', async () => {
   if (!svc) return 0
   return svc.clearAll()
 })
+ipcMain.handle(
+  'memory:export',
+  async (): Promise<{ ok: true; path: string } | { ok: false; error: string; canceled?: boolean }> => {
+    const adapter = getMemoryAdapter()
+    if (!adapter) return { ok: false, error: '记忆系统未初始化' }
+    // Default filename includes date + version so multiple backups
+    // sort + identify themselves at a glance. ISO date is locale-
+    // neutral; the version helps when restoring across upgrades.
+    const dateStr = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+    const defaultName = `openmeido-memory-${dateStr}-v${app.getVersion()}.sqlite`
+    const result = await dialog.showSaveDialog(mainWindow ?? undefined as never, {
+      title: '导出记忆备份',
+      defaultPath: defaultName,
+      filters: [{ name: 'SQLite Database', extensions: ['sqlite'] }],
+    })
+    if (result.canceled || !result.filePath) {
+      return { ok: false, error: '已取消', canceled: true }
+    }
+    try {
+      await adapter.exportTo(result.filePath)
+      console.log(`[memory] exported to ${result.filePath}`)
+      return { ok: true, path: result.filePath }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn('[memory] export failed:', msg)
+      return { ok: false, error: msg }
+    }
+  },
+)
 ipcMain.handle('memory:deleteSession', async (_event, sessionId: string) => {
   const svc = getMemoryService()
   if (!svc) return 0

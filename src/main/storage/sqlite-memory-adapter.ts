@@ -920,6 +920,22 @@ export function openSqliteMemory(
       return txn()
     },
 
+    async exportTo(destPath) {
+      ensureOpen()
+      // VACUUM INTO produces a clean single-file snapshot — checkpoints
+      // the WAL into the main db, defragments pages, writes to destPath.
+      // The destination file must NOT exist (sqlite errors out if it
+      // does), and the dir must exist (we can't mkdir from here without
+      // pulling fs in). Both checks are the caller's job — the IPC
+      // handler validates the path from the user's save dialog.
+      //
+      // Better-sqlite3 supports `db.backup(destPath)` as an alternative;
+      // VACUUM INTO is preferred because it produces a smaller file
+      // (no free pages) and runs as a single atomic SQL statement.
+      const escaped = destPath.replace(/'/g, "''")
+      db.exec(`VACUUM INTO '${escaped}'`)
+    },
+
     close() {
       if (closed) return
       closed = true

@@ -107,6 +107,15 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
       // configure multiple backends and round-trip between them without
       // re-entering keys.
       const apiKeys = { ...initial.backend.apiKeys, [preset.url]: trimmed }
+      // Auto-pick a Live2D model matching the persona — butler users
+      // shouldn't open the app and see a female character despite
+      // having explicitly picked the male preset. natori_pro_en is the
+      // bundled male model (Live2D Cubism Free Material License,
+      // shipped from v0.1.9). maid stays on hiyori_pro_en. Settings →
+      // Live2D lets users override later (e.g. import a custom model
+      // and use it for whatever persona).
+      const matchingModel =
+        personaPick === 'butler' ? 'natori_pro_en' : 'hiyori_pro_en'
       await onSave({
         ...initial,
         backend: {
@@ -128,6 +137,10 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
           // is the canonical first pick. Settings → 人物 lets users
           // switch to other presets later.
           preset: personaPick,
+        },
+        live2d: {
+          ...initial.live2d,
+          activeModel: matchingModel,
         },
       })
       // Seed personalization facts AFTER config save (which initializes

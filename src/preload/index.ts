@@ -560,6 +560,23 @@ const api = {
         error?: string
       }>
     },
+    /**
+     * Export the entire memory database (episodes + facts + affinity)
+     * to a user-chosen .sqlite file. Main shows a save dialog, then
+     * VACUUM INTOs a clean single-file snapshot at the chosen path.
+     * Useful as a manual backup before `reset:memory` / `reset:all`.
+     * Returns { ok: true, path } on success, { canceled: true } if
+     * the user closed the dialog, { ok: false, error } on disk error.
+     */
+    exportBackup(): Promise<
+      | { ok: true; path: string }
+      | { ok: false; error: string; canceled?: boolean }
+    > {
+      return ipcRenderer.invoke('memory:export') as Promise<
+        | { ok: true; path: string }
+        | { ok: false; error: string; canceled?: boolean }
+      >
+    },
     /** Force a reflection cycle on demand (Settings → 记忆 → "提取事实"). */
     reflectNow(): Promise<number> {
       return ipcRenderer.invoke('memory:reflectNow') as Promise<number>

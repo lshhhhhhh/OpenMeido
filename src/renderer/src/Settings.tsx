@@ -1244,6 +1244,10 @@ export function Settings({ initial, onClose }: SettingsProps) {
               </div>
             </Section>
 
+            <Section title="记忆备份">
+              <MemoryBackup />
+            </Section>
+
             <Section title="⚠️ 危险区">
               <DangerZone />
             </Section>
@@ -2938,15 +2942,24 @@ function UpdateChecker(): React.ReactElement {
 
   useEffect(() => {
     void window.api.app.version().then(setVersion)
-    // Subscribe to "no update found" event — the manual check button's
-    // primary success-path feedback. (The "update found" case is handled
-    // by App.tsx's UpdaterPill which renders globally.)
-    const off = window.api.updater.onNotAvailable(() => {
+    // Two paths resolve the loading button: "no update" gives feedback
+    // inline; "update found" clears the button (UpdaterPill in App.tsx
+    // takes over with the consent banner). Subscribe to both so the
+    // button doesn't hang on "检查中…" when an update IS available.
+    const offNA = window.api.updater.onNotAvailable(() => {
       setChecking(false)
       setFeedback('已是最新版本')
       setTimeout(() => setFeedback(null), 4000)
     })
-    return off
+    const offA = window.api.updater.onAvailable(() => {
+      setChecking(false)
+      setFeedback('发现新版本（已在右下角提示）')
+      setTimeout(() => setFeedback(null), 4000)
+    })
+    return () => {
+      offNA()
+      offA()
+    }
   }, [])
 
   async function check(): Promise<void> {
@@ -3132,6 +3145,85 @@ function EmbedModelPanel(): React.ReactElement {
  * future if abuse becomes a concern — for now, plain confirm matches
  * the rest of the app's destructive-action UX).
  */
+/**
+ * Memory export panel. One-click "save a clean .sqlite snapshot of
+ * the entire memory database (episodes + facts + affinity) to a
+ * user-chosen path". Sits ABOVE 危险区 in the About tab so users
+ * thinking "I'm about to wipe everything, let me backup first"
+ * see this option without scrolling past the destructive buttons.
+ *
+ * The snapshot is taken via SQLite's VACUUM INTO — single file, no
+ * WAL state to worry about. Restore is currently manual (replace
+ * userData/memory.sqlite with the backup file before launching),
+ * documented inline so users have a path back from accidents.
+ */
+function MemoryBackup() {
+  const [busy, setBusy] = useState(false)
+  const [feedback, setFeedback] = useState<
+    | { kind: 'success'; path: string }
+    | { kind: 'error'; error: string }
+    | null
+  >(null)
+
+  async function doExport(): Promise<void> {
+    if (busy) return
+    setBusy(true)
+    setFeedback(null)
+    try {
+      const result = await window.api.memory.exportBackup()
+      if (result.ok) {
+        setFeedback({ kind: 'success', path: result.path })
+      } else if (!result.canceled) {
+        setFeedback({ kind: 'error', error: result.error })
+      }
+    } catch (err) {
+      setFeedback({
+        kind: 'error',
+        error: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <div style={{ fontSize: 12, color: '#bbb', marginBottom: 10, lineHeight: 1.6 }}>
+        把整个记忆（对话历史 + 提炼的事实 + 好感度）打成一个 <code>.sqlite</code>{' '}
+        文件存到你选的位置。
+        <br />
+        想恢复的时候，把那个文件覆盖回 <code>%APPDATA%/openmeido/memory.sqlite</code>{' '}
+        然后重启 app 即可。
+      </div>
+      <button
+        onClick={() => void doExport()}
+        disabled={busy}
+        style={{
+          ...btnStyle('subtle'),
+          fontSize: 12,
+          padding: '6px 14px',
+          background: 'rgba(120, 200, 140, 0.12)',
+          border: '1px solid rgba(120, 200, 140, 0.4)',
+          color: '#aedbb0',
+          cursor: busy ? 'wait' : 'pointer',
+        }}
+      >
+        {busy ? '导出中…' : '导出记忆备份'}
+      </button>
+      {feedback?.kind === 'success' && (
+        <div style={{ fontSize: 11, color: '#8ec98e', marginTop: 8, wordBreak: 'break-all' }}>
+          ✓ 已导出到：<code>{feedback.path}</code>
+        </div>
+      )}
+      {feedback?.kind === 'error' && (
+        <div style={{ fontSize: 11, color: '#f99', marginTop: 8 }}>
+          导出失败：{feedback.error}
+        </div>
+      )}
+    </>
+  )
+}
+
 function DangerZone() {
   const [open, setOpen] = useState(false)
   async function resetConfig(): Promise<void> {

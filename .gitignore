@@ -47,3 +47,14 @@ models/
 # Claude Code workspace metadata + local release-notes scratch.
 .claude/
 dist-build/
+
+# Multi-version local builds used for E2E testing the auto-updater
+# (install old version locally, release new version, watch update
+# flow). Each subfolder is a full installer (~400 MB) — not source
+# code, never committed.
+dist-test/
+
+# Raw Live2D source zips kept at repo root for re-extraction. The
+# unpacked runtime/ + sidecar that ships goes in src/renderer/public/
+# live2d-models/<name>/ and IS tracked.
+/*.zip
