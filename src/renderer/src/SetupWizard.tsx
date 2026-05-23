@@ -116,10 +116,17 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
         position: 'fixed',
         inset: 0,
         zIndex: 2000,
-        // Slightly stronger backdrop than Settings — this is the gate before
-        // anything else works, we want to clearly block interaction with the
-        // chat below.
-        background: 'rgba(0,0,0,0.65)',
+        // Translucent backdrop on purpose — the Live2D model behind the
+        // wizard is visible (blurred + softly dimmed) so the user feels
+        // her presence while configuring AI. The cold-start greeting +
+        // TTS also fire during this window, so the user HEARS her too.
+        // Previously this was rgba(0,0,0,0.65) which fully obscured the
+        // model and turned the first 30 seconds of the app into a dark
+        // form — making first impression "is this thing alive?" instead
+        // of "oh she's already here".
+        background: 'rgba(0,0,0,0.35)',
+        backdropFilter: 'blur(6px)',
+        WebkitBackdropFilter: 'blur(6px)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
