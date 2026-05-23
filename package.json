@@ -1,6 +1,6 @@
 {
   "name": "openmeido",
-  "version": "0.0.39",
+  "version": "0.1.0",
   "description": "Productivity assistant + Live2D companion for non-programmers",
   "author": "lsh <laishaoheng1996@gmail.com>",
   "main": "./out/main/index.js",
@@ -56,6 +56,8 @@
     "test:proactive-migration": "node tools/smoke-proactive-migration.mjs",
     "test:proactive-engine": "node tools/smoke-proactive-engine.mjs",
     "test:mute-feedback": "node tools/smoke-mute-feedback.mjs",
+    "test:onboarding-peek": "node tools/smoke-onboarding-peek.mjs",
+    "test:celebrations": "node tools/smoke-celebrations.mjs",
     "test:lines-host": "node tools/smoke-lines-host.mjs",
     "test:all": "node tools/run-all-tests.mjs",
     "test:fake-mail-agent": "node --env-file=.env --import tsx tools/smoke-fake-mail-agent.mjs",

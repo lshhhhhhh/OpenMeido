@@ -238,6 +238,26 @@ const api = {
         ipcRenderer.off('affinity:changed', handler)
       }
     },
+    /**
+     * Subscribe to the +5 onboarding-milestone celebration broadcast.
+     * Fires once per kind per install when the user crosses a setup
+     * milestone (first API key, first advanced TTS). Renderer overlays
+     * a center-screen golden "+5 好感度" — separate from the small chip
+     * popup that affinity:changed drives. The maid's celebration line
+     * arrives separately via the proactive:remark channel.
+     */
+    onCelebration(
+      cb: (info: { kind: 'ai' | 'tts'; amount: number; reason: string }) => void,
+    ): () => void {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        info: { kind: 'ai' | 'tts'; amount: number; reason: string },
+      ): void => cb(info)
+      ipcRenderer.on('affinity:celebration', handler)
+      return () => {
+        ipcRenderer.off('affinity:celebration', handler)
+      }
+    },
     /** Subscribe to persona-switch events (config change). The sidebar
      *  uses this to re-fetch the affinity for the new active persona. */
     onPersonaSwitched(cb: (info: { personaId: string }) => void): () => void {

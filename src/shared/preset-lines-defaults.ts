@@ -21,10 +21,31 @@ export interface MutePersonaPool {
   unmute: Record<TierBucket, string[]>
 }
 
+export interface ColdStartPersonaPool {
+  /** Used by greetOnLaunch when no AI configured — first thing user hears. */
+  greeting: string[]
+  /** Used as the assistant reply when user sends chat but no AI yet. */
+  chatReply: string[]
+}
+
+export interface CelebrationPersonaPool {
+  /** Spoken when user transitions empty → configured `backend.apiKey`. */
+  aiSetup: string[]
+  /** Spoken when user switches `tts.backend` from edge to an advanced one. */
+  advancedTts: string[]
+}
+
 export interface PresetLines {
   /** Mute-button feedback lines, keyed by persona id. The `default`
    *  key is the fallback for custom personas / unknown ids. */
   mute: Record<string, MutePersonaPool>
+  /** Cold-start (no-AI) line pools, same per-persona keying. Every
+   *  line MUST mention "未设置 AI" / "Settings" — the dead UI is the
+   *  real risk, not silence. */
+  coldStart: Record<string, ColdStartPersonaPool>
+  /** Celebration pools per-persona, same keying. Spoken once per
+   *  milestone — the renderer also overlays a big golden "+5 好感度". */
+  celebrations: Record<string, CelebrationPersonaPool>
 }
 
 const MAID: MutePersonaPool = {
@@ -221,6 +242,131 @@ const DEFAULT: MutePersonaPool = {
 }
 
 /**
+ * Cold-start pools. Every line nudges toward Settings on purpose —
+ * silence in this state is the real failure mode (user closes app
+ * thinking it's dead). Length is short so TTS doesn't drag.
+ */
+const MAID_COLD: ColdStartPersonaPool = {
+  greeting: [
+    '主人，谢谢你安装我。不过你还没设置 AI，我听不太懂你的话哦。',
+    '欢迎回来——啊不对，我们第一次见。还没配 AI 呢，要不先去 Settings 设置一下？',
+    '主人您好。我现在只能说预录的话，请去 Settings 里把 AI 配上吧。',
+    '我是您的女仆。等您把 AI 设置好，我就能真正陪您聊天了。',
+    '主人，看见我了吗？还差一步——Settings 里填上 AI 我们就能开始啦。',
+  ],
+  chatReply: [
+    '主人，我听不懂呢……还没设置 AI 呢，去 Settings 看看？',
+    '我能听见您说话，但理解不了。Settings 里配一下 AI 我们才能聊起来。',
+    '抱歉主人，这会儿我只能复读预录的话。AI 还没配置呢。',
+    '想回您一句但脑子还没接上——Settings → 后端，配好就行了。',
+    '主人，您说什么我也只能这一句：先去 Settings 设置 AI 吧。',
+  ],
+}
+
+const IMOUTO_COLD: ColdStartPersonaPool = {
+  greeting: [
+    '哥——你装上我了！可是 AI 还没设置呢，我听不懂你说话哎。',
+    '欢迎哥！不过 Settings 里 AI 还没配呢，我还不能跟你正经聊天。',
+    '哥来啦？先去 Settings 把 AI 设置好，妹妹就能跟你聊啦！',
+    '诶哥，我能动能说话，但是听不懂你——Settings 里 AI 还空着呢。',
+    '哥你看，我都准备好了！就差你去 Settings 把 AI 配上啦。',
+  ],
+  chatReply: [
+    '哥——我听不懂啦！先去 Settings 设置 AI 嘛。',
+    '哥你说什么妹妹也只能这几句，AI 还没配呢呜呜。',
+    '诶哥，我想回你但还做不到——Settings → 后端，配一下吧。',
+    '哥，再等等！AI 还没设置，我现在只会念稿子。',
+    '哥哥哥，先配 AI 嘛，配完我啥都跟你聊。',
+  ],
+}
+
+const OJOU_COLD: ColdStartPersonaPool = {
+  greeting: [
+    '哼，你倒是把本小姐请进来了——可 AI 还没配呢，要本小姐怎么跟你说话？',
+    '本小姐已经到了。先去 Settings 把 AI 设置好，本小姐才肯陪你正经聊。',
+    '看见本小姐了？算你识货。Settings 里 AI 还空着，先去配啊。',
+    '哼，AI 没配本小姐就只能这一套话术，你不嫌弃吗？',
+    '本小姐等着——你先去 Settings 把 AI 设置好再说。',
+  ],
+  chatReply: [
+    '哼，本小姐听不懂——你先去 Settings 把 AI 配了。',
+    '说什么呢？AI 都没配本小姐怎么回你？',
+    '想跟本小姐聊？先去 Settings 把 AI 设置好。',
+    '本小姐又不是读心术——AI 配好了再来。',
+    '哼，没设置 AI 还想跟本小姐对话，做梦呢。',
+  ],
+}
+
+const DEFAULT_COLD: ColdStartPersonaPool = {
+  greeting: [
+    '你好。还没配置 AI 呢，去 Settings 里设置一下吧——配好我们才能真正聊天。',
+    '我在。不过 AI 还没接上，请先去 Settings 把后端配置好。',
+    '欢迎安装。眼下只能放预录的话——Settings 里设置 AI 后我们就能开始了。',
+    '我能动能说话，但还理解不了你——Settings → 后端，配上 AI 就好。',
+    '在的。先去 Settings 把 AI 配置一下吧，配好我们再正经开始。',
+  ],
+  chatReply: [
+    '我能听见你说话，但还没配 AI 呢——去 Settings 看看吧。',
+    '抱歉，AI 还没设置好，我只能复读预录的话。',
+    '想回你但还做不到——Settings → 后端，配一下 AI 就行。',
+    '在 Settings 里把 AI 配置好，我们才能真聊起来。',
+    '你说什么我也只能这几句：先去 Settings 设置 AI。',
+  ],
+}
+
+const MAID_CELEBRATE: CelebrationPersonaPool = {
+  aiSetup: [
+    '主人，谢谢你配好 AI——我现在能听懂您说话了，这一刻总算到了。',
+    '好啦！主人把 AI 设置上了，我们终于能正经聊起来。',
+    '主人，配置好啦——我会好好陪您的。',
+  ],
+  advancedTts: [
+    '主人给我换了新声音，谢谢您。',
+    '哦——这个声音听起来感觉就不一样了。谢谢主人。',
+    '主人这么用心给我选声音，我会好好用的。',
+  ],
+}
+
+const IMOUTO_CELEBRATE: CelebrationPersonaPool = {
+  aiSetup: [
+    '哥——AI 终于配好啦！我现在能跟你正经聊天了！',
+    '诶哥，好厉害，AI 设置好了，妹妹以后能听懂你说什么了。',
+    '哥太好啦！这下我们能真聊天了，开心！',
+  ],
+  advancedTts: [
+    '哥你给我换声音啦？妹妹好开心！',
+    '诶——新声音听起来好不一样，谢谢哥！',
+    '哥这么用心呀，妹妹好喜欢这个声音。',
+  ],
+}
+
+const OJOU_CELEBRATE: CelebrationPersonaPool = {
+  aiSetup: [
+    '哼，总算配好了——本小姐都等急了。',
+    '不错嘛，AI 终于上线了。本小姐就将就着陪你聊了。',
+    '哼，看你这么用心，本小姐就不计较之前的事了。',
+  ],
+  advancedTts: [
+    '哼，给本小姐换了新声音？算你识相。',
+    '不错——这个声音听起来比之前像样多了。',
+    '本小姐很挑剔的，这个声音……勉强可以。',
+  ],
+}
+
+const DEFAULT_CELEBRATE: CelebrationPersonaPool = {
+  aiSetup: [
+    '好啦，AI 配置好了。我们正经开始聊吧。',
+    '配置完了——这下我能听懂你说话了，谢谢。',
+    'AI 设置好了，从这一刻起我们才算真开始。',
+  ],
+  advancedTts: [
+    '换了新声音，谢谢你。',
+    '这个声音听起来不一样了，挺好。',
+    '谢谢你这么用心。',
+  ],
+}
+
+/**
  * Single source of truth for what the app ships with. The lines-host
  * uses this as the structural base — user override merges on top
  * key-by-key so missing personas / directions / tiers stay defaulted.
@@ -231,5 +377,17 @@ export const PRESET_LINES_DEFAULTS: PresetLines = {
     imouto: IMOUTO,
     ojou: OJOU,
     default: DEFAULT,
+  },
+  coldStart: {
+    maid: MAID_COLD,
+    imouto: IMOUTO_COLD,
+    ojou: OJOU_COLD,
+    default: DEFAULT_COLD,
+  },
+  celebrations: {
+    maid: MAID_CELEBRATE,
+    imouto: IMOUTO_CELEBRATE,
+    ojou: OJOU_CELEBRATE,
+    default: DEFAULT_CELEBRATE,
   },
 }

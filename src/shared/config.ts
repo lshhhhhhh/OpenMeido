@@ -687,7 +687,76 @@ export const configSchema = z.object({
        */
       fontFamily: z
         .enum(['system', 'xiaolai', 'lxgw-wenkai', 'smiley-sans'])
-        .default('system'),
+        // 'xiaolai' is the only bundled font that ships in the installer
+        // (LXGW + Smiley are on-demand downloads via meido-font://).
+        // Defaulting to it means fresh installs immediately read with the
+        // soft-edged 小赖字体 instead of whatever system fallback the OS
+        // chooses — much more "desktop companion" than Segoe UI.
+        .default('xiaolai'),
+    })
+    .default({}),
+  /**
+   * Day-1 onboarding state — booleans that flip permanently on the first
+   * time a specific onboarding event has fired. Once flipped, the matching
+   * UX never replays. Survives reset ONLY through `reset:all` (because that
+   * wipes the config); `reset:memory` keeps these flags so a user who only
+   * clears chat history doesn't get re-onboarded.
+   */
+  onboarding: z
+    .object({
+      /**
+       * Set true after the first post-greeting screen-peek remark has
+       * successfully fired (LLM returned a non-empty observation that was
+       * broadcast to the chat panel). The peek is the "she's actually
+       * looking at what I'm doing" moment that distinguishes us from a
+       * generic chat UI — but it's a one-shot impression, so we never
+       * replay it for the same install. Scheduled by greeting-host once
+       * `greetOnLaunch()` finishes; fires 30–60s later in proactive-host.
+       *
+       * Skipped silently when proactive.includeScreen=false (user opted
+       * out of screen capture entirely) or proactive.mode='mute' (user
+       * doesn't want unsolicited remarks at all). In those cases the
+       * flag stays false — but we still don't re-attempt, because the
+       * Settings choice is the signal that the user doesn't want this
+       * experience.
+       */
+      firstScreenPeekFired: z.boolean().default(false),
+      /**
+       * Set true the first time `backend.apiKey` transitions empty →
+       * non-empty (or a corresponding env var becomes available). Fires
+       * a +5 affinity celebration with a special golden overlay and a
+       * persona-specific "thank you" line. The flag prevents replay if
+       * the user later rotates their API key or temporarily clears it.
+       */
+      aiSetupCelebrated: z.boolean().default(false),
+      /**
+       * Set true the first time `tts.backend` switches from the default
+       * 'edge' to one of the advanced backends (sovits / minimax /
+       * volcengine) AND that backend has its required fields filled in.
+       * Fires the same +5 celebration UX — investing time in voice
+       * quality is the second "this user is leaning in" milestone we
+       * want to reward.
+       */
+      advancedTtsCelebrated: z.boolean().default(false),
+      /**
+       * Set true after the user closes the first-run setup wizard (either
+       * by Save or Skip). Open condition is the inverse: wizard is shown
+       * on launch iff this is false.
+       *
+       * Why a flag instead of "is backend configured?": shipping with a
+       * dev .env means the env-var fallback in resolveBackendKey would
+       * silently make the app look configured even on a fresh install,
+       * suppressing the wizard. Worse, after a `reset:all` the config
+       * is wiped but .env still bleeds through — exactly the regression
+       * we saw post-v0.0.39 reset. A persisted flag is unambiguous:
+       * cleared by reset, set by user action.
+       *
+       * Existing-user migration is in main/config.ts boot: if the flag
+       * is false but the raw config (NOT env-var) has an apiKey, we
+       * infer "wizard was effectively completed in a prior version"
+       * and flip the flag to true so the upgrade is silent.
+       */
+      wizardCompleted: z.boolean().default(false),
     })
     .default({}),
 })

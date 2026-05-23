@@ -34,6 +34,8 @@ const STEPS = [
   { label: 'proactive-engine',         cmd: 'npm', args: ['run', 'test:proactive-engine'] },
   { label: 'mute-feedback',            cmd: 'npm', args: ['run', 'test:mute-feedback'] },
   { label: 'lines-host',               cmd: 'npm', args: ['run', 'test:lines-host'] },
+  { label: 'onboarding-peek',          cmd: 'npm', args: ['run', 'test:onboarding-peek'] },
+  { label: 'celebrations',             cmd: 'npm', args: ['run', 'test:celebrations'] },
   { label: 'openai-compat-body',       cmd: 'npm', args: ['run', 'test:openai-compat-body'] },
   { label: 'mime-snippet',             cmd: 'npm', args: ['run', 'test:mime-snippet'] },
   { label: 'reflection-parse',         cmd: 'npm', args: ['run', 'test:reflection-parse'] },

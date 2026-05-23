@@ -43,8 +43,14 @@ function mergeOnDefaults(override: unknown): PresetLines {
   const o = override as Partial<PresetLines>
   const muteOverride = o?.mute ?? {}
   const muteDefaults = PRESET_LINES_DEFAULTS.mute
+  const coldOverride = o?.coldStart ?? {}
+  const coldDefaults = PRESET_LINES_DEFAULTS.coldStart
+  const celebrateOverride = o?.celebrations ?? {}
+  const celebrateDefaults = PRESET_LINES_DEFAULTS.celebrations
   const merged: PresetLines = {
     mute: { ...muteDefaults },
+    coldStart: { ...coldDefaults },
+    celebrations: { ...celebrateDefaults },
   }
   for (const personaId of Object.keys({ ...muteDefaults, ...muteOverride })) {
     const def = muteDefaults[personaId]
@@ -68,6 +74,38 @@ function mergeOnDefaults(override: unknown): PresetLines {
         mid: ov.unmute?.mid && ov.unmute.mid.length > 0 ? ov.unmute.mid : base.unmute.mid,
         high: ov.unmute?.high && ov.unmute.high.length > 0 ? ov.unmute.high : base.unmute.high,
       },
+    }
+  }
+  for (const personaId of Object.keys({ ...coldDefaults, ...coldOverride })) {
+    const def = coldDefaults[personaId]
+    const ov = coldOverride[personaId]
+    if (!ov) {
+      if (def) merged.coldStart[personaId] = def
+      continue
+    }
+    const base = def ?? coldDefaults.default!
+    merged.coldStart[personaId] = {
+      greeting:
+        ov.greeting && ov.greeting.length > 0 ? ov.greeting : base.greeting,
+      chatReply:
+        ov.chatReply && ov.chatReply.length > 0 ? ov.chatReply : base.chatReply,
+    }
+  }
+  for (const personaId of Object.keys({ ...celebrateDefaults, ...celebrateOverride })) {
+    const def = celebrateDefaults[personaId]
+    const ov = celebrateOverride[personaId]
+    if (!ov) {
+      if (def) merged.celebrations[personaId] = def
+      continue
+    }
+    const base = def ?? celebrateDefaults.default!
+    merged.celebrations[personaId] = {
+      aiSetup:
+        ov.aiSetup && ov.aiSetup.length > 0 ? ov.aiSetup : base.aiSetup,
+      advancedTts:
+        ov.advancedTts && ov.advancedTts.length > 0
+          ? ov.advancedTts
+          : base.advancedTts,
     }
   }
   return merged
@@ -105,6 +143,40 @@ export async function initLines(): Promise<void> {
 /** Sync accessor — what the IPC handler hands back to renderer. */
 export function getLines(): PresetLines {
   return cached
+}
+
+/**
+ * Random pick from the cold-start pool for a persona. Falls back through
+ * persona → 'default' → a literal "please set up AI" string so callers
+ * never need to defend against an empty array. Use this from greeting-
+ * host and chat-host instead of poking into getLines() directly.
+ */
+export function pickColdStartLine(
+  personaId: string,
+  kind: 'greeting' | 'chatReply',
+): string {
+  const cs = cached.coldStart
+  const pool = cs[personaId]?.[kind] ?? cs.default?.[kind] ?? []
+  if (pool.length === 0) {
+    return '请先在 Settings 里设置 AI。'
+  }
+  return pool[Math.floor(Math.random() * pool.length)]!
+}
+
+/**
+ * Random pick from the celebration pool — same fallthrough rules as
+ * pickColdStartLine. Used by the +5 celebration broadcast.
+ */
+export function pickCelebrationLine(
+  personaId: string,
+  kind: 'aiSetup' | 'advancedTts',
+): string {
+  const cb = cached.celebrations
+  const pool = cb[personaId]?.[kind] ?? cb.default?.[kind] ?? []
+  if (pool.length === 0) {
+    return '配置完成了，谢谢。'
+  }
+  return pool[Math.floor(Math.random() * pool.length)]!
 }
 
 /**

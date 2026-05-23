@@ -23,8 +23,9 @@ import {
   resolveTemperature,
 } from '../../shared/lightweight-models.js'
 import { buildTierPromptBlock } from '../../shared/affinity.js'
-import { getConfig, resolveApiKey } from '../config.js'
+import { getConfig, resolveApiKey, isAiConfigured } from '../config.js'
 import { getMemoryService } from '../memory-host.js'
+import { pickColdStartLine } from '../lines-host.js'
 import { createTextDeltaFilter } from '../chat-text-filter.js'
 import { classifyAndApply } from '../emotion-classifier.js'
 import { transformOpenAIBody, needsBodyTransform } from '../openai-compat-body.js'
@@ -85,14 +86,43 @@ export async function runChat(
 
   try {
     const cfg = getConfig()
-    const apiKey = resolveApiKey(cfg)
-    if (!apiKey) {
-      localEmit({
-        type: 'error',
-        error: 'No API key set. Open settings (gear icon) and paste your key.',
-      })
+    // Cold-start gate consults isAiConfigured which checks RAW config
+    // (no env-var fallback) — otherwise a developer .env containing
+    // OPENAI_API_KEY would let resolveApiKey() return a key even after
+    // the user clears Settings, the gate would fall through, and the
+    // real LLM would run with whatever default baseUrl the reset left
+    // behind. That mismatch produced the "AI echoes my message" bug
+    // (model rejected request, fallback echoed input). The raw-config
+    // check makes the cold-start UX work uniformly across dev and prod.
+    if (!isAiConfigured(cfg)) {
+      // Cold-start demo mode — no AI configured. Reply with a hardcoded
+      // line from the persona pool so the user gets visible + audible
+      // feedback (TTS picks this up just like a normal reply) and a
+      // consistent nudge toward Settings. Each line in the pool already
+      // says "去 Settings 设置 AI" so we don't tack it on here.
+      const line = pickColdStartLine(cfg.persona.preset, 'chatReply')
+      const memory = getMemoryService()
+      if (memory) {
+        void memory.addEpisode('user', userText)
+        void memory.addEpisode('assistant', line)
+      }
+      // Emit as a single text delta + done so the chat panel renders the
+      // bubble and TTS plays exactly like a real reply. The user shouldn't
+      // be able to tell from the UX that we short-circuited; they should
+      // just notice "every reply is the same kind of nudge, must be a
+      // mode I can fix by configuring AI".
+      localEmit({ type: 'text', delta: line })
+      localEmit({ type: 'done' })
+      console.log(`[chat] cold-start reply (no API key in config) — "${line}"`)
       return
     }
+    // Past the cold-start gate — the user has explicitly set apiKey, so
+    // resolveApiKey (which DOES include env fallback) is what we feed
+    // the real LLM. They'll match in 99% of cases; the edge is "user
+    // set apiKey to empty string but env has one" which we treat as
+    // cold-start above, so by this line we know cfg.backend.apiKey is
+    // non-empty.
+    const apiKey = resolveApiKey(cfg)
 
     const memory = getMemoryService()
 

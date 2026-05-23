@@ -690,6 +690,94 @@ export function buildQuickScreenReactPrompt(args: {
 }
 
 /**
+ * Day-1 onboarding screen-peek prompt — fires ONCE per install, 30–60s
+ * after the very first greeting. The user just installed the app and saw
+ * a polite first-meeting hello; this is the second utterance — the
+ * moment we prove "she's actually looking at what you're doing", not
+ * just a chat window.
+ *
+ * Different from buildProactiveRemarkPrompt because:
+ *   - Forced fire, no should_speak gate
+ *   - First-impression framing — she's never spoken proactively before
+ *   - Explicit instruction to anchor on ONE concrete screen detail
+ *
+ * Different from buildQuickScreenReactPrompt because:
+ *   - User didn't request a screen-react; SHE initiated it
+ *   - Inaugural moment — slightly more deliberate / observational tone
+ *
+ * Output shape matches the proactive parser (should_speak + comment +
+ * noted) so we can reuse parseDecision in proactive-host.ts. Setting
+ * should_speak=false is allowed if EVERYTHING on screen is sensitive
+ * (then the timeout fires no remark and the onboarding flag stays
+ * false → we retry next launch).
+ */
+export function buildOnboardingScreenPeekPrompt(args: {
+  persona: { name: string; systemPrompt: string }
+  tierBlock: string
+  now: string
+  userName?: string | null
+  /** Filled by main when proactive.includeScreen=true AND capture succeeded.
+   *  When false, the prompt steers toward a text-only "first moment after
+   *  introduction" line instead of a screen-anchored one. */
+  hasScreenshot: boolean
+}): string {
+  const nameLine = args.userName
+    ? `已知用户的名字是「${args.userName}」。可以自然带入。\n`
+    : ''
+  const screenBlock = args.hasScreenshot
+    ? `屏幕截图附在后面，你能看见用户**此刻屏幕上的具体内容**。\n` +
+      buildScreenReactionRules(false) +
+      `\n`
+    : `这次没有屏幕——只是想在第一次见面后过 30 秒，自然地再说一句，让用户知道你不是装好就睡着了。\n` +
+      `- 不要重复刚才打招呼的内容\n` +
+      `- 别再用"今天起就由我陪您"这种**重新介绍自己**的话\n` +
+      `- 可以问一句开放的小问题（"现在在忙什么？" / "有想先让我帮忙整理的吗？"）\n` +
+      `- 1 句话，自然，不**主人**化（这是第二句话，关系还没到那一步）\n`
+  return (
+    args.persona.systemPrompt +
+    '\n\n' +
+    args.tierBlock +
+    '\n\n' +
+    `# 此刻——Day 1 第二次开口\n` +
+    `用户刚装好应用 30~60 秒。你已经说过开场白（"您好，今天起就由我陪您"那种克制的初次见面 hello）。\n` +
+    `现在你想自然地再开口一次——**让用户第一次觉得"咦她真的能感知到我"**。这是这次安装中你能拿到的最大第一印象瞬间。\n` +
+    `当前时间：${args.now}。\n` +
+    nameLine +
+    `\n` +
+    screenBlock +
+    `\n` +
+    `# 输出（**只输出 JSON**）\n` +
+    `结构：\n` +
+    `{\n` +
+    `  "should_speak": true,\n` +
+    `  "reason": "<给你自己的 1 句注释，不会展示>",\n` +
+    `  "comment": "<用户能听见的那一句>",\n` +
+    `  "noted": ["<具体观察 1>", "<具体观察 2>", ...]\n` +
+    `}\n` +
+    `\n` +
+    `## comment 的规则\n` +
+    `- **1 句**话——这是震慑性的第一感知，多了反而稀释\n` +
+    `- 必须**锚定屏幕上一个具体细节**（有屏幕时）或一个**关于此刻的具体观察**（无屏幕时）\n` +
+    `- 持平静观察的语气，不夸张、不演戏、不主动套近乎\n` +
+    `- **不要用"主人 / 哥 / 本小姐"这类称呼**——这是第 2 句话，关系还没到\n` +
+    `- 隐私敏感画面：should_speak=false，comment=""（onboarding flag 不会翻，下次启动还有机会）\n` +
+    `\n` +
+    `## noted 的规则（私下笔记，用户看不到）\n` +
+    `- 3-6 条名词性短语\n` +
+    `- 仅在有屏幕时填写；无屏幕时留空数组\n` +
+    `\n` +
+    `## 示例\n` +
+    `用户在 VS Code 写 TypeScript，旁边浏览器开着 Stack Overflow：\n` +
+    `{\n` +
+    `  "should_speak": true,\n` +
+    `  "reason": "锚 SO 标签——比 VS Code 更具体",\n` +
+    `  "comment": "Stack Overflow 翻了几次了……卡哪一段了？",\n` +
+    `  "noted": ["VS Code", "TypeScript", "Stack Overflow", "白天"]\n` +
+    `}\n`
+  )
+}
+
+/**
  * Shared "what to do when there's a screenshot" rule block. Used by
  * BOTH the user-triggered quick-screen-react path AND the timer-
  * triggered proactive-with-screen path. Keeps the two paths producing

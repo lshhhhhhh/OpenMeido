@@ -302,39 +302,47 @@ function broadcastAffinityChanged(
   }
 }
 
+/**
+ * Parse `--affinity=N` from process.argv. Returns the integer in [0,100]
+ * or null when absent / malformed.
+ *
+ * Why a CLI flag and not env var: env vars (esp. ones in .env) silently
+ * persist across runs, and there's no in-app way to know one is overriding
+ * your affinity. A flag is explicit — if it's not on the command line, no
+ * override happens. After a reset → restart cycle the user wants to see
+ * the seeded baseline (5), and they get exactly that unless they retype
+ * the flag.
+ */
+function parseAffinityFlag(): number | null {
+  for (const a of process.argv) {
+    const m = /^--affinity=(\d+(?:\.\d+)?)$/.exec(a)
+    if (!m) continue
+    const n = Number(m[1])
+    if (!Number.isFinite(n) || n < 0 || n > 100) {
+      console.warn(`[affinity] --affinity="${m[1]}" not in [0,100], ignored`)
+      return null
+    }
+    return n
+  }
+  return null
+}
+
 /** Initial wiring: seed cache for the active persona and start the decay timer. */
 export function initAffinity(activePersona: string): void {
-  // If the user just clicked any reset button, they want to test
-  // post-reset behavior — the DEV_AFFINITY env-var pin would override
-  // that and defeat the test. Suppress for this one session; next
-  // normal startup (no --reset-* in argv) honors the env var again.
-  const justReset = process.argv.some((a) =>
-    a === '--reset-all' || a === '--reset-config' || a === '--reset-memory',
-  )
+  const affinityFlag = parseAffinityFlag()
   console.log(
-    `[affinity] initAffinity for "${activePersona}" · justReset=${justReset} · ` +
-      `OPENMEIDO_DEV_AFFINITY=${process.env.OPENMEIDO_DEV_AFFINITY ?? '(unset)'}`,
+    `[affinity] initAffinity for "${activePersona}" · --affinity=${affinityFlag ?? '(unset)'}`,
   )
   void seedInitialIfFresh(activePersona)
     .then(() => refreshCachedScore(activePersona))
     .then(() => {
-      if (justReset) {
-        console.log('[affinity] post-reset session — skipping OPENMEIDO_DEV_AFFINITY override')
-        return
-      }
-      // Dev convenience: OPENMEIDO_DEV_AFFINITY=N at boot overrides the
-      // active persona's score so we can preview Lv.1 / Lv.5 prompt
-      // behavior without grinding chat. Silently ignored when unset,
-      // out of range, or unparseable.
-      const raw = process.env.OPENMEIDO_DEV_AFFINITY
-      if (!raw) return
-      const n = Number(raw)
-      if (!Number.isFinite(n) || n < 0 || n > 100) {
-        console.warn(`[affinity] OPENMEIDO_DEV_AFFINITY="${raw}" not in [0,100], ignored`)
-        return
-      }
-      void setAffinityForTest(activePersona, n, `dev override (OPENMEIDO_DEV_AFFINITY=${n})`)
-        .then(() => console.log(`[affinity] dev override applied: ${activePersona} → ${n}`))
+      if (affinityFlag === null) return
+      // Dev convenience: `--affinity=N` at boot overrides the active persona's
+      // score so we can preview Lv.1 / Lv.5 prompt behavior without grinding
+      // chat. Use: `npm run dev -- --affinity=85` or pass directly to the
+      // packaged exe.
+      void setAffinityForTest(activePersona, affinityFlag, `dev override (--affinity=${affinityFlag})`)
+        .then(() => console.log(`[affinity] dev override applied: ${activePersona} → ${affinityFlag}`))
         .catch((err) => console.warn('[affinity] dev override failed:', err))
     })
   void applyDecayPass()
@@ -372,7 +380,7 @@ async function seedInitialIfFresh(personaId: string): Promise<void> {
  * broadcasts affinity:changed so the UI chip refreshes immediately.
  *
  * Used by:
- *   - OPENMEIDO_DEV_AFFINITY env var at boot (above)
+ *   - `--affinity=N` CLI flag at boot (above)
  *   - `affinity:setForTest` IPC for runtime DevTools toggles
  *   - Future "reset relationship" Settings button if we add one
  *
@@ -393,6 +401,36 @@ export async function setAffinityForTest(
   await adapter.setAffinity(personaId, clamped, reason)
   getOrInit(personaId).cachedScore = clamped
   broadcastAffinityChanged(personaId, clamped, reason)
+}
+
+/**
+ * Award a celebration bump — bypasses every guardrail (daily cap,
+ * per-turn clamp, diminishing curve) because the bump is a deliberate
+ * reward for a setup milestone, not an LLM-judged conversation score.
+ * Caller is responsible for ensuring the corresponding onboarding flag
+ * hasn't been triggered already (this function blindly adds).
+ *
+ * Score is clamped to [0,100]; the bump can saturate at 100 silently.
+ * If memory adapter isn't initialized yet (very early boot), logs and
+ * returns 0 — caller should treat that as "celebrate the spoken line
+ * + overlay anyway, just no actual affinity move".
+ */
+export async function bumpAffinityForCelebration(
+  personaId: string,
+  delta: number,
+  reason: string,
+): Promise<number> {
+  const adapter = getMemoryAdapter()
+  if (!adapter) {
+    console.warn('[affinity] celebration bump skipped — adapter not ready')
+    return 0
+  }
+  const current = await adapter.getAffinity(personaId)
+  const next = Math.max(0, Math.min(100, current.score + delta))
+  await adapter.setAffinity(personaId, next, reason)
+  getOrInit(personaId).cachedScore = next
+  broadcastAffinityChanged(personaId, next, reason, delta)
+  return next
 }
 
 /**

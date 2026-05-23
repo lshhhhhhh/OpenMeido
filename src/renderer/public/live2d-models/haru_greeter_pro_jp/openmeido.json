@@ -4,13 +4,13 @@
   "lipSyncParam": "ParamMouthOpenY",
   "emotionMapping": {},
   "motionMapping": {
-    "开心":  { "group": "", "index": 1 },
-    "害羞":  { "group": "", "index": 8 },
-    "无语":  { "group": "", "index": 15 },
-    "难过":  { "group": "", "index": 20 },
-    "慌张":  { "group": "", "index": 23 },
+    "开心":  { "group": "", "index": 4 },
+    "害羞":  { "group": "", "index": 7 },
+    "无语":  { "group": "", "index": 13 },
+    "难过":  { "group": "", "index": 19 },
+    "慌张":  { "group": "", "index": 2 },
     "震惊":  { "group": "", "index": 5 },
-    "尴尬":  { "group": "", "index": 18 },
-    "得意":  { "group": "", "index": 10 }
+    "尴尬":  { "group": "", "index": 11 },
+    "得意":  { "group": "", "index": 12 }
   }
 }

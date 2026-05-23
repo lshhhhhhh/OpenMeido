@@ -14,10 +14,11 @@ import { BrowserWindow } from 'electron'
 
 import { runExtraction } from './chat-host.js'
 import { getMemoryService } from './memory-host.js'
-import { noteAssistantActivity } from './proactive-host.js'
+import { noteAssistantActivity, scheduleOnboardingPeek } from './proactive-host.js'
 import { classifyAndApplyEmotion } from './emotion-classifier.js'
 import { buildTierPromptBlock } from '../shared/affinity.js'
-import { getConfig } from './config.js'
+import { getConfig, isAiConfigured } from './config.js'
+import { pickColdStartLine } from './lines-host.js'
 import { resolvePersona } from '../shared/config.js'
 import { buildGreetingPrompt } from '../shared/daily-prompts.js'
 import { formatLocalNow } from '../shared/time-format.js'
@@ -125,6 +126,38 @@ export async function greetOnLaunch(): Promise<void> {
   // fires when the document is loaded, but React might still be hydrating).
   await new Promise((r) => setTimeout(r, 500))
 
+  // Cold-start path — no AI configured yet. Skip the LLM call entirely and
+  // play a hardcoded persona-specific line via the same proactive:remark
+  // channel so TTS still plays (Edge TTS doesn't need a user API key, so
+  // the demo experience works out of the box). Each line nudges toward
+  // Settings — the dead "nothing happens" state is what closes the app.
+  // Onboarding peek isn't scheduled here either: without an LLM there's
+  // nothing to comment on the screen with.
+  if (!isAiConfigured()) {
+    const cfgCold = getConfig()
+    const line = pickColdStartLine(cfgCold.persona.preset, 'greeting')
+    const memory = getMemoryService()
+    if (memory) {
+      try {
+        await memory.addEpisode('assistant', line)
+      } catch (err) {
+        console.warn('[greeting] cold-start persist failed:', err)
+      }
+    }
+    noteAssistantActivity()
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) {
+        w.webContents.send('proactive:remark', {
+          text: line,
+          ts: new Date().toISOString(),
+          triggers: ['cold-start-greeting'],
+        })
+      }
+    }
+    console.log(`[greeting] cold-start (no AI configured) — "${line}"`)
+    return
+  }
+
   const persona = resolvePersona(getConfig().persona)
   const now = formatLocalNow()
   const memory = getMemoryService()
@@ -140,14 +173,24 @@ export async function greetOnLaunch(): Promise<void> {
   // at affinity 70 feel as cold as day-one.
   const affinity = memory ? await memory.getAffinity().catch(() => null) : null
   const tierBlock = buildTierPromptBlock(affinity?.score ?? 0, persona.name, persona.traits)
-  // First-meeting detection: NO prior assistant/user episodes for this
-  // persona. Earlier this also checked `affinity.lastReason === null`,
-  // but presence-host fires an immediate tick on init that writes a
-  // reason like "她注意到你最近一直在身边" BEFORE the greeting runs,
-  // making lastReason non-null even on a freshly-reset install.
-  // Episode count is the more reliable signal — presence ticks don't
-  // create episodes; only real user/assistant turns do.
-  const firstMeeting = recentExchange.length === 0
+  // First-meeting detection: ANY prior episode = not first meeting.
+  //
+  // Earlier we used `recentExchange.length === 0` here, but getRecent-
+  // Exchange strips trailing assistant-only turns (so the prompt's
+  // "recent history" slot doesn't dwell on past greetings/goodbyes
+  // with no user reply). That strip was correct for the prompt slot
+  // but wrong for first-meeting: if the user opened the app once, saw
+  // the greeting, never typed, and closed — the next launch's recent-
+  // Exchange is empty after the strip, so she'd re-introduce herself
+  // every time. We now consult the raw episode count separately:
+  // anyEpisode (including her own past greetings + silent [obs] notes)
+  // means "we've met before", flipping firstMeeting → false. Reset:
+  // memory / reset:all wipe episodes, restoring first-meeting framing
+  // intentionally.
+  const anyEpisode = memory
+    ? (await memory.listRecent(1).catch(() => [])).length > 0
+    : false
+  const firstMeeting = !anyEpisode
   console.log(
     `[greeting] firstMeeting=${firstMeeting} · ` +
       `recentExchange.length=${recentExchange.length} · ` +
@@ -209,4 +252,12 @@ export async function greetOnLaunch(): Promise<void> {
   // moment of the session (the very first reaction the user sees).
   void classifyAndApplyEmotion(line)
   console.log(`[greeting] ${line}`)
+
+  // Day-1 onboarding moment — once per install, 30-60s after this very
+  // first hello, she peeks at the user's screen and references one
+  // concrete thing she sees. Skipped permanently once it succeeds, or
+  // when the user disabled screen / proactive mode in Settings. Failure
+  // (capture down, LLM error, sensitive content) leaves the flag false
+  // so the next launch can retry.
+  scheduleOnboardingPeek(Date.now())
 }

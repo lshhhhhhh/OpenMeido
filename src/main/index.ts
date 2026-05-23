@@ -1,106 +1,23 @@
+// FIRST IMPORT — runs the reset wipe (if argv / sentinel says to). Must
+// come before any module that reads userData files at import time
+// (config.ts, lines-host.ts, memory adapters, etc.) — otherwise those
+// modules load stale data into in-memory state and a later setConfig()
+// would persist that stale data right back, defeating the reset.
+//
+// ES modules evaluate ALL static imports of a file before that file's
+// own body runs, so the IIFE pattern that used to sit at the top of
+// this file (textually above the imports) was misleading: hoisting
+// meant config.ts had already initialized by the time the IIFE ran.
+// The fix is module-level — make the wipe a side-effect import, and
+// put it first.
+import './reset-handler.js'
+
 import { app, BrowserWindow, ipcMain, protocol, dialog, shell, screen } from 'electron'
 import { join, extname } from 'node:path'
-import {
-  createReadStream,
-  existsSync,
-  rmSync,
-  readdirSync,
-  readFileSync,
-  writeFileSync,
-} from 'node:fs'
+import { createReadStream, writeFileSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
-
-// Reset-flags pass: handle --reset-config / --reset-memory / --reset-all
-// BEFORE any module-init side effects touch userData. The renderer
-// triggers a reset by calling `app.relaunch({ args: [...argv,
-// '--reset-...'] })` then `app.exit(0)`; on the next launch we land
-// here with the flag and wipe the relevant files before electron-store
-// / better-sqlite3 grab any handles. Keeping this at the very top of
-// the entry file (above `import { runChat }` etc.) is intentional —
-// later imports trigger module initialization that may write to
-// userData.
-;(function handleResetFlags(): void {
-  const argv = process.argv
-  // Use app.getPath after app is "ready" — but `app.getPath('userData')`
-  // works pre-ready in newer Electron too. Force it now so the flag
-  // handler runs before any other code expects the dir to exist.
-  const dir = app.getPath('userData')
-  console.log(`[reset] handleResetFlags entry · userData=${dir} · argv=${JSON.stringify(argv)}`)
-
-  // Sentinel file fallback for dev mode. `app.relaunch + app.exit` is
-  // unreliable under electron-vite (the dev server doesn't always
-  // restart the Electron child), so the reset IPC writes a `.pending-reset`
-  // file containing the flag instead. On the next manual `npm run dev`
-  // we pick it up here, treat it as if it were an argv flag, and
-  // delete the sentinel after handling.
-  let sentinelFlag: string | null = null
-  try {
-    const sentinelPath = join(dir, '.pending-reset')
-    if (existsSync(sentinelPath)) {
-      sentinelFlag = String(readFileSync(sentinelPath, 'utf8')).trim()
-      rmSync(sentinelPath, { force: true })
-      console.log(`[reset] sentinel FOUND at ${sentinelPath} · content="${sentinelFlag}" (deleted after read)`)
-      // Surface it on argv so downstream "did we just reset?" checks
-      // (e.g. affinity-host suppressing DEV_AFFINITY) see it.
-      if (sentinelFlag.startsWith('--reset-')) {
-        process.argv.push(sentinelFlag)
-        console.log(`[reset] pushed "${sentinelFlag}" onto process.argv`)
-      }
-    } else {
-      console.log(`[reset] no sentinel at ${sentinelPath}`)
-    }
-  } catch (err) {
-    console.warn('[reset] sentinel read failed:', err)
-  }
-
-  const wipeAll = argv.includes('--reset-all') || sentinelFlag === '--reset-all'
-  const wipeConfig =
-    wipeAll || argv.includes('--reset-config') || sentinelFlag === '--reset-config'
-  const wipeMemory =
-    wipeAll || argv.includes('--reset-memory') || sentinelFlag === '--reset-memory'
-  if (!wipeAll && !wipeConfig && !wipeMemory) {
-    console.log(`[reset] no reset triggers, exiting handler`)
-    return
-  }
-  console.log(`[reset] wiping · all=${wipeAll} config=${wipeConfig} memory=${wipeMemory}`)
-
-  function tryDelete(absPath: string): void {
-    if (!existsSync(absPath)) return
-    try {
-      rmSync(absPath, { recursive: true, force: true })
-      console.log(`[reset] removed ${absPath}`)
-    } catch (err) {
-      console.warn(`[reset] failed to remove ${absPath}:`, err)
-    }
-  }
-
-  if (wipeAll) {
-    // Delete every file inside userData (NOT the dir itself — Electron
-    // wrote config to it during the relaunch hand-off; we can wipe
-    // CONTENTS but not the dir itself reliably mid-process).
-    try {
-      for (const name of readdirSync(dir)) {
-        tryDelete(join(dir, name))
-      }
-      console.log(`[reset] wiped contents of ${dir}`)
-    } catch (err) {
-      console.warn(`[reset] wipe-all readdir failed:`, err)
-    }
-  } else {
-    if (wipeConfig) {
-      tryDelete(join(dir, 'config.json'))
-    }
-    if (wipeMemory) {
-      // Sqlite WAL mode produces -wal / -shm sidecar files. Kill the
-      // trio so the next better-sqlite3 open() creates a truly blank db.
-      tryDelete(join(dir, 'memory.sqlite'))
-      tryDelete(join(dir, 'memory.sqlite-wal'))
-      tryDelete(join(dir, 'memory.sqlite-shm'))
-    }
-  }
-})()
 
 import { runChat } from './chat.js'
 import { getConfig, setConfig, onConfigChange } from './config.js'

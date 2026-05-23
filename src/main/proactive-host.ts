@@ -18,7 +18,7 @@
 
 import { BrowserWindow, powerMonitor } from 'electron'
 
-import { getConfig } from './config.js'
+import { getConfig, setConfig } from './config.js'
 import { runExtraction, runExtractionWithImages } from './chat-host.js'
 import { getMemoryService } from './memory-host.js'
 import { captureAllScreensPng } from './screen-host.js'
@@ -32,8 +32,16 @@ import {
 } from '../shared/proactive-cadence.js'
 import { evaluateTriggers } from '../shared/proactive-triggers.js'
 import { resolvePersona } from '../shared/config.js'
-import { buildProactiveRemarkPrompt } from '../shared/daily-prompts.js'
+import {
+  buildProactiveRemarkPrompt,
+  buildOnboardingScreenPeekPrompt,
+} from '../shared/daily-prompts.js'
 import { formatLocalNow } from '../shared/time-format.js'
+import {
+  shouldScheduleOnboardingPeek,
+  shouldFireOnboardingPeek,
+  pickOnboardingDelayMs,
+} from '../shared/onboarding.js'
 import type { Config } from '../shared/config.js'
 import type { ProactiveDecision, Trigger } from '../core/perception/types.js'
 import type { MemoryService } from '../core/memory/service.js'
@@ -141,7 +149,7 @@ function collectTriggers(cadence: ProactiveCadence): Trigger[] {
 // buildProactiveRemarkPrompt — it consumes persona + now + triggers and
 // keeps the JSON contract identical to what parseDecision below expects.
 
-function parseDecision(
+export function parseDecision(
   raw: string,
 ): (ProactiveDecision & { noted: string[] }) | null {
   let text = raw.trim()
@@ -372,6 +380,148 @@ async function evaluate(): Promise<void> {
   // previous turn (or neutral). Fire-and-forget; classifier owns its
   // own error handling.
   void classifyAndApplyEmotion(decision.comment)
+}
+
+/**
+ * Day-1 onboarding screen-peek. Called by greeting-host once the very
+ * first greeting has broadcast. Fires ONCE per install: arms a 30–60s
+ * timer, then either fires `forceOnboardingPeek()` (if the user has stayed
+ * quiet) or aborts (if they already started chatting, or another remark
+ * already went out).
+ *
+ * Safe to call on every launch — the config flag check makes subsequent
+ * calls cheap no-ops. Cancellable via `cancelOnboardingPeek()` so a
+ * config-change during the window doesn't fire a stale peek into a UI
+ * that may have just been muted.
+ */
+let onboardingTimer: NodeJS.Timeout | null = null
+
+export function scheduleOnboardingPeek(greetingTs: number): void {
+  const cfg = getConfig()
+  const skip = shouldScheduleOnboardingPeek(cfg)
+  if (skip) {
+    console.log(`[onboarding] not scheduling peek: ${skip}`)
+    return
+  }
+  cancelOnboardingPeek()
+  const delayMs = pickOnboardingDelayMs()
+  console.log(`[onboarding] peek armed for ${Math.round(delayMs / 1000)}s from now`)
+  onboardingTimer = setTimeout(() => {
+    onboardingTimer = null
+    const fireSkip = shouldFireOnboardingPeek({
+      greetingTs,
+      lastUserAt,
+      lastAssistantAt,
+    })
+    if (fireSkip) {
+      console.log(`[onboarding] timer fired but skipping: ${fireSkip}`)
+      return
+    }
+    void forceOnboardingPeek()
+  }, delayMs)
+}
+
+export function cancelOnboardingPeek(): void {
+  if (onboardingTimer) {
+    clearTimeout(onboardingTimer)
+    onboardingTimer = null
+  }
+}
+
+/**
+ * Build + capture + LLM-call + broadcast for the onboarding peek.
+ * Mirrors evaluate() but: (a) no gating, (b) onboarding-specific prompt,
+ * (c) flips `onboarding.firstScreenPeekFired` to true on success.
+ *
+ * On any failure (capture down, LLM error, empty/silent decision), the
+ * flag stays false so the next launch can retry. This means a flaky
+ * first launch doesn't permanently kill the moment — but a successful
+ * "should_speak=false" decision (e.g. user is on a sensitive screen)
+ * also keeps the flag false, which is what we want.
+ */
+async function forceOnboardingPeek(): Promise<void> {
+  const cfg = getConfig()
+  // Re-check inside the timeout — config might have changed during the wait
+  // (user opened Settings and toggled mute / screen off).
+  const skip = shouldScheduleOnboardingPeek(cfg)
+  if (skip) {
+    console.log(`[onboarding] late skip after timer: ${skip}`)
+    return
+  }
+  const persona = resolvePersona(cfg.persona)
+  const memory = getMemoryService()
+  const userName = memory ? await memory.getUserName().catch(() => null) : null
+  const affinity = memory ? await memory.getAffinity().catch(() => null) : null
+  const tierBlock = buildTierPromptBlock(affinity?.score ?? 0, persona.name, persona.traits)
+
+  let images: { mimeType: string; bytes: Uint8Array }[] = []
+  try {
+    const pngs = await captureAllScreensPng(cfg.proactive.excludedScreenIds)
+    images = pngs.map((bytes) => ({ mimeType: 'image/png', bytes }))
+  } catch (err) {
+    console.warn('[onboarding] screen capture failed, falling back to text-only:', err)
+  }
+  const prompt = buildOnboardingScreenPeekPrompt({
+    persona,
+    tierBlock,
+    now: formatLocalNow(),
+    userName,
+    hasScreenshot: images.length > 0,
+  })
+
+  let raw: string
+  try {
+    raw =
+      images.length > 0
+        ? await runExtractionWithImages(prompt, images, { temperature: 0.7 })
+        : await runExtraction(prompt, { temperature: 0.7 })
+  } catch (err) {
+    console.warn('[onboarding] LLM call failed:', err)
+    return
+  }
+  const decision = parseDecision(raw)
+  if (decision && decision.noted.length > 0 && memory) {
+    void memory
+      .addEpisode('assistant', '[obs] ' + decision.noted.join(', '))
+      .catch((err) => console.warn('[onboarding] observation persist failed:', err))
+  }
+  if (!decision || !decision.shouldSpeak || !decision.comment.trim()) {
+    console.log(
+      '[onboarding] decision: silent —',
+      decision?.reason ?? '(unparseable)',
+      '(flag stays false, will retry next launch)',
+    )
+    return
+  }
+
+  if (memory) {
+    void memory.addEpisode('assistant', decision.comment).catch((err) => {
+      console.warn('[onboarding] episode persist failed:', err)
+    })
+  }
+  pushSelfRemark(decision.comment)
+  noteAssistantActivity()
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('proactive:remark', {
+        text: decision.comment,
+        ts: new Date().toISOString(),
+        triggers: ['onboarding'],
+      })
+    }
+  }
+  void classifyAndApplyEmotion(decision.comment)
+
+  // Flip the flag — onboarding is over for this install.
+  try {
+    setConfig({
+      ...cfg,
+      onboarding: { ...cfg.onboarding, firstScreenPeekFired: true },
+    })
+    console.log(`[onboarding] peek fired: "${decision.comment}" — flag flipped`)
+  } catch (err) {
+    console.warn('[onboarding] flag flip failed (peek still broadcast):', err)
+  }
 }
 
 export function startProactive(): void {

@@ -577,21 +577,17 @@ export default function App() {
   // First-run check: hit /models via window.api.chat.test with the current
   // backend. If it succeeds, we have a working key (either in config or via
   // .env fallback in dev), so skip the wizard. If it fails AND the user
-  // hasn't dismissed within this session yet, pop the wizard.
-  //
-  // Only runs once per mount — once dismissed, the user can re-trigger by
-  // clearing apiKey + restarting, or just use Settings → AI directly.
+  // Open the wizard when this install has not yet completed it. The flag
+  // is persisted in config.onboarding.wizardCompleted — wiped by
+  // reset:all / reset:config, set by Save or Skip. We DELIBERATELY don't
+  // probe the backend with chat.test() anymore: the env-var fallback in
+  // resolveBackendKey would silently make a freshly-reset install look
+  // configured (since dev .env still leaks through), which is what
+  // suppressed the wizard after reset in v0.0.39.
   useEffect(() => {
     if (!config) return
     if (wizardState !== 'checking') return
-    let canceled = false
-    void window.api.chat.test(config.backend).then((r) => {
-      if (canceled) return
-      setWizardState(r.ok ? 'dismissed' : 'open')
-    })
-    return () => {
-      canceled = true
-    }
+    setWizardState(config.onboarding.wizardCompleted ? 'dismissed' : 'open')
   }, [config, wizardState])
 
   // Subscribe to Live2D commands from main (chat tool calls). The main side
@@ -1381,6 +1377,12 @@ export default function App() {
             broadcast. */}
         <Live2DAffinityBadge />
 
+        {/* Center-screen golden overlay for onboarding-milestone +5
+            celebrations (first API key, first advanced TTS). Distinct
+            from the small chip-side +N popup that fires on every
+            judgement — this is "you just hit a major milestone" UX. */}
+        <CelebrationOverlay />
+
       {/* Chat panel — overlays the bottom of the stage container. zIndex
           2 puts it above the Live2D canvas (zIndex 1) so the model's
           lower body is genuinely covered by the chat card, not just
@@ -1802,7 +1804,13 @@ export default function App() {
                         // teaches features instead of staying blank.
                         ONBOARDING_TIPS[tipIdx] ?? ''
               }
-              style={{ flex: 1, padding: '6px 10px', fontSize: 13 }}
+              // minWidth: 0 is the unblock — without it, flex items default
+              // to min-width: auto (= intrinsic content width), so when the
+              // app gets narrow the input refuses to shrink below its
+              // placeholder/value width, pushing the Send button off-screen
+              // even though Send has flexShrink: 0. With minWidth: 0 the
+              // input gives ground first and Send stays anchored.
+              style={{ flex: 1, minWidth: 0, padding: '6px 10px', fontSize: 13 }}
             />
             <button
               onClick={send}
@@ -1852,9 +1860,21 @@ export default function App() {
       {wizardState === 'open' && config && (
         <SetupWizard
           initial={config}
-          onSkip={() => setWizardState('dismissed')}
+          onSkip={async () => {
+            // Persist completion even on skip — user made an explicit
+            // choice to not configure now, don't keep re-prompting on
+            // every launch.
+            await window.api.config.set({
+              ...config,
+              onboarding: { ...config.onboarding, wizardCompleted: true },
+            })
+            setWizardState('dismissed')
+          }}
           onSave={async (next) => {
-            await window.api.config.set(next)
+            await window.api.config.set({
+              ...next,
+              onboarding: { ...next.onboarding, wizardCompleted: true },
+            })
             setWizardState('dismissed')
           }}
         />
@@ -2238,6 +2258,126 @@ function Live2DAffinityBadge() {
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * Big center-screen golden overlay fired when the user crosses an
+ * onboarding milestone (first API key, first advanced TTS). Distinct
+ * from the small chip-side floater that fires on every judgement —
+ * this is "you just hit a major milestone" UX, deliberately disruptive
+ * so the user notices and feels rewarded.
+ *
+ * Subscribes to `affinity:celebration` (main → renderer). On fire:
+ *   - kind drives the subtitle ("AI 配置完成" / "声音模型升级")
+ *   - amount renders as the headline ("+5 好感度")
+ *   - 2.6s total animation: scale-in → linger → float-up + fade
+ *   - non-blocking — pointer-events: none so clicks pass through
+ *
+ * Queues multiple celebrations if they fire in quick succession (e.g.
+ * user pasted API key + switched TTS in one Save). Each plays in
+ * sequence so the +5 / +5 reads as two distinct moments.
+ */
+function CelebrationOverlay() {
+  const [queue, setQueue] = useState<
+    { id: number; kind: 'ai' | 'tts'; amount: number }[]
+  >([])
+  const idRef = useRef(0)
+  useEffect(() => {
+    const off = window.api.affinity.onCelebration((info) => {
+      const id = ++idRef.current
+      setQueue((q) => [...q, { id, kind: info.kind, amount: info.amount }])
+      // Auto-clear after one full animation cycle. We use the queue
+      // tail's id rather than a static index so concurrent fires don't
+      // step on each other's timers.
+      setTimeout(() => {
+        setQueue((q) => q.filter((c) => c.id !== id))
+      }, 2600)
+    })
+    return off
+  }, [])
+  if (queue.length === 0) return null
+  const active = queue[0]!
+  const subtitle = active.kind === 'ai' ? 'AI 配置完成' : '声音模型升级'
+  return (
+    <>
+      <style>{`
+        @keyframes celebrationPop {
+          0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
+          18%  { opacity: 1; transform: translate(-50%, -50%) scale(1.18); }
+          32%  { opacity: 1; transform: translate(-50%, -50%) scale(1.0); }
+          75%  { opacity: 1; transform: translate(-50%, -56%) scale(1.0); }
+          100% { opacity: 0; transform: translate(-50%, -70%) scale(0.96); }
+        }
+        @keyframes celebrationGlow {
+          0%, 100% { box-shadow: 0 0 40px rgba(255, 200, 80, 0.45); }
+          50%      { box-shadow: 0 0 80px rgba(255, 220, 120, 0.7); }
+        }
+      `}</style>
+      <div
+        // Center the absolute child via top/left + transform translate
+        // (-50%, -50%) — pure viewport center, no flex parent needed.
+        // pointer-events: none so the chat panel beneath remains
+        // interactive during the 2.6s celebration.
+        style={{
+          position: 'fixed',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          pointerEvents: 'none',
+          // Above sidebar (z:2) and chat panel (z:2) but under any
+          // Settings modal (no fixed zIndex but layered on top by mount
+          // order). 50 is safe headroom either way.
+          zIndex: 50,
+          animation: 'celebrationPop 2.6s cubic-bezier(0.2, 0.7, 0.3, 1) forwards',
+        }}
+        key={active.id}
+      >
+        <div
+          style={{
+            padding: '18px 32px 22px',
+            borderRadius: 24,
+            background:
+              'linear-gradient(135deg, rgba(40,30,12,0.92), rgba(70,50,18,0.92))',
+            border: '1px solid rgba(255, 215, 130, 0.55)',
+            textAlign: 'center',
+            animation: 'celebrationGlow 1.8s ease-in-out infinite',
+            backdropFilter: 'blur(8px)',
+          }}
+        >
+          <div
+            style={{
+              fontFamily: '"Times New Roman", "STSong", serif',
+              fontWeight: 700,
+              fontSize: 56,
+              lineHeight: 1.0,
+              // Gold gradient text. background-clip:text + transparent
+              // color is the cross-browser way to fill glyphs.
+              background:
+                'linear-gradient(180deg, #ffe98a 0%, #d99a30 100%)',
+              WebkitBackgroundClip: 'text',
+              backgroundClip: 'text',
+              color: 'transparent',
+              textShadow: '0 2px 8px rgba(255, 200, 80, 0.35)',
+              letterSpacing: 1,
+              marginBottom: 6,
+            }}
+          >
+            +{active.amount} 好感度
+          </div>
+          <div
+            style={{
+              fontFamily: 'system-ui, sans-serif',
+              fontSize: 13,
+              color: 'rgba(255, 230, 180, 0.85)',
+              letterSpacing: 2,
+            }}
+          >
+            {subtitle}
+          </div>
+        </div>
+      </div>
+    </>
   )
 }
 
