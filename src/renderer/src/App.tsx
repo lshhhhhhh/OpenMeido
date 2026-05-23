@@ -1383,6 +1383,11 @@ export default function App() {
             judgement — this is "you just hit a major milestone" UX. */}
         <CelebrationOverlay />
 
+        {/* Bottom-right pill prompting restart when a background update
+            finishes downloading. Non-blocking, dismissable, doesn't
+            interrupt whatever the user is doing. */}
+        <UpdaterPill />
+
       {/* Chat panel — overlays the bottom of the stage container. zIndex
           2 puts it above the Live2D canvas (zIndex 1) so the model's
           lower body is genuinely covered by the chat card, not just
@@ -2378,6 +2383,108 @@ function CelebrationOverlay() {
         </div>
       </div>
     </>
+  )
+}
+
+/**
+ * Bottom-right pill that appears when electron-updater has finished
+ * downloading a new version in the background. Two states:
+ *   - hidden (default — no update ready)
+ *   - prompting ("v0.X.Y 已就绪 — 立即重启更新" + dismiss ×)
+ *
+ * Clicking restart calls `window.api.updater.install()` which fires
+ * the main-process `quitAndInstall` — NSIS takes over, the app
+ * relaunches on the new version. Dismissing just hides the pill for
+ * this session; the staged update still installs on next normal app
+ * quit (autoInstallOnAppQuit=true in updater-host).
+ *
+ * Subscribed in dev too — but updater-host short-circuits in dev so
+ * no event will ever fire. Cheap idle component there.
+ */
+function UpdaterPill() {
+  const [pending, setPending] = useState<{ version: string } | null>(null)
+  const [installing, setInstalling] = useState(false)
+  useEffect(() => {
+    const off = window.api.updater.onDownloaded((info) => {
+      setPending(info)
+    })
+    return off
+  }, [])
+  if (!pending) return null
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        right: 16,
+        bottom: 16,
+        zIndex: 40,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '8px 12px',
+        background: 'rgba(40, 50, 70, 0.94)',
+        border: '1px solid rgba(120, 160, 255, 0.45)',
+        borderRadius: 8,
+        boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+        backdropFilter: 'blur(8px)',
+        color: '#eee',
+        fontSize: 12,
+        fontFamily: 'system-ui, sans-serif',
+        maxWidth: 320,
+      }}
+    >
+      <span style={{ fontSize: 14 }}>✨</span>
+      <span style={{ flex: 1, lineHeight: 1.4 }}>
+        新版本 <b>{pending.version}</b> 已就绪
+      </span>
+      <button
+        onClick={async () => {
+          if (installing) return
+          setInstalling(true)
+          try {
+            await window.api.updater.install()
+          } catch (err) {
+            console.warn('[updater] install request failed:', err)
+            setInstalling(false)
+          }
+        }}
+        disabled={installing}
+        style={{
+          padding: '4px 10px',
+          fontSize: 11,
+          background: '#5a8edf',
+          color: '#fff',
+          border: 'none',
+          borderRadius: 4,
+          cursor: installing ? 'wait' : 'pointer',
+          fontWeight: 500,
+        }}
+      >
+        {installing ? '准备中…' : '立即重启'}
+      </button>
+      <button
+        onClick={() => setPending(null)}
+        title="本次会话不再提示（下次正常退出时自动安装）"
+        aria-label="dismiss"
+        style={{
+          width: 20,
+          height: 20,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: 'transparent',
+          border: 'none',
+          color: '#888',
+          fontSize: 16,
+          lineHeight: 1,
+          cursor: 'pointer',
+          padding: 0,
+          borderRadius: 4,
+        }}
+      >
+        ×
+      </button>
+    </div>
   )
 }
 

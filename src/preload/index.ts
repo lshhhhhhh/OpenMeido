@@ -665,6 +665,30 @@ const api = {
     },
   },
 
+  updater: {
+    /**
+     * Subscribe to "a newer version finished downloading in the
+     * background — restart to apply" events. Fires zero or one time
+     * per app launch (one download per check cycle). Renderer should
+     * show a non-blocking pill / toast with a restart button.
+     */
+    onDownloaded(cb: (info: { version: string }) => void): () => void {
+      const handler = (_: Electron.IpcRendererEvent, info: { version: string }): void =>
+        cb(info)
+      ipcRenderer.on('updater:downloaded', handler)
+      return () => {
+        ipcRenderer.off('updater:downloaded', handler)
+      }
+    },
+    /**
+     * Tell main to quit + install the staged update. NSIS takes over,
+     * swaps the binary, relaunches the app on the new version.
+     */
+    install(): Promise<void> {
+      return ipcRenderer.invoke('updater:install') as Promise<void>
+    },
+  },
+
   demos: {
     /** Fetch the current demo list from disk (one demo = one hotkey). */
     list(): Promise<Demo[]> {

@@ -88,6 +88,7 @@ import {
   autoBindEmotions as live2dAutoBindEmotions,
   resolveModelFile,
 } from './live2d-models-host.js'
+import { initUpdater } from './updater-host.js'
 import { IPC, type ChatSendPayload } from '../shared/ipc.js'
 import { configSchema, ConfigIPC, type Config } from '../shared/config.js'
 import type { ModelSidecar } from '../shared/live2d-models.js'
@@ -1196,6 +1197,10 @@ void app.whenReady().then(async () => {
   // Fire-and-forget the greeting — it self-waits for the renderer to be
   // ready, so we don't block window creation behind an LLM round-trip.
   void greetOnLaunch()
+  // Auto-update host — checks GitHub Releases 30s after boot + every 6h.
+  // Skipped in dev mode. Broadcasts updater:downloaded to renderer when
+  // a new version is ready; renderer shows a pill to restart.
+  initUpdater()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

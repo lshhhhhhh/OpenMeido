@@ -26,6 +26,26 @@ appId: com.openmeido.app
 productName: OpenMeido
 copyright: Copyright © 2026 OpenMeido
 
+# Auto-update source — the released installer reads GitHub Releases to
+# detect new versions. Public repo means no GH_TOKEN needed at update
+# time; users running v0.1.6+ will find updates automatically.
+#
+# How it works:
+#   - On every `npm run dist`, electron-builder writes `latest.yml` next
+#     to the .exe with version + SHA. Uploading it alongside the .exe
+#     on the GitHub release lets electron-updater fetch + compare.
+#   - The .blockmap (already being uploaded) enables delta updates so
+#     users with a prior version only download the changed chunks.
+#   - electron-updater handles the rest: download in background, verify
+#     signature, prompt restart via our updater-host IPC.
+#
+# Note: existing users on v0.1.5 and earlier do NOT have updater code,
+# so they must manually install v0.1.6 once. From then on, automatic.
+publish:
+  provider: github
+  owner: lshhhhhhh
+  repo: OpenMeido
+
 # Build artifacts directory. dist/ is gitignored.
 directories:
   output: dist
