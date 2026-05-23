@@ -478,11 +478,13 @@ export const configSchema = z.object({
       enabled: z.boolean().default(true),
       /**
        * Which TTS engine to use.
-       *   - 'edge': Microsoft Edge TTS (free, online, no voice training)
-       *   - 'sovits': GPT-SoVITS api_v2.py running locally (zero-shot voice
-       *     cloning — bring your own ref audio + transcript)
+       *   - 'edge':       Microsoft Edge TTS (free, online, no voice training)
+       *   - 'sovits':     GPT-SoVITS api_v2.py running locally (zero-shot
+       *                   voice cloning — bring your own ref audio + transcript)
+       *   - 'minimax':    MiniMax 海螺 T2A v2 cloud (preset voices, paid)
+       *   - 'volcengine': 火山引擎 大模型语音合成 / 豆包 (preset voices, paid)
        */
-      backend: z.enum(['edge', 'sovits']).default('edge'),
+      backend: z.enum(['edge', 'sovits', 'minimax', 'volcengine']).default('edge'),
       /**
        * Microsoft Edge TTS voice ShortName. XiaoyiNeural is the lightest /
        * youngest-sounding Chinese female voice — fits both the maid and
@@ -526,6 +528,67 @@ export const configSchema = z.object({
           temperature: z.number().min(0).max(2).default(1.0),
           /** Playback speed (1.0 = native, >1 faster). */
           speedFactor: z.number().min(0.5).max(2).default(1.0),
+        })
+        .default({}),
+      /**
+       * MiniMax 海螺 T2A v2 settings. Only consulted when backend === 'minimax'.
+       * Mainland and global endpoints share the same body shape — only the
+       * host differs (see tts/minimax.ts).
+       */
+      minimax: z
+        .object({
+          /** 'cn' → api.minimaxi.com · 'global' → api.minimax.io. */
+          region: z.enum(['cn', 'global']).default('cn'),
+          /** Override host. Empty = use region default. Set this to pin
+           *  the legacy api.minimax.chat host or any future-renamed
+           *  endpoint without waiting for an app update. */
+          baseUrl: z.string().default(''),
+          /** Bearer token from MiniMax control panel. */
+          apiKey: z.string().default(''),
+          /** Organization id — appended as `?GroupId=...` query param. */
+          groupId: z.string().default(''),
+          /** speech-02-hd is the current top-tier model. */
+          model: z.string().default('speech-02-hd'),
+          /** Preset voice id (see shared/tts-voices.ts) OR a custom one
+           *  (e.g. a cloned voice id from the user's MiniMax account). */
+          voiceId: z.string().default('female-shaonv'),
+          /** Per MiniMax docs: 0.5-2.0. */
+          speed: z.number().min(0.5).max(2).default(1.0),
+          /** Volume: 0.0-10.0, default 1.0. */
+          volume: z.number().min(0).max(10).default(1.0),
+          /** Pitch shift: -12 to 12 semitones, default 0. */
+          pitch: z.number().min(-12).max(12).default(0),
+        })
+        .default({}),
+      /**
+       * 火山引擎 大模型语音合成 / 豆包 settings. Only consulted when
+       * backend === 'volcengine'. Three credentials required (appid +
+       * accessToken + cluster) because ByteDance's auth maps an app to a
+       * specific TTS cluster, not directly to a voice catalog. See
+       * tts/volcengine.ts for the literal `Bearer;<token>` auth quirk.
+       */
+      volcengine: z
+        .object({
+          /** Override endpoint. Empty = openspeech.bytedance.com. */
+          baseUrl: z.string().default(''),
+          /** App id from 火山控制台 → 语音技术 → 应用管理. */
+          appid: z.string().default(''),
+          /** Access token (used in `Authorization: Bearer;<token>` header
+           *  AND duplicated into request body's `app.token` field). */
+          accessToken: z.string().default(''),
+          /** Optional override for the body-side `app.token`. Most plans
+           *  use accessToken for both; leave empty unless the dashboard
+           *  shows separate values. */
+          bodyToken: z.string().default(''),
+          /** Cluster routes the request to a voice subscription:
+           *   - volcano_tts: 通用 / 大模型 voices (default — covers BV-prefixed)
+           *   - volcano_icl: 声音复刻 (instant voice clone) */
+          cluster: z.string().default('volcano_tts'),
+          /** Preset BV-id or a custom voice_type (e.g. zh_female_xxx for
+           *  a cloned voice). */
+          voiceType: z.string().default('BV700_streaming'),
+          /** Per 火山 docs: 0.2-3.0, default 1.0. */
+          speedRatio: z.number().min(0.2).max(3).default(1.0),
         })
         .default({}),
     })

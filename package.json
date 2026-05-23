@@ -46,6 +46,8 @@
     "test:stt-sovits": "electron tools/smoke-stt-sovits.mjs",
     "test:mail-parent": "node --import tsx tools/smoke-mail-parent.mjs",
     "test:fake-mail": "node --import tsx tools/smoke-fake-mail.mjs",
+    "test:tts-minimax-body": "node tools/smoke-tts-minimax-body.mjs",
+    "test:tts-volcengine-body": "node tools/smoke-tts-volcengine-body.mjs",
     "test:fake-mail-agent": "node --env-file=.env --import tsx tools/smoke-fake-mail-agent.mjs",
     "ensure-embed-model": "node scripts/ensure-embed-model.mjs",
     "dist": "electron-vite build && electron-builder --win",

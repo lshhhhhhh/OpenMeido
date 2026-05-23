@@ -17,6 +17,12 @@ import {
 } from '../../shared/live2d-models'
 import { BASE_URL_PRESETS, findPreset, suggestedModels } from './backend-presets'
 import { performanceModel, visionModel } from '../../shared/lightweight-models'
+import {
+  MINIMAX_MODELS,
+  MINIMAX_PRESET_VOICES,
+  VOLCENGINE_CLUSTERS,
+  VOLCENGINE_PRESET_VOICES,
+} from '../../shared/tts-voices'
 
 /**
  * Per-capability resolution for the active provider. Drives the "能力概览"
@@ -1804,11 +1810,13 @@ function VoiceTab({
       {draft.enabled && (
         <>
           <Label>引擎</Label>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
             {(
               [
                 { id: 'edge', label: 'Edge TTS', hint: '免费 · 联网 · 微软' },
                 { id: 'sovits', label: 'GPT-SoVITS', hint: '本地 · 零样本克隆' },
+                { id: 'minimax', label: 'MiniMax', hint: '海螺 · 云端 · 付费' },
+                { id: 'volcengine', label: '火山引擎', hint: '豆包大模型 · 云端' },
               ] as const
             ).map((b) => (
               <button
@@ -1880,6 +1888,20 @@ function VoiceTab({
             <SovitsFields
               draft={draft.sovits}
               onChange={(next) => onChange({ ...draft, sovits: next })}
+            />
+          )}
+
+          {draft.backend === 'minimax' && (
+            <MinimaxFields
+              draft={draft.minimax}
+              onChange={(next) => onChange({ ...draft, minimax: next })}
+            />
+          )}
+
+          {draft.backend === 'volcengine' && (
+            <VolcengineFields
+              draft={draft.volcengine}
+              onChange={(next) => onChange({ ...draft, volcengine: next })}
             />
           )}
 
@@ -2045,6 +2067,305 @@ function SovitsFields({
             />
           </div>
         </div>
+      </details>
+    </>
+  )
+}
+
+/**
+ * MiniMax 海螺 T2A v2 credentials + voice picker.
+ *
+ * The "其它 voice_id" override is intentional — preset voices are mainland
+ * canonical names; international users (region='global') often have
+ * different voice ids issued by their account.
+ */
+function MinimaxFields({
+  draft,
+  onChange,
+}: {
+  draft: Config['tts']['minimax']
+  onChange: (next: Config['tts']['minimax']) => void
+}) {
+  const isPreset = MINIMAX_PRESET_VOICES.some((v) => v.id === draft.voiceId)
+  return (
+    <>
+      <div
+        style={{
+          fontSize: 11,
+          color: '#666',
+          background: 'rgba(0,0,0,0.04)',
+          padding: '6px 8px',
+          borderRadius: 4,
+          marginBottom: 8,
+          lineHeight: 1.5,
+        }}
+      >
+        到 MiniMax 控制台拿 API Key + GroupId（账户信息页）。
+        国内账号选 minimax.chat / minimaxi.com，海外账号选 minimax.io。
+      </div>
+
+      <Label>区域</Label>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+        {(
+          [
+            { id: 'cn', label: '国内 (api.minimaxi.com)' },
+            { id: 'global', label: '海外 (api.minimax.io)' },
+          ] as const
+        ).map((r) => (
+          <button
+            key={r.id}
+            onClick={() => onChange({ ...draft, region: r.id })}
+            style={{
+              ...btnStyle(draft.region === r.id ? 'primary' : 'subtle'),
+              padding: '2px 10px',
+              fontSize: 11,
+            }}
+          >
+            {r.label}
+          </button>
+        ))}
+      </div>
+
+      <Label>API Key</Label>
+      <input
+        type="password"
+        value={draft.apiKey}
+        onChange={(e) => onChange({ ...draft, apiKey: e.target.value })}
+        placeholder="eyJ... (Bearer token)"
+        style={{ ...inputStyle, marginBottom: 8 }}
+      />
+
+      <Label>GroupId</Label>
+      <input
+        type="text"
+        value={draft.groupId}
+        onChange={(e) => onChange({ ...draft, groupId: e.target.value })}
+        placeholder="账户信息页里的 group id"
+        style={{ ...inputStyle, marginBottom: 8 }}
+      />
+
+      <Label>模型</Label>
+      <select
+        value={draft.model}
+        onChange={(e) => onChange({ ...draft, model: e.target.value })}
+        style={{ ...inputStyle, marginBottom: 8 }}
+      >
+        {MINIMAX_MODELS.map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.label}
+            {m.hint ? ` · ${m.hint}` : ''}
+          </option>
+        ))}
+      </select>
+
+      <Label>音色</Label>
+      <select
+        value={isPreset ? draft.voiceId : '__custom__'}
+        onChange={(e) => {
+          const v = e.target.value
+          if (v === '__custom__') return // user typing custom; keep current
+          onChange({ ...draft, voiceId: v })
+        }}
+        style={{ ...inputStyle, marginBottom: 6 }}
+      >
+        {MINIMAX_PRESET_VOICES.map((v) => (
+          <option key={v.id} value={v.id}>
+            {v.label} · {v.id}
+            {v.hint ? ` · ${v.hint}` : ''}
+          </option>
+        ))}
+        <option value="__custom__">— 自定义 voice_id（克隆 / 海外特有）—</option>
+      </select>
+      <input
+        type="text"
+        value={draft.voiceId}
+        onChange={(e) => onChange({ ...draft, voiceId: e.target.value })}
+        placeholder="voice_id（例：female-shaonv）"
+        style={{ ...inputStyle, marginBottom: 8 }}
+      />
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        <div style={{ flex: 1 }}>
+          <Label>语速 ({draft.speed.toFixed(2)})</Label>
+          <input
+            type="range"
+            min={0.5}
+            max={2}
+            step={0.05}
+            value={draft.speed}
+            onChange={(e) => onChange({ ...draft, speed: Number(e.target.value) })}
+            style={{ width: '100%' }}
+          />
+        </div>
+        <div style={{ flex: 1 }}>
+          <Label>音量 ({draft.volume.toFixed(1)})</Label>
+          <input
+            type="range"
+            min={0}
+            max={10}
+            step={0.1}
+            value={draft.volume}
+            onChange={(e) => onChange({ ...draft, volume: Number(e.target.value) })}
+            style={{ width: '100%' }}
+          />
+        </div>
+        <div style={{ flex: 1 }}>
+          <Label>音调 ({draft.pitch})</Label>
+          <input
+            type="range"
+            min={-12}
+            max={12}
+            step={1}
+            value={draft.pitch}
+            onChange={(e) => onChange({ ...draft, pitch: Number(e.target.value) })}
+            style={{ width: '100%' }}
+          />
+        </div>
+      </div>
+
+      <details style={{ marginBottom: 12 }}>
+        <summary style={{ fontSize: 11, color: '#666', cursor: 'pointer' }}>
+          高级：自定义 baseUrl（覆盖区域默认）
+        </summary>
+        <input
+          type="text"
+          value={draft.baseUrl}
+          onChange={(e) => onChange({ ...draft, baseUrl: e.target.value })}
+          placeholder="留空 = 用上面选的区域默认；填了就用这个"
+          style={{ ...inputStyle, marginTop: 6 }}
+        />
+      </details>
+    </>
+  )
+}
+
+/**
+ * 火山引擎 大模型语音合成（豆包）credentials + voice picker.
+ *
+ * Three fields required (appid + accessToken + cluster) instead of one,
+ * because 火山 binds each app to a specific TTS subscription. The literal
+ * `Bearer;<token>` auth quirk is handled inside the adapter — UI just
+ * collects the raw token.
+ */
+function VolcengineFields({
+  draft,
+  onChange,
+}: {
+  draft: Config['tts']['volcengine']
+  onChange: (next: Config['tts']['volcengine']) => void
+}) {
+  const isPreset = VOLCENGINE_PRESET_VOICES.some((v) => v.id === draft.voiceType)
+  return (
+    <>
+      <div
+        style={{
+          fontSize: 11,
+          color: '#666',
+          background: 'rgba(0,0,0,0.04)',
+          padding: '6px 8px',
+          borderRadius: 4,
+          marginBottom: 8,
+          lineHeight: 1.5,
+        }}
+      >
+        到火山控制台 → 语音技术 → 语音合成（大模型） → 应用管理拿 appid + access token。
+        cluster 默认 volcano_tts，开通了「声音复刻」才需要切到 volcano_icl。
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        <div style={{ flex: 1 }}>
+          <Label>App ID</Label>
+          <input
+            type="text"
+            value={draft.appid}
+            onChange={(e) => onChange({ ...draft, appid: e.target.value })}
+            placeholder="火山控制台里的 appid"
+            style={inputStyle}
+          />
+        </div>
+        <div style={{ flex: 1 }}>
+          <Label>Cluster</Label>
+          <select
+            value={draft.cluster}
+            onChange={(e) => onChange({ ...draft, cluster: e.target.value })}
+            style={inputStyle}
+          >
+            {VOLCENGINE_CLUSTERS.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label}
+                {c.hint ? ` · ${c.hint}` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <Label>Access Token</Label>
+      <input
+        type="password"
+        value={draft.accessToken}
+        onChange={(e) => onChange({ ...draft, accessToken: e.target.value })}
+        placeholder="header 跟 body 都用这个 token"
+        style={{ ...inputStyle, marginBottom: 8 }}
+      />
+
+      <Label>音色</Label>
+      <select
+        value={isPreset ? draft.voiceType : '__custom__'}
+        onChange={(e) => {
+          const v = e.target.value
+          if (v === '__custom__') return
+          onChange({ ...draft, voiceType: v })
+        }}
+        style={{ ...inputStyle, marginBottom: 6 }}
+      >
+        {VOLCENGINE_PRESET_VOICES.map((v) => (
+          <option key={v.id} value={v.id}>
+            {v.label} · {v.id}
+            {v.hint ? ` · ${v.hint}` : ''}
+          </option>
+        ))}
+        <option value="__custom__">— 自定义 voice_type（复刻 / 私有音色）—</option>
+      </select>
+      <input
+        type="text"
+        value={draft.voiceType}
+        onChange={(e) => onChange({ ...draft, voiceType: e.target.value })}
+        placeholder="voice_type（例：BV700_streaming）"
+        style={{ ...inputStyle, marginBottom: 8 }}
+      />
+
+      <Label>语速 ({draft.speedRatio.toFixed(2)})</Label>
+      <input
+        type="range"
+        min={0.5}
+        max={2}
+        step={0.05}
+        value={draft.speedRatio}
+        onChange={(e) => onChange({ ...draft, speedRatio: Number(e.target.value) })}
+        style={{ width: '100%', marginBottom: 8 }}
+      />
+
+      <details style={{ marginBottom: 12 }}>
+        <summary style={{ fontSize: 11, color: '#666', cursor: 'pointer' }}>
+          高级：自定义 baseUrl / body token
+        </summary>
+        <Label>baseUrl</Label>
+        <input
+          type="text"
+          value={draft.baseUrl}
+          onChange={(e) => onChange({ ...draft, baseUrl: e.target.value })}
+          placeholder="留空 = openspeech.bytedance.com"
+          style={{ ...inputStyle, marginBottom: 6 }}
+        />
+        <Label>body token（少数账号 header / body 不同；常规留空）</Label>
+        <input
+          type="password"
+          value={draft.bodyToken}
+          onChange={(e) => onChange({ ...draft, bodyToken: e.target.value })}
+          placeholder="留空 = 复用 access token"
+          style={inputStyle}
+        />
       </details>
     </>
   )
