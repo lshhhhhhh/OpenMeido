@@ -307,6 +307,40 @@ const api = {
     },
   },
 
+  fonts: {
+    /** Snapshot of optional fonts + per-font installed status.
+     *  Returns: Array<{ id, label, approxBytes, url, filename, installed }>. */
+    list(): Promise<
+      Array<{ id: string; label: string; approxBytes: number; filename: string; installed: boolean }>
+    > {
+      return ipcRenderer.invoke('fonts:list') as Promise<
+        Array<{ id: string; label: string; approxBytes: number; filename: string; installed: boolean }>
+      >
+    },
+    /** Start a download. Progress streams on 'fonts:download:progress'
+     *  via onProgress(). Resolves to { ok, installed } when finished. */
+    download(fontId: string): Promise<{ ok: boolean; fontId: string; installed?: boolean; error?: string }> {
+      return ipcRenderer.invoke('fonts:download', fontId) as Promise<{ ok: boolean; fontId: string; installed?: boolean; error?: string }>
+    },
+    /** Subscribe to download progress. Returns unsubscribe fn. */
+    onProgress(
+      cb: (p: { fontId: string; received: number; total: number; done: boolean; error?: string }) => void,
+    ): () => void {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        p: { fontId: string; received: number; total: number; done: boolean; error?: string },
+      ): void => cb(p)
+      ipcRenderer.on('fonts:download:progress', handler)
+      return () => {
+        ipcRenderer.off('fonts:download:progress', handler)
+      }
+    },
+    /** Delete an installed font from <userData>/fonts/. */
+    uninstall(fontId: string): Promise<{ ok: boolean; fontId: string; installed?: boolean; error?: string }> {
+      return ipcRenderer.invoke('fonts:uninstall', fontId) as Promise<{ ok: boolean; fontId: string; installed?: boolean; error?: string }>
+    },
+  },
+
   lines: {
     /** Fetch the merged preset台词 structure (bundled defaults ∪ user
      *  overrides from lines.json). Renderer calls once at boot and

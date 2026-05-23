@@ -1,30 +1,23 @@
 /*
- * Bundled fonts. Three open-source Chinese fonts cover the cute /
- * 二次元 spectrum:
- *   - Xiaolai (小赖字体)       — derived from Japanese Seto Font, most
- *                                 anime-handwritten feel
- *   - LXGW WenKai Lite (文楷)  — handwritten serif elegance
- *   - Smiley Sans (得意黑)     — playful italic modern
+ * Bundled font: Xiaolai (小赖字体) — derived from Japanese Seto Font,
+ * the cutest / most anime-handwritten of the three the app supports.
+ * Lives in src/renderer/public/fonts/ which Vite copies into the
+ * renderer build (also shipped via electron-builder extraResources).
  *
- * Loaded from src/renderer/public/fonts/ which electron-builder
- * extracts to <resources>/public/fonts/ (see electron-builder.yml
- * `extraResources`). The renderer picks one at runtime via the
- * cfg.ui.fontFamily setting; CSS variable `--meido-font` is updated
- * by App.tsx and inherited everywhere.
+ * The other two optional fonts (LXGW WenKai Lite, Smiley Sans) are
+ * NOT bundled — they're downloaded on demand into <userData>/fonts/
+ * and registered dynamically via the FontFace API in App.tsx using
+ * the meido-font:// custom protocol (see src/main/font-download-host.ts).
+ * That setup keeps the installer ~17 MB smaller for users who only
+ * want the default font.
+ *
+ * The renderer picks one at runtime via cfg.ui.fontFamily; CSS
+ * variable `--meido-font` is updated by App.tsx and inherited
+ * everywhere.
  */
 @font-face {
   font-family: 'Xiaolai';
   src: url('/fonts/Xiaolai-Regular.ttf') format('truetype');
-  font-display: swap;
-}
-@font-face {
-  font-family: 'LXGW WenKai Lite';
-  src: url('/fonts/LXGWWenKaiLite-Regular.ttf') format('truetype');
-  font-display: swap;
-}
-@font-face {
-  font-family: 'Smiley Sans';
-  src: url('/fonts/SmileySans-Oblique.ttf') format('truetype');
   font-display: swap;
 }
 

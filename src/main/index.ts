@@ -31,6 +31,14 @@ import {
   getLinesFilePath,
 } from './lines-host.js'
 import {
+  OPTIONAL_FONTS,
+  downloadFont,
+  isFontInstalled,
+  listOptionalFonts,
+  readFontFile,
+  uninstallFont,
+} from './font-download-host.js'
+import {
   transcribeSamples as sttTranscribe,
   getSttStatus,
   startSttDownload,
@@ -114,6 +122,21 @@ protocol.registerSchemesAsPrivileged([
       // Renderer runs on http://localhost:5173 in dev, file:// in prod —
       // either way `meido-live2d://` is cross-origin, so without this flag
       // Chromium drops fetches with "CORS policy" errors.
+      corsEnabled: true,
+    },
+  },
+  {
+    // Same shape as meido-live2d://, but serves user-downloaded fonts
+    // from <userData>/fonts/ (see src/main/font-download-host.ts).
+    // CSS @font-face references this protocol so the browser can load
+    // the font file just like a regular URL.
+    scheme: 'meido-font',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      bypassCSP: true,
       corsEnabled: true,
     },
   },
@@ -757,6 +780,33 @@ ipcMain.handle('memory:deleteFact', async (_event, factId: number) => {
 // through warmth-judging would drift the score every toggle. L3
 // reflection still sees the episodes but the LLM naturally ignores
 // content-free mechanical turns when distilling facts.
+// Optional fonts — renderer asks "what's installable / what's already
+// installed" at boot, then triggers download / uninstall on user click.
+// Progress streams back over 'fonts:download:progress' BrowserWindow
+// message channel so the Settings UI can show a bar without polling.
+ipcMain.handle('fonts:list', () => {
+  return listOptionalFonts()
+})
+ipcMain.handle('fonts:download', async (event, fontId: string) => {
+  try {
+    await downloadFont(fontId, (p) => {
+      // Per-chunk progress back to the originating window.
+      event.sender.send('fonts:download:progress', p)
+    })
+    return { ok: true, fontId, installed: isFontInstalled(fontId) }
+  } catch (err) {
+    return { ok: false, fontId, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+ipcMain.handle('fonts:uninstall', async (_event, fontId: string) => {
+  try {
+    await uninstallFont(fontId)
+    return { ok: true, fontId, installed: isFontInstalled(fontId) }
+  } catch (err) {
+    return { ok: false, fontId, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
 // Preset lines — renderer fetches once at boot to feed pickMuteFeedback
 // (and future "preset" consumers like persona prompts when we expand).
 ipcMain.handle('lines:get', () => {
@@ -982,6 +1032,7 @@ void app.whenReady().then(async () => {
   // createWindow so the renderer's first fetch succeeds.
   await initLive2DModels()
   registerLive2DProtocol()
+  registerFontProtocol()
   registerBackgroundProtocol()
   // Eager-seed demos.json — readDemos creates it on first read, but doing
   // so up-front means the user can find the file immediately after install
@@ -1080,6 +1131,51 @@ function registerLive2DProtocol(): void {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.warn(`[live2d] protocol read failed: ${resolved} — ${msg}`)
+      return new Response(`read failed: ${msg}`, {
+        status: 500,
+        headers: { 'access-control-allow-origin': '*' },
+      })
+    }
+  })
+}
+
+/**
+ * Wire `meido-font://<filename>` URLs to disk reads under
+ * `<userData>/fonts/<filename>`. Strict allow-list of filenames (only
+ * the ones registered as OPTIONAL_FONTS) so the renderer can't read
+ * arbitrary user files.
+ */
+function registerFontProtocol(): void {
+  protocol.handle('meido-font', async (req) => {
+    const url = new URL(req.url)
+    // meido-font://lxgw-wenkai/font.ttf — single-segment names also OK
+    const filename = decodeURIComponent(
+      url.pathname.replace(/^\/+/, '') || url.hostname,
+    )
+    const resolved = await readFontFile(filename)
+    if (!resolved) {
+      return new Response('Not Found', {
+        status: 404,
+        headers: { 'access-control-allow-origin': '*' },
+      })
+    }
+    try {
+      const nodeStream = createReadStream(resolved.path)
+      const webStream = Readable.toWeb(nodeStream) as ReadableStream
+      return new Response(webStream, {
+        status: 200,
+        headers: {
+          'content-type': 'font/ttf',
+          'content-length': String(resolved.size),
+          'access-control-allow-origin': '*',
+          // Fonts on disk are immutable per-install; cache hard so the
+          // renderer doesn't re-fetch on every reload.
+          'cache-control': 'public, max-age=86400, immutable',
+        },
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn(`[font] protocol read failed: ${filename} — ${msg}`)
       return new Response(`read failed: ${msg}`, {
         status: 500,
         headers: { 'access-control-allow-origin': '*' },

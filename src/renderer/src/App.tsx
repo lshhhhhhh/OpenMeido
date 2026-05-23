@@ -286,6 +286,39 @@ export default function App() {
     warmupAudioContext()
   }, [])
 
+  // Register installed optional fonts via the FontFace API so they're
+  // immediately usable without an app restart. Bundled Xiaolai is
+  // already in index.css; the other two (LXGW / Smiley) are served
+  // from <userData>/fonts/ via meido-font:// and only exist on disk
+  // if the user downloaded them. Skip silently for fonts not installed.
+  useEffect(() => {
+    let cancelled = false
+    void window.api.fonts?.list().then(async (fonts) => {
+      if (cancelled || !fonts) return
+      const nameMap: Record<string, string> = {
+        'lxgw-wenkai': 'LXGW WenKai Lite',
+        'smiley-sans': 'Smiley Sans',
+      }
+      for (const f of fonts) {
+        if (!f.installed) continue
+        const family = nameMap[f.id]
+        if (!family) continue
+        // Skip if already registered (e.g. effect re-runs in StrictMode dev).
+        if ([...document.fonts].some((ff) => ff.family === family)) continue
+        try {
+          const face = new FontFace(family, `url(meido-font:///${encodeURIComponent(f.filename)})`)
+          await face.load()
+          document.fonts.add(face)
+        } catch (err) {
+          console.warn(`[font] failed to register installed font ${f.id}:`, err)
+        }
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   // Apply the user's chosen UI font by writing a CSS variable on the
   // <html> element. index.html's `font-family: var(--meido-font, ...)`
   // reads this; everything inherits from there. 'system' clears the

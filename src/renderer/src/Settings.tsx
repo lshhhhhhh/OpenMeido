@@ -1129,70 +1129,10 @@ export function Settings({ initial, onClose }: SettingsProps) {
             </Section>
 
             <Section title="字体">
-              <div style={{ fontSize: 12, color: '#bbb', marginBottom: 8, lineHeight: 1.5 }}>
-                3 个内置开源字体，跟系统字体比有「二次元 / 手书」感。每个字体下面预览那行文字看效果，再点按钮切换。
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {([
-                  {
-                    id: 'system',
-                    label: '系统字体',
-                    family: 'system-ui, sans-serif',
-                    hint: '默认 · 跟 OS 一致',
-                  },
-                  {
-                    id: 'xiaolai',
-                    label: '小赖字体',
-                    family: '"Xiaolai", system-ui, sans-serif',
-                    hint: '濑户字体衍生 · 日系手书 · 最 二次元',
-                  },
-                  {
-                    id: 'lxgw-wenkai',
-                    label: 'LXGW 文楷',
-                    family: '"LXGW WenKai Lite", system-ui, sans-serif',
-                    hint: '手书楷体 · 柔和文气',
-                  },
-                  {
-                    id: 'smiley-sans',
-                    label: '得意黑',
-                    family: '"Smiley Sans", system-ui, sans-serif',
-                    hint: '现代圆角 + 微斜 · 活泼',
-                  },
-                ] as const).map((f) => {
-                  const active = draft.ui.fontFamily === f.id
-                  return (
-                    <button
-                      key={f.id}
-                      onClick={() =>
-                        setDraft({ ...draft, ui: { ...draft.ui, fontFamily: f.id } })
-                      }
-                      style={{
-                        ...btnStyle(active ? 'primary' : 'secondary'),
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'flex-start',
-                        textAlign: 'left',
-                        padding: '8px 12px',
-                        gap: 4,
-                      }}
-                    >
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', width: '100%' }}>
-                        <span style={{ fontSize: 13, fontWeight: 600 }}>{f.label}</span>
-                        <span style={{ fontSize: 10, opacity: 0.7 }}>{f.hint}</span>
-                      </div>
-                      <div
-                        style={{
-                          fontFamily: f.family,
-                          fontSize: 14,
-                          opacity: 0.95,
-                        }}
-                      >
-                        主人，今天也辛苦了。我泡杯茶给您吧？
-                      </div>
-                    </button>
-                  )
-                })}
-              </div>
+              <FontPicker
+                value={draft.ui.fontFamily}
+                onChange={(id) => setDraft({ ...draft, ui: { ...draft.ui, fontFamily: id } })}
+              />
             </Section>
 
             <Section title="Demo 模式">
@@ -2650,6 +2590,264 @@ function SttPanel({
  * fire mid-edit on every keystroke save), and the lines are loaded
  * once at boot for predictability.
  */
+/**
+ * Font picker — 4 options:
+ *   - system (no-op default)
+ *   - xiaolai (bundled with the installer, always available)
+ *   - lxgw-wenkai (optional, download on demand)
+ *   - smiley-sans (optional, download on demand)
+ *
+ * Optional fonts show "下载 N MB" → progress bar → "已安装" + uninstall.
+ * Selecting an uninstalled font triggers the download then auto-selects
+ * it when the file lands on disk.
+ */
+function FontPicker({
+  value,
+  onChange,
+}: {
+  value: 'system' | 'xiaolai' | 'lxgw-wenkai' | 'smiley-sans'
+  onChange: (id: 'system' | 'xiaolai' | 'lxgw-wenkai' | 'smiley-sans') => void
+}): React.ReactElement {
+  type OptionalMeta = {
+    id: string
+    label: string
+    approxBytes: number
+    filename: string
+    installed: boolean
+  }
+  const [optional, setOptional] = useState<OptionalMeta[]>([])
+  // fontId currently being downloaded (only one at a time to keep UI
+  // simple — Settings is modal, can't queue more than one anyway).
+  const [downloadingId, setDownloadingId] = useState<string | null>(null)
+  const [progress, setProgress] = useState<{ received: number; total: number } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  // Fetch installed status on mount + after any download completes.
+  const reload = async (): Promise<void> => {
+    const list = await window.api.fonts?.list()
+    if (list) setOptional(list)
+  }
+  useEffect(() => {
+    void reload()
+    const off = window.api.fonts?.onProgress((p) => {
+      if (p.error) {
+        setError(p.error)
+        setDownloadingId(null)
+        setProgress(null)
+        return
+      }
+      setProgress({ received: p.received, total: p.total })
+      if (p.done) {
+        setDownloadingId(null)
+        setProgress(null)
+        void reload()
+      }
+    })
+    return () => {
+      off?.()
+    }
+  }, [])
+
+  async function handleClick(id: string): Promise<void> {
+    setError(null)
+    console.log(`[font] click id=${id}, optional.length=${optional.length}`)
+    // System + bundled Xiaolai are always available — just switch.
+    if (id === 'system' || id === 'xiaolai') {
+      onChange(id as 'system' | 'xiaolai')
+      return
+    }
+    // window.api.fonts is undefined when running against a stale
+    // preload bundle (dev server not restarted after the IPC additions).
+    // Surface that explicitly rather than silently no-op.
+    if (!window.api.fonts) {
+      setError('preload 还没编译新 IPC——退出 dev 重启 `npm run dev`')
+      console.warn('[font] window.api.fonts is undefined — stale preload')
+      return
+    }
+    const meta = optional.find((o) => o.id === id)
+    if (!meta) {
+      // State hasn't loaded yet — re-fetch synchronously and retry.
+      console.warn(`[font] optional list not yet loaded, refetching`)
+      const list = await window.api.fonts.list()
+      if (list) setOptional(list)
+      const refetched = list?.find((o) => o.id === id)
+      if (!refetched) {
+        setError(`字体 ${id} 在 OPTIONAL_FONTS 里没找到 (bug)`)
+        return
+      }
+      if (refetched.installed) {
+        onChange(id as 'lxgw-wenkai' | 'smiley-sans')
+        return
+      }
+      // Fall through using refetched.
+    }
+    const effectiveMeta = meta ?? optional.find((o) => o.id === id)
+    if (!effectiveMeta) return
+    if (effectiveMeta.installed) {
+      onChange(id as 'lxgw-wenkai' | 'smiley-sans')
+      return
+    }
+    // Not installed → trigger download. UI shows progress; on
+    // completion we auto-select this font.
+    console.log(`[font] starting download: id=${id}`)
+    setDownloadingId(id)
+    setProgress({ received: 0, total: effectiveMeta.approxBytes })
+    const result = await window.api.fonts.download(id)
+    console.log(`[font] download result:`, result)
+    if (result?.ok && result.installed) {
+      // Register dynamically so it's usable without restart.
+      const familyMap: Record<string, string> = {
+        'lxgw-wenkai': 'LXGW WenKai Lite',
+        'smiley-sans': 'Smiley Sans',
+      }
+      const family = familyMap[id]
+      if (family && ![...document.fonts].some((f) => f.family === family)) {
+        try {
+          const face = new FontFace(
+            family,
+            `url(meido-font:///${encodeURIComponent(effectiveMeta.filename)})`,
+          )
+          await face.load()
+          document.fonts.add(face)
+        } catch (err) {
+          console.warn('[font] dynamic register failed:', err)
+        }
+      }
+      onChange(id as 'lxgw-wenkai' | 'smiley-sans')
+    } else if (result && !result.ok) {
+      setError(result.error ?? '下载失败')
+    }
+  }
+
+  async function handleUninstall(id: string, e: React.MouseEvent): Promise<void> {
+    e.stopPropagation() // don't trigger the parent button's onClick
+    await window.api.fonts?.uninstall(id)
+    if (value === id) onChange('xiaolai') // fallback to bundled
+    void reload()
+  }
+
+  const OPTIONS: Array<{
+    id: 'system' | 'xiaolai' | 'lxgw-wenkai' | 'smiley-sans'
+    label: string
+    family: string
+    hint: string
+  }> = [
+    { id: 'system', label: '系统字体', family: 'system-ui, sans-serif', hint: '默认 · 跟 OS 一致' },
+    { id: 'xiaolai', label: '小赖字体', family: '"Xiaolai", system-ui, sans-serif', hint: '濑户字体衍生 · 最 二次元 · 已内置' },
+    { id: 'lxgw-wenkai', label: 'LXGW 文楷', family: '"LXGW WenKai Lite", system-ui, sans-serif', hint: '手书楷体 · 柔和文气' },
+    { id: 'smiley-sans', label: '得意黑', family: '"Smiley Sans", system-ui, sans-serif', hint: '现代圆角 + 微斜 · 活泼' },
+  ]
+
+  return (
+    <>
+      <div style={{ fontSize: 12, color: '#bbb', marginBottom: 8, lineHeight: 1.5 }}>
+        默认是小赖字体（内置）。另外两个可选下载——首次选中会从 GitHub 下载，约几秒到几十秒。
+      </div>
+      {error && (
+        <div
+          style={{
+            background: 'rgba(248,81,73,0.15)',
+            color: '#f88',
+            padding: '6px 8px',
+            borderRadius: 6,
+            fontSize: 11,
+            marginBottom: 8,
+          }}
+        >
+          下载失败：{error}
+        </div>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {OPTIONS.map((opt) => {
+          const active = value === opt.id
+          const meta = optional.find((o) => o.id === opt.id)
+          const isOptional = opt.id === 'lxgw-wenkai' || opt.id === 'smiley-sans'
+          const installed = !isOptional || (meta?.installed ?? false)
+          const isDownloading = downloadingId === opt.id
+          const mb = meta ? (meta.approxBytes / (1024 * 1024)).toFixed(1) : null
+          return (
+            <button
+              key={opt.id}
+              onClick={() => void handleClick(opt.id)}
+              disabled={isDownloading}
+              style={{
+                ...btnStyle(active ? 'primary' : 'secondary'),
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'flex-start',
+                textAlign: 'left',
+                padding: '8px 12px',
+                gap: 4,
+                position: 'relative',
+              }}
+            >
+              <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', width: '100%' }}>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>{opt.label}</span>
+                <span style={{ fontSize: 10, opacity: 0.7, flex: 1 }}>{opt.hint}</span>
+                {isOptional && installed && (
+                  <span
+                    onClick={(e) => void handleUninstall(opt.id, e)}
+                    style={{
+                      fontSize: 10,
+                      opacity: 0.6,
+                      padding: '2px 6px',
+                      borderRadius: 4,
+                      background: 'rgba(0,0,0,0.15)',
+                      cursor: 'pointer',
+                    }}
+                    title="卸载这个字体"
+                  >
+                    卸载
+                  </span>
+                )}
+                {isOptional && !installed && !isDownloading && (
+                  <span style={{ fontSize: 10, opacity: 0.7 }}>↓ 下载 {mb} MB</span>
+                )}
+                {isDownloading && progress && (
+                  <span style={{ fontSize: 10, opacity: 0.8 }}>
+                    下载中… {Math.round((progress.received / progress.total) * 100)}%
+                  </span>
+                )}
+              </div>
+              <div
+                style={{
+                  fontFamily: installed ? opt.family : 'system-ui, sans-serif',
+                  fontSize: 14,
+                  opacity: installed ? 0.95 : 0.5,
+                }}
+              >
+                {installed
+                  ? '主人，今天也辛苦了。我泡杯茶给您吧？'
+                  : '（点击下载后可见效果）'}
+              </div>
+              {isDownloading && progress && (
+                <div
+                  style={{
+                    width: '100%',
+                    height: 3,
+                    background: 'rgba(0,0,0,0.15)',
+                    borderRadius: 999,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${Math.min(100, (progress.received / progress.total) * 100).toFixed(1)}%`,
+                      height: '100%',
+                      background: 'linear-gradient(90deg, #5a8edf, #7be489)',
+                      transition: 'width 0.2s ease-out',
+                    }}
+                  />
+                </div>
+              )}
+            </button>
+          )
+        })}
+      </div>
+    </>
+  )
+}
+
 function PresetLinesPanel(): React.ReactElement {
   const [path, setPath] = useState<string>('')
   const [busy, setBusy] = useState(false)
