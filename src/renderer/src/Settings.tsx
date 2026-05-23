@@ -600,6 +600,12 @@ export function Settings({ initial, onClose }: SettingsProps) {
               active={draft.persona.preset === 'ojou'}
               onClick={() => setDraft({ ...draft, persona: { ...draft.persona, preset: 'ojou' } })}
             />
+            <PersonaChip
+              label="管家"
+              personaId="butler"
+              active={draft.persona.preset === 'butler'}
+              onClick={() => setDraft({ ...draft, persona: { ...draft.persona, preset: 'butler' } })}
+            />
             {/* User-saved customs */}
             {draft.persona.customs.map((c) => (
               <PersonaChip

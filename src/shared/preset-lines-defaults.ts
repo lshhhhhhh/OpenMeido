@@ -189,6 +189,53 @@ const OJOU: MutePersonaPool = {
   },
 }
 
+const BUTLER: MutePersonaPool = {
+  mute: {
+    low: [
+      '...是，请便。',
+      '了然。',
+      '请。',
+      '在。',
+    ],
+    mid: [
+      '小姐请专心，我退到一边。',
+      '是，先静音了。',
+      '小姐忙吧，我在这儿候着。',
+      '了然，需要时唤一声便可。',
+      '请便。',
+    ],
+    high: [
+      '小姐请专心——我守着，不打扰。',
+      '了然。先不出声了。',
+      '小姐忙完唤一声，我都在。',
+      '请放心，这边一切如常。',
+      '是，小姐。',
+    ],
+  },
+  unmute: {
+    low: [
+      '小姐？',
+      '在的。',
+      '请讲。',
+      '是？',
+    ],
+    mid: [
+      '小姐忙完了？',
+      '小姐唤我？',
+      '在的，小姐。',
+      '小姐回来了。需要什么？',
+      '是，小姐。',
+    ],
+    high: [
+      '小姐——欢迎回来。',
+      '小姐忙完了？我没走。',
+      '在的，等着小姐呢。',
+      '小姐，刚泡的茶还温着。',
+      '是，小姐。一切都备着。',
+    ],
+  },
+}
+
 /**
  * Generic fallback for custom personas. Avoids any specific address term
  * (主人/哥/你) so it doesn't clash with whatever the user wrote in their
@@ -297,6 +344,23 @@ const OJOU_COLD: ColdStartPersonaPool = {
   ],
 }
 
+const BUTLER_COLD: ColdStartPersonaPool = {
+  greeting: [
+    '小姐好。先去 Settings 里把 AI 设置好——在那之前，我恐怕只能照本宣科。',
+    '欢迎您。Settings 里的 AI 还未配置，请先完成那一步，之后我才能正经服侍您。',
+    '小姐——很高兴为您服务。但请先去 Settings 里把 AI 配置好。',
+    '小姐请稍等。Settings 里 AI 还空着，配上之后我们正式开始。',
+    '小姐好。在 Settings 里把 AI 设置好后，我才能真正听得懂您说什么。',
+  ],
+  chatReply: [
+    '小姐——我恐怕还听不懂。请先去 Settings 里把 AI 配置好。',
+    '请稍等一下，小姐。AI 还没配，我只能照念预录的话。',
+    '抱歉，小姐。Settings 里的 AI 还未设置，我现在不能正经回应。',
+    '小姐请见谅——AI 还没接上，请先去 Settings 配置。',
+    '我听见了，但还没法理解。请去 Settings → 后端 配一下 AI。',
+  ],
+}
+
 const DEFAULT_COLD: ColdStartPersonaPool = {
   greeting: [
     '你好。还没配置 AI 呢，去 Settings 里设置一下吧——配好我们才能真正聊天。',
@@ -353,6 +417,19 @@ const OJOU_CELEBRATE: CelebrationPersonaPool = {
   ],
 }
 
+const BUTLER_CELEBRATE: CelebrationPersonaPool = {
+  aiSetup: [
+    '小姐——配置好了。从现在起，我能正经听您说话了。谢谢您。',
+    '一切就绪，小姐。能为您服务，是我的荣幸。',
+    '设置完成。请放心，接下来交给我。',
+  ],
+  advancedTts: [
+    '小姐为我换了新的声音，谢谢您。',
+    '新的语调——听起来确实不一样。多谢小姐用心。',
+    '小姐挑得很好。这声音，我会好好用。',
+  ],
+}
+
 const DEFAULT_CELEBRATE: CelebrationPersonaPool = {
   aiSetup: [
     '好啦，AI 配置好了。我们正经开始聊吧。',
@@ -376,18 +453,21 @@ export const PRESET_LINES_DEFAULTS: PresetLines = {
     maid: MAID,
     imouto: IMOUTO,
     ojou: OJOU,
+    butler: BUTLER,
     default: DEFAULT,
   },
   coldStart: {
     maid: MAID_COLD,
     imouto: IMOUTO_COLD,
     ojou: OJOU_COLD,
+    butler: BUTLER_COLD,
     default: DEFAULT_COLD,
   },
   celebrations: {
     maid: MAID_CELEBRATE,
     imouto: IMOUTO_CELEBRATE,
     ojou: OJOU_CELEBRATE,
+    butler: BUTLER_CELEBRATE,
     default: DEFAULT_CELEBRATE,
   },
 }

@@ -248,7 +248,7 @@ console.log('\n[13] detectCelebrationTriggers — TTS flag already true')
 console.log('\n[14] preset-lines-defaults — cold-start pools populated')
 {
   const cs = PRESET_LINES_DEFAULTS.coldStart
-  for (const p of ['maid', 'imouto', 'ojou', 'default']) {
+  for (const p of ['maid', 'imouto', 'ojou', 'butler', 'default']) {
     const pool = cs[p]
     check(`coldStart.${p}.greeting has ≥3 lines`, pool.greeting.length >= 3, `got ${pool.greeting.length}`)
     check(`coldStart.${p}.chatReply has ≥3 lines`, pool.chatReply.length >= 3, `got ${pool.chatReply.length}`)
@@ -265,7 +265,7 @@ console.log('\n[14] preset-lines-defaults — cold-start pools populated')
 console.log('\n[15] preset-lines-defaults — celebrations pools populated')
 {
   const cb = PRESET_LINES_DEFAULTS.celebrations
-  for (const p of ['maid', 'imouto', 'ojou', 'default']) {
+  for (const p of ['maid', 'imouto', 'ojou', 'butler', 'default']) {
     const pool = cb[p]
     check(`celebrations.${p}.aiSetup has ≥2 lines`, pool.aiSetup.length >= 2, `got ${pool.aiSetup.length}`)
     check(`celebrations.${p}.advancedTts has ≥2 lines`, pool.advancedTts.length >= 2, `got ${pool.advancedTts.length}`)

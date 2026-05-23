@@ -30,18 +30,29 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // Personalization fields — both optional. Even leaving both blank
-  // still lets the user finish setup; we only seed facts when the
-  // user actually typed something. Default callAs comes from the
-  // active persona's address (主人 / 哥 / 你) so the placeholder
-  // already feels right.
+  // Persona quick-pick — limited to the two most opposite-targeted
+  // archetypes (女仆 for users expecting a female-coded companion,
+  // 管家 for users wanting a male-coded one). 妹妹 / 大小姐 / custom
+  // personas stay accessible via Settings → 人物 — the wizard is meant
+  // to nail the first impression, not show every preset. Default
+  // honors whatever's in the incoming config (usually 'maid' from
+  // schema default; could be 'butler' if user already picked it on
+  // a prior reset round).
+  const [personaPick, setPersonaPick] = useState<'maid' | 'butler'>(
+    initial.persona.preset === 'butler' ? 'butler' : 'maid',
+  )
+  // Default callAs hint follows the picked persona's tier-2 address
+  // (主人 for maid, 小姐 for butler). The other presets — imouto's
+  // 哥, ojou's 你 — are still respected when the user starts in those
+  // configs; we just don't surface them here.
   const personaAddress =
-    initial.persona.preset === 'maid'
-      ? '主人'
+    personaPick === 'butler'
+      ? '小姐'
       : initial.persona.preset === 'imouto'
         ? '哥'
         : initial.persona.preset === 'ojou'
           ? '你'
-          : '你'
+          : '主人'
   const [callAs, setCallAs] = useState('')
   const [occupation, setOccupation] = useState('')
 
@@ -80,6 +91,17 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
           // Preserve whatever toggle the user had before; this wizard is
           // about provider/key, not search settings.
           searchEnabled: initial.backend.searchEnabled,
+        },
+        persona: {
+          ...initial.persona,
+          // Save the picked persona — wizard's job is also first
+          // impression of which character the user wants. If user
+          // entered the wizard already on imouto / ojou / a custom
+          // persona, we'd be overwriting; but the wizard only renders
+          // when wizardCompleted=false (truly fresh install), so this
+          // is the canonical first pick. Settings → 人物 lets users
+          // switch to other presets later.
+          preset: personaPick,
         },
       })
       // Seed personalization facts AFTER config save (which initializes
@@ -185,10 +207,70 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
           ×
         </button>
         <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>
-          👋 欢迎，先给妹妹/女仆配个大脑
+          👋 欢迎，先选一位陪伴你的角色
         </div>
+        <div style={{ fontSize: 12, color: '#aaa', marginBottom: 12 }}>
+          女仆或管家——先一键选一个，进入主界面后可以在 Settings → 人物 切换妹妹 / 大小姐 / 自定义。
+        </div>
+
+        {/* Persona quick-pick — just the two opposite archetypes
+            (female-coded maid vs male-coded butler). Other presets
+            (妹妹 / 大小姐 / custom) hide in Settings → 人物. The point
+            here is the first "who is this app FOR me?" decision; we
+            want it to be one click, not a 5-way menu. */}
+        <div
+          style={{
+            display: 'flex',
+            gap: 8,
+            marginBottom: 16,
+          }}
+        >
+          {(
+            [
+              { id: 'maid', label: '女仆', hint: '主人 · 温柔体贴' },
+              { id: 'butler', label: '管家', hint: '小姐 · 沉稳得体' },
+            ] as const
+          ).map((p) => {
+            const selected = personaPick === p.id
+            return (
+              <button
+                key={p.id}
+                onClick={() => setPersonaPick(p.id)}
+                style={{
+                  flex: 1,
+                  padding: '10px 12px',
+                  background: selected
+                    ? 'rgba(120,160,255,0.18)'
+                    : 'rgba(255,255,255,0.04)',
+                  border: selected
+                    ? '1px solid rgba(120,160,255,0.6)'
+                    : '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: 8,
+                  color: '#eee',
+                  cursor: 'pointer',
+                  textAlign: 'center',
+                  fontSize: 14,
+                  fontWeight: selected ? 600 : 500,
+                }}
+              >
+                <div>{p.label}</div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: selected ? '#aad4ff' : '#888',
+                    marginTop: 4,
+                    fontWeight: 400,
+                  }}
+                >
+                  {p.hint}
+                </div>
+              </button>
+            )
+          })}
+        </div>
+
         <div style={{ fontSize: 12, color: '#aaa', marginBottom: 16 }}>
-          需要一个 AI 接口才能聊天。挑一家、注册、把 key 粘进来，2 分钟搞定。
+          接下来需要一个 AI 接口才能聊天。挑一家、注册、把 key 粘进来，2 分钟。
         </div>
 
         {/* Provider radio list — vertical so labels fit comfortably and the
