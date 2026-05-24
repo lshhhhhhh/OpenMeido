@@ -1192,7 +1192,7 @@ export function Settings({ initial, onClose }: SettingsProps) {
         {activeTab === 'about' && (
           <>
             <Section title="版本与更新">
-              <UpdateChecker />
+              <UpdateChecker draft={draft} setDraft={setDraft} />
             </Section>
             <Section title="关于 OpenMeido">
               <div style={{ fontSize: 13, lineHeight: 1.7, color: '#ddd' }}>
@@ -2962,10 +2962,17 @@ type LocalUpdaterState =
   | { kind: 'downloading'; version: string; percent: number; bytesPerSecond: number }
   | { kind: 'downloaded'; version: string }
 
-function UpdateChecker(): React.ReactElement {
+function UpdateChecker({
+  draft,
+  setDraft,
+}: {
+  draft: Config
+  setDraft: (next: Config) => void
+}): React.ReactElement {
   const [version, setVersion] = useState<string>('')
   const [state, setState] = useState<LocalUpdaterState>({ kind: 'idle' })
   const [busy, setBusy] = useState(false)
+  const currentMirror = draft.updater.mirror
 
   useEffect(() => {
     void window.api.app.version().then(setVersion)
@@ -3215,8 +3222,74 @@ function UpdateChecker(): React.ReactElement {
         </div>
       )}
 
+      {/* Download source toggle. GitHub direct is fastest outside CN
+          but often crawls < 100 KB/s from mainland — a ~70MB installer
+          can take 15+ min. ghproxy is a community CDN that fronts
+          GitHub from CN at 1-5 MB/s. Same .exe, same signature. */}
+      <div
+        style={{
+          marginTop: 12,
+          paddingTop: 10,
+          borderTop: '1px solid rgba(255,255,255,0.06)',
+        }}
+      >
+        <div style={{ fontSize: 11, color: '#aaa', marginBottom: 6 }}>下载源</div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {(
+            [
+              { id: 'github' as const, label: 'GitHub', hint: '官方源 · 海外更快' },
+              { id: 'ghproxy' as const, label: 'ghproxy', hint: '国内镜像 · 大陆更快' },
+            ]
+          ).map((opt) => {
+            const selected = currentMirror === opt.id
+            return (
+              <button
+                key={opt.id}
+                onClick={() =>
+                  setDraft({
+                    ...draft,
+                    updater: { ...draft.updater, mirror: opt.id },
+                  })
+                }
+                style={{
+                  flex: 1,
+                  padding: '6px 10px',
+                  background: selected
+                    ? 'rgba(120,160,255,0.18)'
+                    : 'rgba(255,255,255,0.03)',
+                  border: selected
+                    ? '1px solid rgba(120,160,255,0.55)'
+                    : '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: 5,
+                  color: '#eee',
+                  cursor: 'pointer',
+                  textAlign: 'center',
+                  fontSize: 11,
+                  fontWeight: selected ? 600 : 500,
+                }}
+              >
+                <div>{opt.label}</div>
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: selected ? '#aad4ff' : '#888',
+                    marginTop: 2,
+                    fontWeight: 400,
+                  }}
+                >
+                  {opt.hint}
+                </div>
+              </button>
+            )
+          })}
+        </div>
+        <div style={{ fontSize: 10, color: '#666', marginTop: 6, lineHeight: 1.5 }}>
+          切换后立即生效，不用重启 app。下次检查更新会用新源。同样的安装包、同样的签名，只换传输路径。
+        </div>
+      </div>
+
       <div style={{ fontSize: 11, color: '#888', marginTop: 10, lineHeight: 1.6 }}>
-        OpenMeido 启动后约 30 秒会自动检查 GitHub Releases。后台静默下载，下载完成后
+        OpenMeido 启动后约 30 秒会自动检查更新。后台静默下载，下载完成后
         在这里或右下角点"立即重启"即可生效。
       </div>
     </div>

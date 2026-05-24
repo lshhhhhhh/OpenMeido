@@ -28,10 +28,49 @@ import { app, BrowserWindow, ipcMain } from 'electron'
 import pkg from 'electron-updater'
 const { autoUpdater } = pkg
 
+import { getConfig, onConfigChange } from './config.js'
+
 const FIRST_CHECK_DELAY_MS = 30_000
 const PERIODIC_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
 
 let initialized = false
+
+/**
+ * Apply the configured mirror choice to electron-updater. Called at
+ * init and on config change so users can flip the toggle without
+ * relaunching. The 'github' branch resets back to the publish config
+ * shipped in electron-builder.yml (owner/repo); the 'ghproxy' branch
+ * uses a generic provider pointed at the ghproxy CDN, which fronts
+ * GitHub from inside CN at 1-5 MB/s (vs sub-100KB/s direct).
+ */
+function applyMirrorConfig(): void {
+  if (!app.isPackaged) return
+  const mirror = getConfig().updater.mirror
+  try {
+    if (mirror === 'ghproxy') {
+      // ghproxy.com transparently proxies GitHub. The /releases/latest/
+      // download/ URL resolves to the most recent release's assets,
+      // including latest.yml — electron-updater's generic provider
+      // fetches latest.yml from <url>/latest.yml then the installer
+      // from <url>/<filename>. Same bytes as github direct; same
+      // signature; just a different transport.
+      autoUpdater.setFeedURL({
+        provider: 'generic',
+        url: 'https://ghproxy.com/https://github.com/lshhhhhhh/OpenMeido/releases/latest/download',
+      })
+      console.log('[updater] using ghproxy mirror')
+    } else {
+      autoUpdater.setFeedURL({
+        provider: 'github',
+        owner: 'lshhhhhhh',
+        repo: 'OpenMeido',
+      })
+      console.log('[updater] using github direct')
+    }
+  } catch (err) {
+    console.warn('[updater] setFeedURL failed:', err)
+  }
+}
 
 /**
  * Last broadcast state from the updater, kept here so a renderer that
@@ -119,6 +158,21 @@ export function initUpdater(): void {
   // If user consents + download finishes + they don't click "立即
   // 重启" but instead quit normally via X — apply on next launch.
   autoUpdater.autoInstallOnAppQuit = true
+
+  // Apply the user's mirror choice (default github, optional ghproxy
+  // for CN users). Must happen BEFORE the first checkForUpdates fires
+  // so the initial poll respects the setting.
+  applyMirrorConfig()
+  // Re-apply on config change so toggling in Settings takes effect
+  // without a relaunch. The next checkForUpdates (manual or periodic)
+  // will use the new feed URL.
+  let lastMirror = getConfig().updater.mirror
+  onConfigChange((next) => {
+    if (next.updater.mirror !== lastMirror) {
+      lastMirror = next.updater.mirror
+      applyMirrorConfig()
+    }
+  })
 
   autoUpdater.on('checking-for-update', () => {
     console.log('[updater] checking for updates...')

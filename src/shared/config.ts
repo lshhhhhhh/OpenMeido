@@ -754,6 +754,28 @@ export const configSchema = z.object({
    * wipes the config); `reset:memory` keeps these flags so a user who only
    * clears chat history doesn't get re-onboarded.
    */
+  updater: z
+    .object({
+      /**
+       * Download source for auto-updates. GitHub Releases is the default
+       * (fastest in most regions); ghproxy is a community mirror that
+       * fronts GitHub through China-accessible CDN. Users in mainland
+       * China often see GitHub direct downloads stall at < 100 KB/s,
+       * making the ~70MB installer take 15+ minutes. The mirror is a
+       * one-click fix without server-side infrastructure.
+       *
+       * Trade-offs:
+       *   - github: official, signed, fast outside CN
+       *   - ghproxy: third-party reliability, but consistently 1-5 MB/s
+       *     from inside CN. Same .exe + same signature — ghproxy just
+       *     re-serves the bytes.
+       *
+       * Default github. User can flip in Settings → 关于 if updates
+       * are crawling.
+       */
+      mirror: z.enum(['github', 'ghproxy']).default('github'),
+    })
+    .default({}),
   onboarding: z
     .object({
       /**
