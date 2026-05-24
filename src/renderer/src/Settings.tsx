@@ -1620,9 +1620,20 @@ function Live2DTab({
       {error && (
         <div style={{ fontSize: 11, color: '#f99', marginBottom: 8 }}>{error}</div>
       )}
-      <div style={{ fontSize: 11, color: '#888', marginBottom: 12 }}>
+      <div style={{ fontSize: 11, color: '#888', marginBottom: 12, lineHeight: 1.6 }}>
         模型存放在 <code>%APPDATA%/openmeido/live2d-models/</code>。导入的 zip
         必须包含 <code>*.model3.json</code>，否则会被拒收。
+        <br />
+        想要更多免费 Live2D 模型？官方样本库：{' '}
+        <a
+          href="https://www.live2d.com/learn/sample/"
+          target="_blank"
+          rel="noreferrer"
+          style={{ color: '#7ab8ff' }}
+        >
+          live2d.com/learn/sample
+        </a>
+        （下载 zip 后直接点上面的"导入 zip"）。
       </div>
 
       <Label>Portrait Zoom: {portraitZoom.toFixed(2)}</Label>
