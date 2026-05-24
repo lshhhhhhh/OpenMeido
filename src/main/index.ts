@@ -69,6 +69,7 @@ import { recentEmotionEvents } from './emotion-events.js'
 import {
   initAffinity,
   refreshCachedScore,
+  seedInitialIfFresh,
   setAffinityForTest,
 } from './affinity-host.js'
 import { initWeeklyReview } from './weekly-review-host.js'
@@ -365,7 +366,15 @@ onConfigChange((next) => {
     if (memory) {
       memory.newSession()
     }
-    void refreshCachedScore(next.persona.preset)
+    // Seed the new persona's affinity if no record exists yet. Without
+    // this, switching to a persona for the first time (including the
+    // wizard's "I picked imouto" save, which fires after initAffinity
+    // already seeded the boot-default 'maid') leaves the new persona's
+    // record at the synthesized zero — its per-persona AFFINITY_INITIAL
+    // never gets applied. seedInitialIfFresh is idempotent; existing
+    // records (judged or previously seeded) aren't touched.
+    void seedInitialIfFresh(next.persona.preset)
+      .then(() => refreshCachedScore(next.persona.preset))
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('persona:switched', { personaId: next.persona.preset })
     }
@@ -949,6 +958,12 @@ ipcMain.handle('memory:deleteFact', async (_event, factId: number) => {
   const svc = getMemoryService()
   if (!svc) return false
   return svc.deleteFact(factId)
+})
+ipcMain.handle('memory:countLore', async (_event, personaId?: string) => {
+  const svc = getMemoryService()
+  if (!svc) return 0
+  const target = personaId ?? svc.activePersona()
+  return svc.countLore(target)
 })
 
 // Dev / testing convenience: nuke local state and relaunch into the

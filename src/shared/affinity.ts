@@ -74,17 +74,37 @@ export const AFFINITY_MAX = 100
  *      flat-empty on day 1, leaving the user with no "I'm making
  *      progress" feedback. A small initial fill makes the bar feel
  *      like a meter that's already running.
- *   2. **Soften Lv.1 cold-start** — even a 5-point head start is
- *      still squarely Lv.1 (cold stranger), but signals "she's not
- *      hostile, you just haven't earned anything yet" rather than
- *      "she's at zero, you're starting from nothing."
+ *   2. **Soften Lv.1 cold-start** — even a small head start signals
+ *      "she's not hostile" rather than "she's at zero, you start
+ *      from nothing."
+ *
+ * Per-persona seeds reflect the relationship framing. A maid you
+ * just hired starts cold (Lv.1). A sister you've known your whole
+ * life shouldn't — she starts at Lv.2 (familiar). Personas not in
+ * the map fall back to AFFINITY_INITIAL_DEFAULT.
  *
  * Applied lazily at initAffinity time: a record with score=0 AND
  * lastReason===null (i.e. no judgement has ever fired) gets bumped to
  * this value. Existing users at 0 from judgement / decay are NOT
  * touched — they earned that 0.
  */
-export const AFFINITY_INITIAL = 5
+export const AFFINITY_INITIAL_DEFAULT = 5
+export const AFFINITY_INITIAL_BY_PERSONA: Record<string, number> = {
+  // 'maid' / 'butler' / 'ojou' / custom personas all fall back to the
+  // default 5 — they're framed as new acquaintances / strangers.
+  imouto: 20,
+  // ^ Sister, grew up together — starts at the low end of Lv.2 (亲近).
+  // The +5 from API-setup celebration lands her at 25, mid-Lv.2,
+  // which matches the "we know each other but haven't been close
+  // lately" feel.
+}
+
+/** Resolve the per-persona initial seed. Personas not in the map get
+ *  the default. Use this from anywhere that needs to know "what does
+ *  this persona's relationship START at?". */
+export function initialAffinityFor(personaId: string): number {
+  return AFFINITY_INITIAL_BY_PERSONA[personaId] ?? AFFINITY_INITIAL_DEFAULT
+}
 /** Decay floor — score never drops below this. The user has chatted with
  *  her before; she shouldn't act like a stranger again no matter how long
  *  the absence. Initial-state zero is allowed to live below this; the

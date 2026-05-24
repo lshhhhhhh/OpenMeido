@@ -77,8 +77,36 @@ if (wipeAll || wipeConfig || wipeMemory) {
     // Delete every file inside userData (NOT the dir itself — Electron
     // wrote config to it during the relaunch hand-off; we can wipe
     // CONTENTS but not the dir itself reliably mid-process).
+    //
+    // Belt + suspenders strategy: explicitly target the known heavy
+    // dirs (hf-cache, models, fonts) FIRST with retries, because
+    // Windows can occasionally hold file handles past the previous
+    // process exit (transformers.js mmap'd the ONNX, electron-store
+    // backed config, etc.). Logging each pass tells us when it
+    // failed in case rmSync swallowed an error.
+    const KNOWN_HEAVY_DIRS = ['hf-cache', 'live2d-models', 'fonts', 'backgrounds']
+    for (const name of KNOWN_HEAVY_DIRS) {
+      const target = join(dir, name)
+      if (existsSync(target)) {
+        tryDelete(target)
+        // Verify the deletion actually landed. If hf-cache still
+        // exists after the call (Windows file lock most likely),
+        // the user would otherwise silently get "model still
+        // available" after a factory reset — confusing.
+        if (existsSync(target)) {
+          console.warn(
+            `[reset] ${target} STILL EXISTS after tryDelete — likely a Windows file handle leak from prior session. ` +
+              'You may need to manually delete this folder.',
+          )
+        }
+      }
+    }
+    // Then sweep everything else readdirSync returns. Heavy dirs are
+    // already gone (or refused) at this point.
     try {
-      for (const name of readdirSync(dir)) {
+      const entries = readdirSync(dir)
+      console.log(`[reset] readdirSync(${dir}) returned ${entries.length} entries: ${entries.join(', ')}`)
+      for (const name of entries) {
         tryDelete(join(dir, name))
       }
       console.log(`[reset] wiped contents of ${dir}`)

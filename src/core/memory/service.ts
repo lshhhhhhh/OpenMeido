@@ -98,6 +98,9 @@ export interface MemoryService {
   seedLoreEpisode(personaId: string, text: string): Promise<number | null>
   /** Wipe all kind='lore' episodes for a persona. Idempotent reseed step. */
   clearLore(personaId: string): Promise<number>
+  /** Count kind='lore' episodes for a persona — used by Settings UI
+   *  to show "X 条记忆碎片" without firing a reseed first. */
+  countLore(personaId: string): Promise<number>
   /** Seed an anchor fact (scope='persona'). Used by the lore seeder
    *  for archetype-defining statements that the persona reads every
    *  turn via factsBlock. */
@@ -239,11 +242,33 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     async seedLoreEpisode(personaId, text) {
       const trimmed = text.trim()
       if (!trimmed) return null
+      // In naive mode, the embed model isn't on disk yet — but calling
+      // embedLocal anyway triggers transformers.js's remote fallback,
+      // which silently downloads ~50MB to env.cacheDir = userData/hf-cache.
+      // That stealth download breaks the banner UX in two ways:
+      //   1. The "下载嵌入模型" banner stays visible because the naive
+      //      flag wasn't flipped (no broadcast went out)
+      //   2. When the user clicks the banner's 下载 button later,
+      //      runDownload's findBundledModel() check short-circuits
+      //      (model's already on disk) and complete fires instantly,
+      //      vanishing the banner without ever showing a progress bar
+      // So: in naive mode, skip lore writes entirely. Anchor facts still
+      // seed (no embed needed). The naive→full transition hook reseeds
+      // lore after the user explicitly downloads via the banner.
+      if (isNaiveMode?.()) {
+        return null
+      }
       try {
-        // Lore is indexed for retrieval, so embedding is required even in
-        // naive mode (otherwise these fragments would never surface in RAG).
-        // The embed call is bounded by the same 5s timeout as live writes.
-        const vec = await withTimeout(embed(trimmed), 5_000, 'embed timed out')
+        // Lore is indexed for retrieval, so embedding is required.
+        // 30s timeout (not the 5s of regular writes): the very first
+        // embed call after the model lands on disk pays a ~3-10s ONNX
+        // cold-start. With the 5s default the FIRST lore episode of a
+        // freshly downloaded model would timeout, the seeder would fail
+        // ALL subsequent episodes (they were waiting on the same shared
+        // extractor promise that just rejected), and the user would end
+        // up with 0 lore even though anchors wrote fine. 30s gives the
+        // cold-start room without freezing the user (this is background).
+        const vec = await withTimeout(embed(trimmed), 30_000, 'embed timed out')
         return await adapter.addEpisode(
           personaId,
           'assistant',
@@ -262,6 +287,10 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
     clearLore(personaId) {
       return adapter.clearLore(personaId)
+    },
+
+    countLore(personaId) {
+      return adapter.countLore(personaId)
     },
 
     async seedAnchorFact(personaId, key, value) {
@@ -330,7 +359,34 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
         // are kept parallel in raw conversation episodes (L1 sliding window + L2 vector-recalled memories)
         // and dynamically retrieved tool outputs, avoiding chronic L3 prompt pollution.
         const personal = await adapter.listActiveFacts(persona(), 200, 'personal')
-        return renderFactsBlock(personal, minConfidence)
+        const threshold = minConfidence ?? 0.5
+        const usable = personal.filter((f) => f.confidence >= threshold)
+        if (usable.length === 0) return ''
+
+        // Split: `persona.*` keys are relationship-setting / identity facts
+        // seeded by the lore pipeline. They describe WHO SHE IS and HER
+        // relationship with the user, not facts about the user. They MUST
+        // render under a separate header — putting them in [关于用户的已知事实]
+        // makes the model read "她家族三代侍奉主人家" as a fact about some
+        // third party, not internalize it as her own identity.
+        const personaFacts = usable.filter((f) => f.key.startsWith('persona.'))
+        const userFacts = usable.filter((f) => !f.key.startsWith('persona.'))
+
+        const sections: string[] = []
+        if (personaFacts.length > 0) {
+          // Drop the debugger-friendly keys (`persona.relationship.framing` etc.)
+          // — they're internal tags, not content the model should see. Values
+          // should be written in first person so they read as identity.
+          const lines = personaFacts.map((f) => `- ${f.value}`).join('\n')
+          sections.push(
+            `[你的身份与关系背景 — 这是你这个角色的真实设定，请深度代入]\n${lines}`,
+          )
+        }
+        if (userFacts.length > 0) {
+          const lines = userFacts.map((f) => `- ${f.key}: ${f.value}`).join('\n')
+          sections.push(`[关于用户的已知事实]\n${lines}`)
+        }
+        return sections.join('\n\n') + '\n'
       } catch (err) {
         reportError('factsBlock', err)
         return ''

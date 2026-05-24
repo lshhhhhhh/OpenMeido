@@ -277,22 +277,18 @@ const api = {
     delete(personaId: string): Promise<number> {
       return ipcRenderer.invoke('persona:delete', personaId) as Promise<number>
     },
-    /** Wipe + re-seed lore episodes + anchor facts for a (persona, archetype)
-     *  pair. Idempotent. Wizard calls this after archetype pick; Settings
-     *  may call it later if the user switches archetypes. */
-    seedLore(
-      personaId: string,
-      archetype: 'newcomer' | 'childhood',
-    ): Promise<{
+    /** Wipe + re-seed lore episodes + anchor facts for a persona.
+     *  Idempotent. Wizard calls this after persona pick; Settings may
+     *  call it later via the "重新种入" button. Personas without a
+     *  lore pack (butler / ojou / custom) get a silent no-op
+     *  ({ok:true, anchorsSeeded:0, loreSeeded:0}). */
+    seedLore(personaId: string): Promise<{
       ok: boolean
       loreSeeded: number
       anchorsSeeded: number
       error?: string
     }> {
-      return ipcRenderer.invoke('persona:seed-lore', {
-        personaId,
-        archetype,
-      }) as Promise<{
+      return ipcRenderer.invoke('persona:seed-lore', { personaId }) as Promise<{
         ok: boolean
         loreSeeded: number
         anchorsSeeded: number
@@ -585,6 +581,13 @@ const api = {
     },
     deleteFact(factId: number): Promise<boolean> {
       return ipcRenderer.invoke('memory:deleteFact', factId) as Promise<boolean>
+    },
+    /** Count of seeded kind='lore' episodes for a persona. Optional
+     *  personaId defaults to the active persona. Used by Settings →
+     *  关系背景 to show "+ N 条记忆碎片" on initial mount without
+     *  triggering a reseed. */
+    countLore(personaId?: string): Promise<number> {
+      return ipcRenderer.invoke('memory:countLore', personaId) as Promise<number>
     },
     /** Seed a fact directly (no LLM extraction). Setup wizard uses this
      *  to record user-supplied callAs / occupation so the first greeting

@@ -213,6 +213,11 @@ export default function App() {
   // the in-app download. Flipped via embed.status() at boot + via the
   // embed.onComplete listener.
   const [naiveMode, setNaiveMode] = useState(false)
+  // modelPresent tracks the filesystem state (does the embed model exist
+  // on disk). Banner display = naiveMode && !modelPresent: even if main's
+  // naive flag is stale, file presence overrides — we don't want users
+  // seeing "下载" while Settings shows "已就绪".
+  const [modelPresent, setModelPresent] = useState(false)
   const [downloadInProgress, setDownloadInProgress] = useState(false)
   const [downloadProgress, setDownloadProgress] = useState<{
     received: number
@@ -547,6 +552,7 @@ export default function App() {
   useEffect(() => {
     void window.api.embed.status().then((s) => {
       setNaiveMode(s.naive)
+      setModelPresent(s.modelPresent)
       setDownloadInProgress(s.inProgress)
       setDownloadProgress({ received: s.receivedBytes, total: s.totalBytes, file: s.currentFile })
     })
@@ -556,7 +562,10 @@ export default function App() {
     })
     const offC = window.api.embed.onComplete((r) => {
       setDownloadInProgress(false)
-      if (r.ok) setNaiveMode(false)
+      if (r.ok) {
+        setNaiveMode(false)
+        setModelPresent(true)
+      }
     })
     return () => {
       offP()
@@ -1623,56 +1632,119 @@ export default function App() {
             )}
 
             {/* Naive-memory-mode banner. Persists until the embed model is
-                downloaded. Becomes a progress bar during the download. */}
-            {naiveMode && (
+                downloaded. Becomes a progress bar during the download.
+                modelPresent overrides the naive flag — if the file is on
+                disk, hide the banner regardless of what main thinks.
+
+                Downloading layout: two rows. Top row = status line with
+                MB readout. Bottom row = full-width thick bar so it's
+                actually visible (the old 100×6 bar with #cb9 fill on a
+                yellow background blended into nothing — users thought
+                clicking 下载 did nothing). The bar's expected total is
+                estimated at 95MB (the size advertised in the prompt)
+                if Content-Length headers haven't accumulated yet — that
+                way the bar starts moving immediately on first bytes
+                instead of jumping forward as each file's header lands. */}
+            {naiveMode && !modelPresent && (
               <div
                 style={{
                   fontSize: 11,
                   color: '#664',
                   background: 'rgba(255, 240, 180, 0.65)',
-                  padding: '6px 10px',
+                  padding: downloadInProgress ? '8px 10px' : '6px 10px',
                   borderRadius: 4,
                   display: 'flex',
+                  flexDirection: downloadInProgress ? 'column' : 'row',
+                  alignItems: downloadInProgress ? 'stretch' : 'center',
                   justifyContent: 'space-between',
-                  alignItems: 'center',
-                  gap: 8,
+                  gap: downloadInProgress ? 6 : 8,
                 }}
               >
                 {downloadInProgress ? (
                   <>
-                    <span style={{ flex: 1 }}>
-                      正在下载嵌入模型 ({downloadProgress.file ?? '...'}) —{' '}
-                      {downloadProgress.total > 0
-                        ? `${Math.round((100 * downloadProgress.received) / downloadProgress.total)}%`
-                        : `${(downloadProgress.received / 1_000_000).toFixed(1)} MB`}
-                    </span>
-                    <div
-                      style={{
-                        flex: '0 0 auto',
-                        width: 100,
-                        height: 6,
-                        background: 'rgba(0,0,0,0.1)',
-                        borderRadius: 3,
-                        overflow: 'hidden',
-                      }}
-                    >
-                      <div
-                        style={{
-                          height: '100%',
-                          background: '#cb9',
-                          width:
-                            downloadProgress.total > 0
-                              ? `${(100 * downloadProgress.received) / downloadProgress.total}%`
-                              : '20%',
-                          transition: 'width 200ms ease-out',
-                        }}
-                      />
-                    </div>
+                    {(() => {
+                      // 95MB is the advertised total in the cta below;
+                      // if Content-Length aggregation hasn't caught up,
+                      // fall back to that so the bar starts moving.
+                      const ESTIMATED_TOTAL = 95 * 1024 * 1024
+                      const total =
+                        downloadProgress.total > ESTIMATED_TOTAL / 2
+                          ? downloadProgress.total
+                          : ESTIMATED_TOTAL
+                      const pct = Math.max(
+                        0,
+                        Math.min(100, (100 * downloadProgress.received) / total),
+                      )
+                      const recvMb = (downloadProgress.received / 1024 / 1024).toFixed(1)
+                      const totalMb = (total / 1024 / 1024).toFixed(0)
+                      return (
+                        <>
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'baseline',
+                              gap: 8,
+                            }}
+                          >
+                            <span style={{ color: '#553', fontWeight: 500 }}>
+                              📥 正在下载长期记忆模型
+                              {downloadProgress.file ? (
+                                <span style={{ color: '#887', fontWeight: 400 }}>
+                                  {' '}
+                                  · {downloadProgress.file}
+                                </span>
+                              ) : null}
+                            </span>
+                            <span
+                              style={{
+                                fontFamily: 'monospace',
+                                fontSize: 11,
+                                color: '#553',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {recvMb} / ~{totalMb} MB · {pct.toFixed(0)}%
+                            </span>
+                          </div>
+                          <div
+                            style={{
+                              width: '100%',
+                              height: 10,
+                              background: 'rgba(120, 90, 30, 0.18)',
+                              borderRadius: 5,
+                              overflow: 'hidden',
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: `${pct}%`,
+                                height: '100%',
+                                background:
+                                  'linear-gradient(90deg, #d9a25c, #e8b86b)',
+                                transition: 'width 200ms ease-out',
+                                boxShadow: '0 0 4px rgba(217, 162, 92, 0.4)',
+                              }}
+                            />
+                          </div>
+                          <div
+                            style={{
+                              fontSize: 10,
+                              color: '#776',
+                              lineHeight: 1.4,
+                            }}
+                          >
+                            下载完成后她就能记住更早之前的事——不用一直重新自我介绍。
+                          </div>
+                        </>
+                      )
+                    })()}
                   </>
                 ) : (
                   <>
                     <span style={{ flex: 1 }}>
-                      💡 暂未启用长期记忆。下载嵌入模型（约 95 MB）后女仆能记住更久之前的事。
+                      💡 暂未启用长期记忆。下载嵌入模型（约 95 MB）后
+                      {config ? resolvePersona(config.persona).name : '她'}能记住更久之前的事。
                     </span>
                     <button
                       onClick={() => {
@@ -2020,7 +2092,7 @@ export default function App() {
                   : voiceState === 'transcribing'
                     ? '正在转成文字…'
                     : busy
-                      ? '女仆思考中…可以先写下一句'
+                      ? `${config ? resolvePersona(config.persona).name : '她'}思考中…可以先写下一句`
                       : attachments.length
                       ? '可以加一句问她（也可以直接 Send）'
                       : // Idle: rotate onboarding tips so the empty input
@@ -2038,7 +2110,11 @@ export default function App() {
             <button
               onClick={send}
               disabled={!input.trim() && attachments.length === 0}
-              title={busy ? '女仆还在回复，按发送会排队，等她说完自动发出' : '发送'}
+              title={
+                busy
+                  ? `${config ? resolvePersona(config.persona).name : '她'}还在回复，按发送会排队，等她说完自动发出`
+                  : '发送'
+              }
               style={{
                 padding: '6px 16px',
                 background: '#5a8edf',
@@ -2072,6 +2148,7 @@ export default function App() {
         }}
         refreshActivityToken={activityRefreshToken}
         onSendChat={sendText}
+        personaName={config ? resolvePersona(config.persona).name : undefined}
       />
 
       {settingsOpen && config && (

@@ -636,6 +636,7 @@ export function Settings({ initial, onClose }: SettingsProps) {
                 setDraft({
                   ...draft,
                   persona: {
+                    ...draft.persona,
                     preset: id,
                     customs: [
                       ...draft.persona.customs,
@@ -657,6 +658,13 @@ export function Settings({ initial, onClose }: SettingsProps) {
             draft={draft}
             setDraft={setDraft}
           />
+
+          {/* Relationship-background panel. Surfaces for personas that
+              have a lore pack (maid / imouto). Other personas hide this
+              entirely — for them it's just noise. */}
+          {(draft.persona.preset === 'maid' || draft.persona.preset === 'imouto') && (
+            <ArchetypePanel draft={draft} />
+          )}
 
           {/* Detail panel for the currently-selected persona. */}
           {draft.persona.preset in personaPresets ? (
@@ -789,6 +797,7 @@ export function Settings({ initial, onClose }: SettingsProps) {
                       setDraft({
                         ...draft,
                         persona: {
+                          ...draft.persona,
                           // Fall back to maid after deletion.
                           preset: 'maid',
                           customs: draft.persona.customs.filter((c) => c.id !== active.id),
@@ -3990,13 +3999,177 @@ function MemoryTab({ personaId }: { personaId: string }) {
  * the LLM has decided to "remember" about them — and prune wrong facts
  * with one click. Facts auto-refresh on mount and after manual reflect.
  */
+/**
+ * Relationship-background panel. Surfaces whenever the active persona
+ * has a lore pack (currently maid + imouto). Shows the anchor facts
+ * that were seeded for this persona and a "重新种入" button.
+ *
+ * Each persona has its own natural relationship setup hard-coded in
+ * shared/persona-lore.ts — there's no archetype dropdown anymore. If
+ * you switched personas and the new one has a lore pack but no anchors
+ * yet (you didn't go through wizard with that persona selected), hit
+ * "重新种入" once to seed.
+ */
+function ArchetypePanel({ draft }: { draft: Config }): React.ReactElement {
+  const personaId = draft.persona.preset
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState<string | null>(null)
+  // Inline preview of seeded anchors. Anchors are filtered out of
+  // FactsPanel (they're not user attributes), so without this preview
+  // "重新种入" feels like a black box.
+  const [anchors, setAnchors] = useState<Fact[]>([])
+  const [loreCount, setLoreCount] = useState<number | null>(null)
+
+  async function refresh(): Promise<void> {
+    try {
+      const all = await window.api.memory.listFacts(200)
+      setAnchors(all.filter((f) => f.key.startsWith('persona.')))
+      // Fetch lore count directly so the panel shows pre-existing
+      // episodes on mount (before any reseed) — answers the user
+      // question "我点之前那些碎片有没有?".
+      const n = await window.api.memory.countLore(personaId)
+      setLoreCount(n)
+    } catch (err) {
+      console.warn('[relationship-panel] refresh failed:', err)
+    }
+  }
+
+  useEffect(() => {
+    void refresh()
+  }, [personaId])
+
+  async function reseed(): Promise<void> {
+    setBusy(true)
+    setStatus(null)
+    try {
+      const result = await window.api.persona.seedLore(personaId)
+      if (result.ok) {
+        if (result.anchorsSeeded === 0 && result.loreSeeded === 0) {
+          setStatus('这个 persona 没有预设的关系背景。')
+        } else {
+          setStatus(
+            `已重新种入：${result.anchorsSeeded} 条关系锚点 + ${result.loreSeeded} 条记忆碎片`,
+          )
+        }
+        setLoreCount(result.loreSeeded)
+      } else {
+        setStatus(`种入失败：${result.error ?? '未知错误'}`)
+      }
+      await refresh()
+    } catch (err) {
+      setStatus(`种入失败：${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setBusy(false)
+      setTimeout(() => setStatus(null), 6000)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        marginTop: 12,
+        padding: 10,
+        background: 'rgba(120,160,255,0.06)',
+        border: '1px solid rgba(120,160,255,0.18)',
+        borderRadius: 6,
+      }}
+    >
+      <Label>关系背景</Label>
+      <div style={{ fontSize: 11, color: '#888', marginBottom: 8, lineHeight: 1.5 }}>
+        她和你的关系。每个 persona 有自己天然的设定——女仆是新来的，妹妹是从小一起长大。
+        以"关系锚点"+若干"记忆碎片"的形式注入她的内心，影响她的语气和行为。
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button onClick={() => void reseed()} disabled={busy} style={btnStyle('secondary')}>
+          {busy ? '种入中…' : '重新种入她的记忆'}
+        </button>
+        {status && (
+          <span
+            style={{
+              fontSize: 11,
+              color: status.startsWith('已') ? '#9c9' : status.startsWith('这个') ? '#aaa' : '#f99',
+              flex: 1,
+            }}
+          >
+            {status}
+          </span>
+        )}
+      </div>
+
+      {/* Preview of seeded anchors so the user can verify the write
+          landed. Anchors are filtered out of FactsPanel (they're not
+          user attributes), so without this preview "重新种入" feels
+          like a black box. */}
+      <div style={{ marginTop: 12 }}>
+        <div style={{ fontSize: 11, color: '#aaa', marginBottom: 6 }}>
+          当前已种入：{anchors.length} 条锚点 ·{' '}
+          {loreCount !== null ? `${loreCount} 条记忆碎片` : '记忆碎片数获取中...'}
+        </div>
+        {anchors.length === 0 ? (
+          <div
+            style={{
+              fontSize: 11,
+              color: '#888',
+              padding: 8,
+              background: 'rgba(255,255,255,0.03)',
+              borderRadius: 4,
+              lineHeight: 1.5,
+            }}
+          >
+            还没有种入。点上面的"重新种入"按钮。如果点了仍然为空，可能是这个 persona 没有预设的关系背景（butler / 大小姐 / 自定义），或者长期记忆模型还没下载好。
+          </div>
+        ) : (
+          <div
+            style={{
+              background: 'rgba(255,255,255,0.03)',
+              borderRadius: 4,
+              padding: 6,
+              maxHeight: 180,
+              overflowY: 'auto',
+              fontSize: 11,
+              lineHeight: 1.6,
+            }}
+          >
+            {anchors.map((f) => (
+              <div
+                key={f.id}
+                style={{
+                  padding: '4px 6px',
+                  marginBottom: 3,
+                  borderLeft: '2px solid rgba(120,160,255,0.4)',
+                  paddingLeft: 8,
+                  color: '#ddd',
+                }}
+                title={`${f.key} · ${(f.confidence * 100).toFixed(0)}%`}
+              >
+                {f.value}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={{ fontSize: 10, color: '#666', marginTop: 8, lineHeight: 1.5 }}>
+        重新种入会先清除旧的锚点和记忆碎片，再写入当前 persona 的预设内容。聊天历史不受影响。记忆碎片需要长期记忆模型，没下载前只会写入锚点。
+      </div>
+    </div>
+  )
+}
+
 function FactsPanel() {
   const [facts, setFacts] = useState<Fact[]>([])
   const [busy, setBusy] = useState(false)
   const [lastReflect, setLastReflect] = useState<string | null>(null)
 
   async function refresh(): Promise<void> {
-    setFacts(await window.api.memory.listFacts(200))
+    const all = await window.api.memory.listFacts(200)
+    // Hide `persona.*` keys — those are pre-seeded backstory / relationship
+    // facts that belong to the lore pipeline (managed via the archetype
+    // picker), not user-attributable facts that the LLM extracted. Mixing
+    // them here is what makes the panel look "weird" — the user sees
+    // "persona.relationship.framing: 她家族三代..." next to their own
+    // attributes like "user.preferred_address: 主人".
+    setFacts(all.filter((f) => !f.key.startsWith('persona.')))
   }
 
   useEffect(() => {

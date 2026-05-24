@@ -35,9 +35,35 @@ let initError: string | null = null
 let naiveMode = true
 
 /** Read by service.isNaiveMode() per-call. Exported for the renderer
- *  status pill / banner via IPC. */
+ *  status pill / banner via IPC.
+ *
+ *  Self-healing: when the in-memory flag says "naive" but findBundledModel
+ *  finds the files on disk, the two states have diverged (e.g. the
+ *  background warmup downloaded the model but its post-download flip
+ *  failed, OR the user copied files manually, OR a prior session's
+ *  partial download finished offline). In that case the Settings panel
+ *  shows "已就绪" while the App banner still nags to download — a real
+ *  bug users hit. Calling exitNaiveMemoryMode() here flips the flag,
+ *  broadcasts the change, and fires the naive-exit hooks (including
+ *  the persona-lore auto-reseed). Subsequent reads return false. */
 export function isNaiveMemoryMode(): boolean {
+  if (naiveMode && findBundledModel()) {
+    console.log('[memory] isNaiveMemoryMode self-heal: model is on disk, exiting naive mode')
+    exitNaiveMemoryMode()
+  }
   return naiveMode
+}
+
+// Hooks that fire when the embed model becomes available. Used by
+// persona-lore-host to auto-reseed lore episodes that were silently
+// skipped during naive-mode seeding (anchor facts persist OK without
+// embeddings, but lore episodes need a vec entry to be RAG-retrievable).
+const naiveExitCallbacks: Array<() => void> = []
+
+/** Register a callback that fires once when the embed model becomes
+ *  available. Safe to call before initMemory(). */
+export function onNaiveModeExit(cb: () => void): void {
+  naiveExitCallbacks.push(cb)
 }
 
 /** Called by the download host after the model lands on disk. */
@@ -47,6 +73,27 @@ export function exitNaiveMemoryMode(): void {
     console.log('[memory] exiting naive mode — model is now available')
     // Warm the model so the next turn doesn't pay cold-start.
     preloadLocalEmbed()
+    for (const cb of naiveExitCallbacks) {
+      try {
+        cb()
+      } catch (err) {
+        console.warn('[memory] naive-exit callback failed:', err)
+      }
+    }
+    // Tell the renderer so any naive-mode banner can hide. Without this
+    // broadcast, paths that flip naiveMode internally (e.g. the
+    // isNaiveMemoryMode self-heal, the post-reset short-circuit) would
+    // leave App.tsx's cached `naiveMode` state at its boot value forever.
+    // Settings reads modelPresent directly from the IPC, so it already
+    // shows the correct state — only the App banner needs this push.
+    // We re-use the existing embed:downloadComplete channel; App.tsx and
+    // Settings both subscribe and react to {ok: true} the same way they
+    // do for a real download finish, so this is a free reuse.
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) {
+        w.webContents.send('embed:downloadComplete', { ok: true })
+      }
+    }
   }
 }
 

@@ -30,35 +30,37 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // Personalization fields — both optional. Even leaving both blank
-  // Persona quick-pick — limited to the two most opposite-targeted
-  // archetypes (女仆 for users expecting a female-coded companion,
-  // 管家 for users wanting a male-coded one). 妹妹 / 大小姐 / custom
-  // personas stay accessible via Settings → 人物 — the wizard is meant
-  // to nail the first impression, not show every preset. Default
-  // honors whatever's in the incoming config (usually 'maid' from
-  // schema default; could be 'butler' if user already picked it on
-  // a prior reset round).
-  const [personaPick, setPersonaPick] = useState<'maid' | 'butler'>(
-    initial.persona.preset === 'butler' ? 'butler' : 'maid',
+  // Persona quick-pick. Two presets shipped here:
+  //   - 女仆 (maid): new-arrival service archetype. "Master / I just
+  //     started 3 weeks ago / still learning your habits".
+  //   - 妹妹 (imouto): shared-childhood sibling archetype. "Brother /
+  //     we grew up together / I'm tsundere but I care".
+  // Both are female-coded and ship with full lore packs (see
+  // shared/persona-lore.ts). 管家 / 大小姐 / custom personas stay
+  // accessible via Settings → 人物 — butler hasn't been polished to
+  // first-impression quality yet, so we keep him out of the wizard.
+  // Default honors whatever's in the incoming config (usually 'maid'
+  // from schema default; could be 'imouto' if user already picked it
+  // on a prior reset round).
+  const [personaPick, setPersonaPick] = useState<'maid' | 'imouto'>(
+    initial.persona.preset === 'imouto' ? 'imouto' : 'maid',
   )
-  // Relationship archetype — currently only the maid persona has lore packs
-  // (see shared/persona-lore.ts). 'newcomer' is the conservative default:
-  // user is her first employer, she has no fabricated history. 'childhood'
-  // is the deeper opt-in archetype (you grew up together) — players who
-  // want it know what they're signing up for. butler users skip this step.
-  const [archetypePick, setArchetypePick] = useState<'newcomer' | 'childhood'>('newcomer')
-  // Default callAs hint follows the picked persona's tier-2 address
-  // (主人 for maid, 小姐 for butler). The other presets — imouto's
-  // 哥, ojou's 你 — are still respected when the user starts in those
-  // configs; we just don't surface them here.
+  // Default callAs hint follows the picked persona's tier-2 address.
+  // Wizard quickpick currently surfaces maid + imouto, so we resolve
+  // those two directly. ojou ('你') / butler ('小姐') are still
+  // respected when user enters wizard with those configs preserved
+  // from a prior reset round — fall back to the incoming preset's
+  // address for those edge cases.
   const personaAddress =
-    personaPick === 'butler'
-      ? '小姐'
-      : initial.persona.preset === 'imouto'
-        ? '哥'
-        : initial.persona.preset === 'ojou'
-          ? '你'
-          : '主人'
+    personaPick === 'imouto'
+      ? '哥'
+      : personaPick === 'maid'
+        ? '主人'
+        : initial.persona.preset === 'butler'
+          ? '小姐'
+          : initial.persona.preset === 'ojou'
+            ? '你'
+            : '主人'
   const [callAs, setCallAs] = useState('')
   const [occupation, setOccupation] = useState('')
   // Privacy consent — both default ON because they ARE the soul of
@@ -123,15 +125,12 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
       // configure multiple backends and round-trip between them without
       // re-entering keys.
       const apiKeys = { ...initial.backend.apiKeys, [preset.url]: trimmed }
-      // Auto-pick a Live2D model matching the persona — butler users
-      // shouldn't open the app and see a female character despite
-      // having explicitly picked the male preset. natori_pro_en is the
-      // bundled male model (Live2D Cubism Free Material License,
-      // shipped from v0.1.9). maid stays on hiyori_pro_en. Settings →
-      // Live2D lets users override later (e.g. import a custom model
-      // and use it for whatever persona).
-      const matchingModel =
-        personaPick === 'butler' ? 'natori_pro_en' : 'hiyori_pro_en'
+      // Both wizard-surfaced personas (maid + imouto) are female, so
+      // hiyori_pro_en (the bundled female model) fits both. Settings
+      // → Live2D lets users override later. natori_pro_en (the
+      // bundled male model from v0.1.9) is reachable through Settings
+      // when butler is picked there.
+      const matchingModel = 'hiyori_pro_en'
       await onSave({
         ...initial,
         backend: {
@@ -191,14 +190,12 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
       }
       // Seed persona lore — anchor facts (scope='persona') for the every-turn
       // backstory + lore episodes (kind='lore') for RAG-retrievable interior
-      // memories. Only the maid persona has lore packs configured today; for
-      // butler this call resolves with seeded:0 and is a no-op. Fire-and-
-      // forget; if it fails we don't block the wizard's success state.
-      if (personaPick === 'maid') {
-        await window.api.persona
-          .seedLore('maid', archetypePick)
-          .catch((err) => console.warn('[wizard] seedLore failed:', err))
-      }
+      // memories. Only personas with a lore pack actually write anything;
+      // butler / ojou / custom = silent no-op. Fire-and-forget; if it fails
+      // we don't block the wizard's success state.
+      await window.api.persona
+        .seedLore(personaPick)
+        .catch((err) => console.warn('[wizard] seedLore failed:', err))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setSaving(false)
@@ -324,25 +321,29 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
           👋 欢迎，先选一位陪伴你的角色
         </div>
         <div style={{ fontSize: 12, color: '#aaa', marginBottom: 12 }}>
-          女仆或管家——先一键选一个，进入主界面后可以在 Settings → 人物 切换妹妹 / 大小姐 / 自定义。
+          女仆或妹妹——先一键选一个，进入主界面后可以在 Settings → 人物 切换管家 / 大小姐 / 自定义。
         </div>
 
-        {/* Persona quick-pick — just the two opposite archetypes
-            (female-coded maid vs male-coded butler). Other presets
-            (妹妹 / 大小姐 / custom) hide in Settings → 人物. The point
-            here is the first "who is this app FOR me?" decision; we
-            want it to be one click, not a 5-way menu. */}
+        {/* Persona quick-pick — the two main first-impression presets.
+            Both ship with full lore packs (see shared/persona-lore.ts)
+            and auto-seed on save. Each persona has its OWN natural
+            relationship setup, so the hint conveys both address style
+            AND framing.
+
+            Butler / ojou / custom personas stay in Settings → 人物.
+            Butler in particular hasn't been polished to first-
+            impression quality yet, so we don't surface him here. */}
         <div
           style={{
             display: 'flex',
             gap: 8,
-            marginBottom: 16,
+            marginBottom: 8,
           }}
         >
           {(
             [
-              { id: 'maid', label: '女仆', hint: '主人 · 温柔体贴' },
-              { id: 'butler', label: '管家', hint: '小姐 · 沉稳得体' },
+              { id: 'maid', label: '女仆', hint: '才到岗的新人 · 叫你 "主人"' },
+              { id: 'imouto', label: '妹妹', hint: '从小一起长大 · 叫你 "哥"' },
             ] as const
           ).map((p) => {
             const selected = personaPick === p.id
@@ -382,76 +383,19 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
             )
           })}
         </div>
-
-        {/* Relationship archetype — only surfaced for the maid persona
-            (where lore packs exist). 'newcomer' is the conservative
-            default: user is her first employer, no fabricated history.
-            'childhood' is the deeper opt-in — players who want it know
-            what they're signing up for. Picking either fires a seed
-            after save; butler users skip this whole block. */}
-        {personaPick === 'maid' && (
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 13, color: '#ccc', marginBottom: 6 }}>
-              她和你的关系
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {(
-                [
-                  {
-                    id: 'newcomer',
-                    label: '新人（默认）',
-                    hint: '你是她的第一个主人，她刚来不久',
-                  },
-                  {
-                    id: 'childhood',
-                    label: '童年契约',
-                    hint: '你们从小一起长大 · 需较强代入感',
-                  },
-                ] as const
-              ).map((a) => {
-                const selected = archetypePick === a.id
-                return (
-                  <button
-                    key={a.id}
-                    onClick={() => setArchetypePick(a.id)}
-                    style={{
-                      flex: 1,
-                      padding: '10px 12px',
-                      background: selected
-                        ? 'rgba(120,160,255,0.18)'
-                        : 'rgba(255,255,255,0.04)',
-                      border: selected
-                        ? '1px solid rgba(120,160,255,0.6)'
-                        : '1px solid rgba(255,255,255,0.08)',
-                      borderRadius: 8,
-                      color: '#eee',
-                      cursor: 'pointer',
-                      textAlign: 'center',
-                      fontSize: 13,
-                      fontWeight: selected ? 600 : 500,
-                    }}
-                  >
-                    <div>{a.label}</div>
-                    <div
-                      style={{
-                        fontSize: 10,
-                        color: selected ? '#aad4ff' : '#888',
-                        marginTop: 4,
-                        fontWeight: 400,
-                        lineHeight: 1.4,
-                      }}
-                    >
-                      {a.hint}
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
-            <div style={{ fontSize: 10, color: '#777', marginTop: 6, lineHeight: 1.5 }}>
-              这个决定影响她的内心和记忆。之后可以在 Memory 设置里调整或清空。
-            </div>
-          </div>
-        )}
+        <div
+          style={{
+            fontSize: 10,
+            color: '#888',
+            marginBottom: 16,
+            lineHeight: 1.6,
+            padding: '0 2px',
+          }}
+        >
+          想要其他人设？Settings → 人物 里还有 <b style={{ color: '#bbb' }}>管家</b>
+          （英式管家）和 <b style={{ color: '#bbb' }}>大小姐</b>（青梅竹马傲娇）。
+          每个 persona 有自己的语气和关系背景。
+        </div>
 
         {/* Privacy consent — two upfront toggles for the sensitive
             default-on inputs (screen capture + notification listener).

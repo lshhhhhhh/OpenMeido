@@ -20,7 +20,7 @@ import { BrowserWindow } from 'electron'
 import { getConfig } from './config.js'
 import { getMemoryService, getMemoryAdapter } from './memory-host.js'
 import {
-  AFFINITY_INITIAL,
+  initialAffinityFor,
   AFFINITY_MAX,
   PRESENCE_SCORE_CEILING,
   applyDecay,
@@ -353,20 +353,24 @@ export function initAffinity(activePersona: string): void {
 
 /**
  * If this persona has never received a judgement (score=0 + no last
- * reason), seed the score to AFFINITY_INITIAL so the chip's
- * tier-progress bar has a visible fill from day 1. Skipped silently
- * for existing users — score=0 with a non-null lastReason means they
- * earned that 0 and we shouldn't gift them points.
+ * reason), seed the score to its persona-specific initial value so
+ * the chip's tier-progress bar has a visible fill from day 1. Skipped
+ * silently for existing users — score=0 with a non-null lastReason
+ * means they earned that 0 and we shouldn't gift them points.
+ *
+ * Per-persona seeds reflect relationship framing — sister starts at
+ * Lv.2 (familiar), service personas start cold. See initialAffinityFor.
  */
-async function seedInitialIfFresh(personaId: string): Promise<void> {
+export async function seedInitialIfFresh(personaId: string): Promise<void> {
   const adapter = getMemoryAdapter()
   if (!adapter) return
   try {
     const record = await adapter.getAffinity(personaId)
     const isFreshInstall = record.score === 0 && record.lastReason === null
     if (!isFreshInstall) return
-    await adapter.setAffinity(personaId, AFFINITY_INITIAL, null)
-    console.log(`[affinity] fresh persona "${personaId}" seeded → ${AFFINITY_INITIAL}`)
+    const seed = initialAffinityFor(personaId)
+    await adapter.setAffinity(personaId, seed, null)
+    console.log(`[affinity] fresh persona "${personaId}" seeded → ${seed}`)
   } catch (err) {
     console.warn('[affinity] initial seed failed:', err)
   }

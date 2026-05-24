@@ -94,6 +94,11 @@ export interface MemoryAdapter {
   /** Total un-archived row count for this persona — for diagnostics / "/recent" UIs. */
   count(personaId: string): Promise<number>
 
+  /** Count of kind='lore' rows for this persona. Used by the Settings
+   *  archetype panel so it can show "X 条记忆碎片" on initial mount
+   *  without having to fire a reseed first. */
+  countLore(personaId: string): Promise<number>
+
   /** Wipe every episode and its embedding for this persona. Returns the number of rows removed. */
   clear(personaId: string): Promise<number>
 

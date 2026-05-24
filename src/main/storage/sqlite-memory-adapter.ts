@@ -487,6 +487,9 @@ export function openSqliteMemory(
   const countEpisodes = db.prepare<[string]>(
     "SELECT COUNT(*) AS c FROM episodes WHERE archived = 0 AND persona_id = ? AND kind = 'chat'",
   )
+  const countLoreRows = db.prepare<[string]>(
+    "SELECT COUNT(*) AS c FROM episodes WHERE archived = 0 AND persona_id = ? AND kind = 'lore'",
+  )
 
   // ---- L3 facts prepared statements ----
   // Same-key supersession is scoped per CATEGORY: a 'work' fact for key
@@ -721,6 +724,12 @@ export function openSqliteMemory(
     async count(personaId) {
       ensureOpen()
       const row = countEpisodes.get(personaId) as { c: number }
+      return row.c
+    },
+
+    async countLore(personaId) {
+      ensureOpen()
+      const row = countLoreRows.get(personaId) as { c: number }
       return row.c
     },
 

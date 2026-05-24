@@ -192,6 +192,7 @@ export function Sidebar({
   onToggle,
   refreshActivityToken,
   onSendChat,
+  personaName,
 }: {
   open: boolean
   onToggle: () => void
@@ -204,6 +205,9 @@ export function Sidebar({
    * directly anymore: typing here should feel like talking to her.
    */
   onSendChat: (text: string) => void
+  /** Resolved persona name for inline UI strings (placeholder text etc).
+   *  Falls back to "她" if config isn't loaded yet. */
+  personaName?: string
 }): React.ReactElement {
   const [tasks, setTasks] = useState<Task[]>([])
   const [activity, setActivity] = useState<ToolActivity[]>([])
@@ -443,7 +447,7 @@ export function Sidebar({
               onKeyDown={(e) => {
                 if (e.key === 'Enter') submitNewTask()
               }}
-              placeholder="和女仆说一句…"
+              placeholder={`和${personaName ?? '她'}说一句…`}
               style={{
                 flex: 1,
                 padding: '3px 6px',
