@@ -91,7 +91,6 @@ import {
 import { initUpdater } from './updater-host.js'
 import { initUsage } from './usage-host.js'
 import { isDemoMode } from './demo-mode.js'
-import { seedDemoData } from './demo-seed.js'
 import { IPC, type ChatSendPayload } from '../shared/ipc.js'
 import { configSchema, ConfigIPC, type Config } from '../shared/config.js'
 import type { ModelSidecar } from '../shared/live2d-models.js'
@@ -1350,13 +1349,6 @@ void app.whenReady().then(async () => {
   // Skipped in dev mode. Broadcasts updater:downloaded to renderer when
   // a new version is ready; renderer shows a pill to restart.
   initUpdater()
-  // Demo profile seeding — only fires when --demo on argv. Pumps a
-  // few L3 facts + mid-tier affinity + 3 demo tasks into the SANDBOX
-  // userData so screen-recording / showcasing the app starts from a
-  // "user who's already comfortable with her" state, not a cold
-  // stranger. Awaited so a demo always sees the seed take effect
-  // before the first frame.
-  void seedDemoData()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

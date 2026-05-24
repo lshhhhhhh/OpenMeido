@@ -10,6 +10,7 @@
     "sync-icon": "node -e \"require('fs').copyFileSync('icon/1.png', 'build/icon.png'); console.log('build/icon.png ← icon/1.png')\"",
     "dev:fake-mail": "node scripts/dev-fake-mail.mjs",
     "dev:demo": "node scripts/dev-demo.mjs",
+    "demo:reset": "node scripts/demo-reset.mjs",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
