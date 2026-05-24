@@ -516,6 +516,21 @@ const api = {
         { mimeType: string; base64: string }[]
       >
     },
+    /**
+     * Subscribe to "screen was just captured" events. Fires every time
+     * any callsite (proactive observer / onboarding peek / quick-
+     * screen-react / chat screen tool) runs captureAllScreensPng.
+     * Renderer uses this to flash a 📷 indicator near Live2D so users
+     * SEE the moment their screen is sampled — privacy transparency.
+     */
+    onCaptured(cb: (info: { ts: string }) => void): () => void {
+      const handler = (_: Electron.IpcRendererEvent, info: { ts: string }): void =>
+        cb(info)
+      ipcRenderer.on('screen:captured', handler)
+      return () => {
+        ipcRenderer.off('screen:captured', handler)
+      }
+    },
   },
 
   memory: {

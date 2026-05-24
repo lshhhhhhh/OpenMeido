@@ -10,7 +10,7 @@
  * that day comes — for now the surface is too small to justify abstracting.
  */
 
-import { desktopCapturer } from 'electron'
+import { desktopCapturer, BrowserWindow } from 'electron'
 
 /**
  * Target thumbnail dimensions. Real captures of 4K screens shrunk to this
@@ -99,6 +99,17 @@ export async function captureAllScreensPng(
     console.warn(
       `[screen] dropped ${filtered.length - valid.length} empty thumbnail(s) before sending`,
     )
+  }
+  // Broadcast a 'screen:captured' event so the renderer can flash a
+  // brief 📷 indicator near Live2D. Privacy/transparency: users should
+  // SEE the moment their screen is sampled, not just read about it in
+  // Settings. Single source of truth — all callers (proactive observer,
+  // onboarding peek, quick-screen-react, chat tools) automatically
+  // surface the indicator without per-caller wiring.
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('screen:captured', { ts: new Date().toISOString() })
+    }
   }
   return valid.map((s) => {
     const buf = s.thumbnail.toPNG()

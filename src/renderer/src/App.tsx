@@ -1460,6 +1460,13 @@ export default function App() {
             interrupt whatever the user is doing. */}
         <UpdaterPill />
 
+        {/* Screen-capture indicator — brief 📷 flash whenever main runs
+            captureAllScreensPng (proactive observer, onboarding peek,
+            quick-screen-react, chat screen tool). Privacy transparency:
+            users SEE the moment their screen is sampled instead of
+            having to trust a Settings toggle. */}
+        <ScreenCaptureIndicator />
+
       {/* Chat panel — overlays the bottom of the stage container. zIndex
           2 puts it above the Live2D canvas (zIndex 1) so the model's
           lower body is genuinely covered by the chat card, not just
@@ -1724,6 +1731,103 @@ export default function App() {
               >
                 ×
               </button>
+            </div>
+          )}
+
+          {/* Cold-start prompt — visible when AI isn't configured yet.
+              Without this the chat panel just shows hardcoded fallback
+              replies + the maid keeps telling the user "去 Settings 配
+              AI" via TTS, but there's no clickable affordance — they
+              had to find the gear icon themselves. The banner is
+              louder (orange + button) than the embedding-model banner
+              because no-AI is a blocking state, not optional. */}
+          {config && !config.backend.apiKey.trim() && (
+            <div
+              style={{
+                ...noDragRegion,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '8px 12px',
+                marginBottom: 8,
+                background: 'rgba(255, 180, 80, 0.12)',
+                border: '1px solid rgba(255, 180, 80, 0.4)',
+                borderRadius: 6,
+                fontSize: 12,
+                color: '#ddc',
+                lineHeight: 1.5,
+              }}
+            >
+              <span style={{ fontSize: 16 }}>⚙</span>
+              <span style={{ flex: 1 }}>
+                还没配置 AI，她只能念预录台词。点右边配置后才能真正聊。
+              </span>
+              <button
+                onClick={() => setSettingsOpen(true)}
+                style={{
+                  padding: '4px 12px',
+                  fontSize: 11,
+                  background: '#ffb950',
+                  color: '#3a2a08',
+                  border: 'none',
+                  borderRadius: 4,
+                  cursor: 'pointer',
+                  fontWeight: 600,
+                  flexShrink: 0,
+                }}
+              >
+                立即配置 →
+              </button>
+            </div>
+          )}
+
+          {/* Quick-action chips — only visible when the input is empty.
+              Once the user starts typing, they fade out (CSS) and the
+              chat input takes the full space back. Discovery surface
+              for tools the LLM has but new users don't know to ask
+              about (mail / tasks / summary). Each chip is just a
+              canned prompt that gets sent through the normal sendText
+              path — no special wiring, no new IPC. */}
+          {input.trim() === '' && (
+            <div
+              style={{
+                ...noDragRegion,
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 6,
+                marginBottom: 6,
+                padding: '0 2px',
+              }}
+            >
+              {[
+                { emoji: '📧', label: '看邮件', text: '帮我看一下最近的邮件' },
+                { emoji: '📋', label: '任务清单', text: '我现在有哪些任务？' },
+                { emoji: '✨', label: '总结一下', text: '总结一下我们今天聊了什么' },
+                { emoji: '🙂', label: '跟我聊聊', text: '跟我随便聊聊吧' },
+              ].map((q) => (
+                <button
+                  key={q.label}
+                  onClick={() => sendText(q.text)}
+                  disabled={busy}
+                  title={q.text}
+                  style={{
+                    padding: '4px 10px',
+                    fontSize: 11,
+                    background: 'rgba(120, 160, 255, 0.08)',
+                    border: '1px solid rgba(120, 160, 255, 0.22)',
+                    borderRadius: 14,
+                    color: '#7aa',
+                    cursor: busy ? 'not-allowed' : 'pointer',
+                    opacity: busy ? 0.5 : 1,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                  }}
+                >
+                  <span>{q.emoji}</span>
+                  <span>{q.label}</span>
+                </button>
+              ))}
             </div>
           )}
 
@@ -2707,6 +2811,72 @@ const dismissBtnStyle: React.CSSProperties = {
   cursor: 'pointer',
   padding: 0,
   borderRadius: 4,
+}
+
+/**
+ * Brief 📷 flash whenever the main process captures the screen.
+ * Privacy transparency — users SEE the moment their screen is sampled,
+ * not just trust a config toggle. Each fire shows a small icon near
+ * the top-left of the stage area for ~700ms then fades.
+ *
+ * Bumps a key on every new capture so a second capture during the
+ * fade-out doesn't get swallowed — React remounts the inner element
+ * with the new ts as key, re-running the animation from frame 0.
+ */
+function ScreenCaptureIndicator() {
+  const [visible, setVisible] = useState<{ ts: string } | null>(null)
+  useEffect(() => {
+    const off = window.api.screen.onCaptured((info) => {
+      setVisible(info)
+      // Auto-clear after the animation duration. Subsequent captures
+      // overwrite this timer naturally via the new info object.
+      const myTs = info.ts
+      setTimeout(() => {
+        setVisible((cur) => (cur && cur.ts === myTs ? null : cur))
+      }, 1200)
+    })
+    return off
+  }, [])
+  if (!visible) return null
+  return (
+    <>
+      <style>{`
+        @keyframes screenCaptureFlash {
+          0%   { opacity: 0; transform: scale(0.7); }
+          12%  { opacity: 1; transform: scale(1.15); }
+          25%  { opacity: 1; transform: scale(1); }
+          75%  { opacity: 1; transform: scale(1); }
+          100% { opacity: 0; transform: scale(0.95); }
+        }
+      `}</style>
+      <div
+        key={visible.ts}
+        title="她刚看了一眼屏幕"
+        aria-label="她刚看了一眼屏幕"
+        style={{
+          position: 'absolute',
+          top: 8,
+          left: 8,
+          zIndex: 30,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 10px',
+          background: 'rgba(255, 180, 80, 0.92)',
+          color: '#3a2a08',
+          borderRadius: 999,
+          fontSize: 11,
+          fontWeight: 600,
+          boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
+          pointerEvents: 'none',
+          animation: 'screenCaptureFlash 1.2s ease-out forwards',
+        }}
+      >
+        <span style={{ fontSize: 13 }}>📷</span>
+        <span>看了一眼</span>
+      </div>
+    </>
+  )
 }
 
 function StatusPill({
