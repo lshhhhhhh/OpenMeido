@@ -25,11 +25,49 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google'
  * Returns the configured set of backends. Each entry has `label` for the
  * test header, `model` for streamText, and `modelName` for diagnostics.
  *
+ * **Default mode (省钱)**: returns ONLY DeepSeek. Cheap, fast, supports
+ * tool calling reliably — good enough to catch most regressions, while
+ * costing a fraction of running Gemini / GLM / Kimi in parallel.
+ *
+ * **Multi-backend mode**: set `TEST_ALL_BACKENDS=1` to opt into running
+ * Gemini + GLM + Kimi alongside DeepSeek for cross-provider regression
+ * coverage. Use this when:
+ *   - you're testing a fix for a provider-specific bug
+ *   - you suspect a tool description change might break one provider
+ *   - you're preparing a release and want full confidence
+ *
  * @returns {Backend[]}
  */
 export function getAgentBackends() {
   /** @type {Backend[]} */
   const out = []
+
+  // DeepSeek — the default test backend. Cheap, OpenAI-compat, fast tool
+  // calling. v3 doesn't support image_url content, but no smoke that uses
+  // this util sends images, so that's a non-issue here.
+  if (process.env.DEEPSEEK_API_KEY) {
+    const name = 'deepseek-chat'
+    const openai = createOpenAI({
+      baseURL: 'https://api.deepseek.com/v1',
+      apiKey: process.env.DEEPSEEK_API_KEY,
+    })
+    out.push({
+      label: `DeepSeek · ${name}`,
+      model: openai.chat(name),
+      modelName: name,
+    })
+  }
+
+  // If we're not in multi-backend mode, bail with DeepSeek only.
+  if (process.env.TEST_ALL_BACKENDS !== '1') {
+    if (out.length === 0) {
+      throw new Error(
+        'no agent backends available — set DEEPSEEK_API_KEY in .env ' +
+          '(or set TEST_ALL_BACKENDS=1 to use one of GEMINI/ZHIPU/MOONSHOT)',
+      )
+    }
+    return out
+  }
 
   if (process.env.GEMINI_API_KEY) {
     const name = 'gemini-2.5-flash'
@@ -105,7 +143,8 @@ export function getAgentBackends() {
 
   if (out.length === 0) {
     throw new Error(
-      'no agent backends available — set GEMINI_API_KEY / ZHIPU_API_KEY / MOONSHOT_API_KEY in .env',
+      'TEST_ALL_BACKENDS=1 was set but no backends configured — ' +
+        'need at least one of DEEPSEEK_API_KEY / GEMINI_API_KEY / ZHIPU_API_KEY / MOONSHOT_API_KEY',
     )
   }
   return out

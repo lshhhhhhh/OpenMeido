@@ -69,11 +69,8 @@ function searchCapability(baseUrl: string): Capability {
   if (baseUrl.includes('bigmodel.cn'))
     return { kind: 'have', model: '✓ 智谱内置 web_search' }
   if (baseUrl.includes('moonshot.cn') || baseUrl.includes('moonshot.ai'))
-    return {
-      kind: 'none',
-      hint: 'Kimi $web_search 协议与流式客户端不兼容 — 换 Gemini / GLM',
-    }
-  return { kind: 'none', hint: '当前 backend 不支持联网搜索 — 换 Gemini / GLM' }
+    return { kind: 'have', model: '✓ Kimi $web_search（服务端执行）' }
+  return { kind: 'none', hint: '当前 backend 不支持联网搜索 — 换 Gemini / GLM / Kimi' }
 }
 
 interface SettingsProps {
@@ -836,12 +833,6 @@ export function Settings({ initial, onClose }: SettingsProps) {
         {activeTab === 'persona' && (
           <Section title="记忆系统（高级）">
             <MemoryTab personaId={draft.persona.preset} />
-          </Section>
-        )}
-
-        {activeTab === 'persona' && (
-          <Section title="预制台词">
-            <PresetLinesPanel />
           </Section>
         )}
 
@@ -2633,16 +2624,6 @@ function SttPanel({
 }
 
 /**
- * Preset-lines editor panel. Surfaces a one-click "open lines.json"
- * button so users can edit her mute / unmute feedback lines (and
- * future preset content) in their OS default editor.
- *
- * File lives at %APPDATA%/openmeido/lines.json. Edits take effect on
- * next app restart — we don't watch the file (notepad's save would
- * fire mid-edit on every keystroke save), and the lines are loaded
- * once at boot for predictability.
- */
-/**
  * Font picker — 4 options:
  *   - system (no-op default)
  *   - xiaolai (bundled with the installer, always available)
@@ -2896,53 +2877,6 @@ function FontPicker({
           )
         })}
       </div>
-    </>
-  )
-}
-
-function PresetLinesPanel(): React.ReactElement {
-  const [path, setPath] = useState<string>('')
-  const [busy, setBusy] = useState(false)
-  useEffect(() => {
-    void window.api.lines?.path().then((p) => setPath(p))
-  }, [])
-  async function openFile(): Promise<void> {
-    if (busy) return
-    setBusy(true)
-    try {
-      const r = await window.api.lines?.openFile()
-      if (r && !r.ok) alert(`打不开文件：${r.error ?? '未知错误'}`)
-    } finally {
-      setBusy(false)
-    }
-  }
-  return (
-    <>
-      <div
-        style={{
-          fontSize: 11,
-          color: '#666',
-          background: 'rgba(0,0,0,0.04)',
-          padding: '6px 8px',
-          borderRadius: 4,
-          marginBottom: 8,
-          lineHeight: 1.5,
-        }}
-      >
-        她在闭嘴 / 解除闭嘴 时说的话来自一个 JSON 文件，你可以编辑她的台词风格。
-        当前覆盖：mute / unmute 反馈（按人设 × 好感度档分类）。
-        <br />
-        <strong>编辑后重启 app 生效。</strong>
-        删掉文件就是恢复默认。
-      </div>
-      <button onClick={openFile} disabled={busy} style={btnStyle('secondary')}>
-        {busy ? '打开中…' : '打开 lines.json'}
-      </button>
-      {path && (
-        <div style={{ fontSize: 10, color: '#888', marginTop: 6, wordBreak: 'break-all' }}>
-          路径：{path}
-        </div>
-      )}
     </>
   )
 }
@@ -4955,7 +4889,7 @@ function PersonaChip({
       <span>{label}</span>
       {score !== null && score > 0 && (
         <span style={{ fontSize: 9, color: active ? '#fff' : '#c45e76' }}>
-          ❤️{score}
+          ❤️{Math.round(score)}
         </span>
       )}
     </button>

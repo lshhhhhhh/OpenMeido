@@ -12,7 +12,16 @@
 import { BrowserWindow } from 'electron'
 
 export type Live2DCommand =
-  | { type: 'setExpression'; name: string | null }
+  | {
+      type: 'setExpression'
+      name: string | null
+      /** Optional per-call override for how long this expression holds before
+       *  auto-clearing back to the model's default face. Lets callers scale
+       *  duration to reply length so a 5-char giggle doesn't sit on the face
+       *  for 8s and a 30s monologue doesn't snap clear mid-sentence.
+       *  Omit → stage's default (8000ms). null name ignores this anyway. */
+      decayMs?: number
+    }
   | { type: 'playMotion'; group: string; index?: number }
 
 export type Live2DSender = (cmd: Live2DCommand) => void

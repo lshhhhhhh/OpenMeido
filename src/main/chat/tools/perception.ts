@@ -6,6 +6,45 @@ import * as mammoth from 'mammoth'
 import { tool } from 'ai'
 import { z } from 'zod'
 import { Readability } from '@mozilla/readability'
+
+/**
+ * Pull plain text out of a PDF buffer via pdfjs-dist's legacy build.
+ * Legacy build is the right choice for Node/Electron-main: it ships
+ * a single-bundle .mjs that doesn't try to spin up a worker thread
+ * (worker setup is browser-only and just throws here). We also
+ * disable eval so V8's CSP doesn't yell.
+ *
+ * Text-only extraction — we drop fonts, positioning, images, tables.
+ * Good enough for LLM summarization; not for fidelity rendering.
+ */
+async function extractPdfText(buf: Buffer): Promise<string> {
+  // Dynamic import keeps pdfjs out of the cold-boot path — it's a
+  // ~3MB lib and we only pay for it when a user actually opens a PDF.
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  // workerSrc must be set to something or the loader complains. We
+  // use disableWorker so the value is moot, but the property has to
+  // exist. Empty string is the convention.
+  pdfjs.GlobalWorkerOptions.workerSrc = ''
+  const data = new Uint8Array(buf)
+  // disableWorker isn't in pdfjs v5's TS def but is honored at runtime —
+  // legacy build's loader checks it before attempting worker setup, which
+  // otherwise throws in Node. Cast to bypass the type guard.
+  const doc = await pdfjs.getDocument({
+    data,
+    isEvalSupported: false,
+    disableWorker: true,
+  } as Parameters<typeof pdfjs.getDocument>[0]).promise
+  const pageTexts: string[] = []
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i)
+    const content = await page.getTextContent()
+    const text = content.items
+      .map((item) => ('str' in item ? (item as { str: string }).str : ''))
+      .join(' ')
+    pageTexts.push(text)
+  }
+  return pageTexts.join('\n\n')
+}
 // linkedom > jsdom for our use: pure-JS, no CJS/ESM transitive-dep mess (jsdom
 // pulls @exodus/bytes which is ESM-only and breaks Vite's CJS bundling for
 // the Electron main process). API is compatible with what Readability needs.
@@ -105,7 +144,7 @@ export const readFileTool = tool({
     '`path` 可以填具体的绝对路径（用户给的）；或者填空字符串 `""`，' +
     '系统会弹出文件选择器让用户挑文件。**用户没提路径时务必传空字符串**，' +
     '不要瞎编路径。\n' +
-    '支持的文件类型：.txt .md .json .csv .yaml .py .ts 等纯文本，以及 .docx Word 文档（自动提取正文）。.pdf 暂时不支持，会被拒绝。',
+    '支持的文件类型：.txt .md .json .csv .yaml .py .ts 等纯文本，.docx Word 文档（自动提取正文），以及 .pdf（自动提取纯文本，丢失版式和图片）。',
   inputSchema: z.object({
     path: z
       .string()
@@ -124,6 +163,7 @@ export const readFileTool = tool({
         filters: [
           { name: '文本/Markdown', extensions: ['txt', 'md', 'mdx', 'rst', 'log'] },
           { name: 'Word 文档', extensions: ['docx'] },
+          { name: 'PDF', extensions: ['pdf'] },
           { name: '配置/数据', extensions: ['json', 'yaml', 'yml', 'toml', 'csv', 'tsv', 'xml', 'ini'] },
           {
             name: '代码',
@@ -172,17 +212,36 @@ export const readFileTool = tool({
         }
       }
 
+      // PDF: route through pdfjs-dist for plain-text extraction.
+      // We do this BEFORE the binary-check below — PDFs ARE binary
+      // (start with %PDF header, contain null bytes downstream)
+      // so the heuristic would otherwise reject them.
+      if (ext === '.pdf') {
+        try {
+          const text = await extractPdfText(buf)
+          const content = text.length > MAX ? text.slice(0, MAX) + '\n…[截断]' : text
+          return {
+            path: absPath,
+            sizeBytes: buf.length,
+            sizeChars: text.length,
+            content,
+            truncated: text.length > MAX,
+            format: 'pdf',
+          }
+        } catch (err) {
+          return {
+            error: `读取 PDF 失败: ${err instanceof Error ? err.message : String(err)}`,
+          }
+        }
+      }
+
       // Plain-text path: crude binary check (null byte in first 1KB
-      // strongly suggests a binary file). Catches .pdf, .xlsx, etc. that
-      // we don't have specific parsers for.
+      // strongly suggests a binary file). Catches .xlsx etc. that we
+      // don't have specific parsers for.
       const head = buf.subarray(0, Math.min(1024, buf.length))
       if (head.includes(0)) {
         return {
-          error:
-            `${absPath} 看起来是二进制文件（含有空字节），我读不了。` +
-            (ext === '.pdf'
-              ? ' PDF 暂时不支持，可以把内容复制到剪贴板或导出成 .txt / .docx 再让我看。'
-              : ''),
+          error: `${absPath} 看起来是二进制文件（含有空字节），我读不了。`,
         }
       }
       const text = buf.toString('utf-8')

@@ -179,5 +179,42 @@ eq(
   'a < b > c',
 )
 
+console.log('\n[orphan trailing backticks — model started a fence but never closed]')
+eq(
+  'reply ending in 3 backticks (incomplete fence opener)',
+  streamThrough('好的主人，明白了。```'),
+  '好的主人，明白了。',
+)
+eq(
+  'reply ending in 2 backticks',
+  streamThrough('好的主人，明白了。``'),
+  '好的主人，明白了。',
+)
+eq(
+  // The space between "。" and "```" is already emitted by the time the
+  // filter sees the backtick run start (streaming holds back trailing
+  // backticks but can't retroactively un-emit the space before them).
+  // Acceptable: user sees an invisible trailing space, not the visually
+  // obvious "```". cleanInlineText's .trim() handles the persisted form.
+  'reply ending in 3 backticks + whitespace (preserves pre-backtick space)',
+  streamThrough('好的，主人。 ```  '),
+  '好的，主人。 ',
+)
+eq(
+  'reply ending in 5 backticks',
+  streamThrough('记下了。`````'),
+  '记下了。',
+)
+eq(
+  'single trailing backtick preserved (intentional inline-code marker)',
+  streamThrough('use the ` key'),
+  'use the ` key',
+)
+eq(
+  'closed inline-code with single backticks at end preserved',
+  streamThrough('试试 `foo` 函数'),
+  '试试 `foo` 函数',
+)
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

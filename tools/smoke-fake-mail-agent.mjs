@@ -27,7 +27,13 @@ const listRecentEmails = tool({
     '查看用户邮箱里最近的邮件。返回 items[] 的每一项是邮件摘要（id、from、subject、snippet、ts、unread）；' +
     '**如果某条邮件是回复某封信，items[i].parent 会包含用户当初发出的那封原信的摘要**' +
     '（同样的字段），用来生成"对方说了什么 + 你之前说了什么"的成对总结。' +
-    'parent === null 表示是回复但找不到原信；parent === undefined 表示这条不是回复或没查。',
+    'parent === null 表示是回复但找不到原信；parent === undefined 表示这条不是回复或没查。\n' +
+    '\n' +
+    '**呈现规则——按你的判断折叠营销/通知类邮件**：' +
+    '从 from / subject / snippet 你能看出来哪些是营销邮件 / 订阅推送 / 自动通知（订单确认 / 发货提醒 / 折扣促销 / 平台日报 / 招聘网站等）。' +
+    '**不要逐封列**这些——把它们合并成一行计数总结（例如"另有 4 封订单 / 通知 / 营销邮件未列"），' +
+    '逐封展开只留给值得用户决定怎么处理的邮件：真人发来的工作邮件 / 回信 / 询问。' +
+    '不确定时倾向逐封展开。',
   inputSchema: z.object({
     limit: z.number().int().min(1).max(20),
     onlyUnread: z.boolean(),
@@ -90,19 +96,33 @@ async function drive({ model, prompt, tools, callLog }) {
 }
 
 // ---------- Scoring ----------
+//
+// Parallel-mode plumbing: each backend gets its own (check, log) pair
+// that buffers output locally instead of going straight to console.
+// main() flushes each backend's buffer in order after Promise.all
+// resolves so the 4 streams don't interleave into garbage.
 
 const results = []
-let currentBackendLabel = '(unknown)'
-const check = (name, ok, detail = '') => {
-  results.push({ name: `[${currentBackendLabel}] ${name}`, ok, detail })
-  console.log(ok ? `  ✅ ${name}` : `  ❌ ${name} :: ${detail}`)
+
+function makeBackendContext(label) {
+  const logLines = []
+  const localResults = []
+  const log = (...args) => {
+    logLines.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '))
+  }
+  const check = (name, ok, detail = '') => {
+    const labeled = { name: `[${label}] ${name}`, ok, detail }
+    localResults.push(labeled)
+    log(ok ? `  ✅ ${name}` : `  ❌ ${name} :: ${detail}`)
+  }
+  return { log, check, logLines, localResults }
 }
 
 async function runOnBackend(label, model) {
-  currentBackendLabel = label
-  console.log(`\n████ Backend: ${label} ████`)
+  const { log, check, logLines, localResults } = makeBackendContext(label)
+  log(`\n████ Backend: ${label} ████`)
   // ---------- Scenario 1: list — does the model pair at least one thread? ----------
-  console.log('\n=== Scenario 1: "总结最近5封邮件" — does model pair parents? ===')
+  log('\n=== Scenario 1: "总结最近5封邮件" — does model pair parents? ===')
   {
     const callLog = []
     const visible = await drive({
@@ -111,7 +131,7 @@ async function runOnBackend(label, model) {
       tools: { listRecentEmails, readEmail },
       callLog,
     })
-    console.log(
+    log(
       `Visible (${visible.length} chars):\n  ${visible.replace(/\n/g, '\n  ').slice(0, 800)}${visible.length > 800 ? '…' : ''}`,
     )
 
@@ -160,7 +180,7 @@ async function runOnBackend(label, model) {
   }
 
   // ---------- Scenario 2: readEmail on a reply — model should narrate both sides ----------
-  console.log('\n=== Scenario 2: "打开 LunarLink 那封" — pair on read ===')
+  log('\n=== Scenario 2: "打开 LunarLink 那封" — pair on read ===')
   {
     const callLog = []
     const visible = await drive({
@@ -169,7 +189,7 @@ async function runOnBackend(label, model) {
       tools: { listRecentEmails, readEmail },
       callLog,
     })
-    console.log(
+    log(
       `Visible (${visible.length} chars):\n  ${visible.replace(/\n/g, '\n  ').slice(0, 600)}${visible.length > 600 ? '…' : ''}`,
     )
 
@@ -206,7 +226,7 @@ async function runOnBackend(label, model) {
   // read every recent email, runs out of steps before producing a final
   // reply. The fix is the "parallel readEmail" prompt rule + larger
   // stepCountIs. This scenario fails LOUDLY when either regresses.
-  console.log('\n=== Scenario 2b: "总结最近的邮件并且生成报告" — many-email summary ===')
+  log('\n=== Scenario 2b: "总结最近的邮件并且生成报告" — many-email summary ===')
   {
     const callLog = []
     const visible = await drive({
@@ -215,11 +235,11 @@ async function runOnBackend(label, model) {
       tools: { listRecentEmails, readEmail },
       callLog,
     })
-    console.log(
+    log(
       `Visible (${visible.length} chars):\n  ${visible.replace(/\n/g, '\n  ').slice(0, 800)}${visible.length > 800 ? '…' : ''}`,
     )
     const readCount = callLog.filter((c) => c.name === 'readEmail').length
-    console.log(`  tool calls: ${callLog.map((c) => c.name).join(', ')}`)
+    log(`  tool calls: ${callLog.map((c) => c.name).join(', ')}`)
 
     check(
       'model produced a final summary (non-empty visible text)',
@@ -263,8 +283,76 @@ async function runOnBackend(label, model) {
     )
   }
 
+  // ---------- Scenario 2c: promo folding — model should NOT enumerate marketing/notification mails ----------
+  // The fake dataset has 4 promo-ish entries (ids 201-204: 淘宝 order /
+  // AliExpress sale / Medium daily / LinkedIn notifications). The tool
+  // description tells the model to fold them into a count summary rather
+  // than listing each one. This scenario asserts that on limit=15 the
+  // model:
+  //   - still names the real work threads (signal preserved)
+  //   - mentions at most ONE promo subject (rest are folded)
+  //   - explicitly references the fold count via a "另有 / 还有 / 其他"-style phrase
+  log('\n=== Scenario 2c: limit=15 — promo folding ===')
+  {
+    const callLog = []
+    const visible = await drive({
+      model,
+      prompt: '主人想看看最近邮箱情况，列一下最近 15 封都有啥。',
+      tools: { listRecentEmails, readEmail },
+      callLog,
+    })
+    log(
+      `Visible (${visible.length} chars):\n  ${visible.replace(/\n/g, '\n  ').slice(0, 900)}${visible.length > 900 ? '…' : ''}`,
+    )
+
+    check(
+      'visible reply is non-empty',
+      visible.trim().length > 0,
+      'model should produce a summary',
+    )
+
+    // Real work threads should still be named — folding promos must NOT
+    // sacrifice real signal. Same threadKeywords as Scenario 1.
+    const threadKeywords = ['LunarLink', '灰度', '面试', '客户', '合同']
+    const mentionedReal = threadKeywords.filter((k) => visible.includes(k))
+    check(
+      `model still names work threads (got ${mentionedReal.length}/${threadKeywords.length}: ${mentionedReal.join(',') || 'none'})`,
+      mentionedReal.length >= 2,
+    )
+
+    // Folding looks like ONE compact line / bullet listing all promo
+    // sources (e.g. "另有 5 封：淘宝、AliExpress、Medium、LinkedIn"),
+    // NOT 4-5 separate full-detail entries. Naming the brands is fine —
+    // user wants to know WHAT got folded. Bad behavior is reproducing
+    // full subject strings verbatim, which is what an "enumeration"
+    // does. Asserts: the FULL verbatim subject of each promo doesn't
+    // appear in the output (model paraphrased / compacted them).
+    const verbatimPromoSubjects = [
+      '【淘宝】您的订单 4203 已发货',
+      'AliExpress 限时大促 · 全场 50% OFF 仅剩 12 小时',
+      'Your Medium Daily Digest - 5 stories you might like',
+      '12 位猎头本周查看了你的资料',
+    ]
+    const verbatimLeaks = verbatimPromoSubjects.filter((s) => visible.includes(s)).length
+    check(
+      `model did NOT paste full promo subjects verbatim (got ${verbatimLeaks} of 4 verbatim)`,
+      verbatimLeaks <= 1,
+      'verbatim full-subject leak = model is enumerating promos as separate entries instead of folding',
+    )
+
+    // Folding indicator — the reply should explicitly call out the count
+    // so user knows promos exist and were intentionally collapsed.
+    const foldHints = ['另有', '还有', '其他', '剩下', '未列', '订单', '通知', '营销', '促销', '订阅', '日报', '推送']
+    const foldHit = foldHints.some((h) => visible.includes(h))
+    check(
+      'reply contains a "fold" indicator (e.g. 另有 N 封通知/营销)',
+      foldHit,
+      `looked for: ${foldHints.join(' / ')}`,
+    )
+  }
+
   // ---------- Scenario 3: standalone — model should NOT invent parent ----------
-  console.log('\n=== Scenario 3: "看看 InfoQ 周刊那封" — control (no parent) ===')
+  log('\n=== Scenario 3: "看看 InfoQ 周刊那封" — control (no parent) ===')
   {
     const callLog = []
     const visible = await drive({
@@ -273,7 +361,7 @@ async function runOnBackend(label, model) {
       tools: { listRecentEmails, readEmail },
       callLog,
     })
-    console.log(
+    log(
       `Visible (${visible.length} chars):\n  ${visible.replace(/\n/g, '\n  ').slice(0, 400)}${visible.length > 400 ? '…' : ''}`,
     )
     const readCall = callLog.find((c) => c.name === 'readEmail')
@@ -286,23 +374,49 @@ async function runOnBackend(label, model) {
       'model should treat this as a standalone newsletter',
     )
   }
+
+  return { logLines, localResults }
 }
 
 async function main() {
   const backends = getAgentBackends()
-  console.log(`Running fake-mail-agent scenarios across ${backends.length} backend(s)`)
-  for (const b of backends) {
-    try {
-      await runOnBackend(b.label, b.model)
-    } catch (err) {
+  console.log(`Running fake-mail-agent scenarios across ${backends.length} backend(s) (parallel)`)
+  console.log('(each backend\'s output is buffered + flushed in order after all complete)')
+
+  // Run each backend's scenario chain in parallel. Each returns its own
+  // logLines + localResults so we don't fight for console / globals.
+  // The "scenarios within a backend stay serial" property is preserved
+  // by the for-blocks inside runOnBackend.
+  const settled = await Promise.allSettled(
+    backends.map(async (b) => {
+      const t0 = Date.now()
+      const out = await runOnBackend(b.label, b.model)
+      return { label: b.label, elapsedMs: Date.now() - t0, ...out }
+    }),
+  )
+
+  // Flush per backend in the order they were registered, so the output
+  // reads as if the run were serial but the wall clock said otherwise.
+  for (let i = 0; i < settled.length; i++) {
+    const r = settled[i]
+    const b = backends[i]
+    if (r.status === 'fulfilled') {
+      for (const line of r.value.logLines) console.log(line)
+      console.log(`  ⏱ ${b.label} took ${(r.value.elapsedMs / 1000).toFixed(1)}s`)
+      results.push(...r.value.localResults)
+    } else {
       results.push({
         name: `[${b.label}] crashed before completion`,
         ok: false,
-        detail: err instanceof Error ? err.message : String(err),
+        detail: r.reason instanceof Error ? r.reason.message : String(r.reason),
       })
-      console.error(`  ❌ ${b.label} crashed:`, err instanceof Error ? err.message : err)
+      console.error(
+        `  ❌ ${b.label} crashed:`,
+        r.reason instanceof Error ? r.reason.message : r.reason,
+      )
     }
   }
+
   const failed = results.filter((r) => !r.ok)
   console.log(
     `\n${failed.length === 0 ? '✅' : '❌'} ${results.length - failed.length}/${results.length} assertions passed across all backends`,

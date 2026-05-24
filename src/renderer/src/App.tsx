@@ -154,6 +154,11 @@ const USER_MACROS: Record<string, string> = {
     '陪我聊会儿吧，你先开个话题——可以聊你刚才看到的、最近想到的、好奇问我点什么、或者回忆我们一起聊过的事。不要回"您想聊什么我都奉陪"这种把球踢回来的话。',
   '陪我聊会儿':
     '陪我聊会儿吧，你先开个话题——可以聊你刚才看到的、最近想到的、好奇问我点什么、或者回忆我们一起聊过的事。不要回"您想聊什么我都奉陪"这种把球踢回来的话。',
+  // Doc summarization chip. The richer prompt tells the model:
+  // (a) pick a file via the readFile tool's empty-path picker,
+  // (b) produce structured summary + follow-up questions, not just dump.
+  '帮我总结一份文档':
+    '请用 readFile 工具弹出文件选择器让我挑一份文档，然后总结。格式：先 3-5 条核心要点（每条一行，扼要），再列 3 个我可能需要追问或确认的问题。如果文档很长，重点放在结论和待办上，跳过铺垫。',
 }
 
 function expandUserMacro(text: string): string {
@@ -637,7 +642,11 @@ export default function App() {
       if (!ctrl) return
       if (cmd.type === 'setExpression') {
         if (cmd.name === null) ctrl.clearExpression()
-        else ctrl.setExpression(cmd.name)
+        else
+          ctrl.setExpression(
+            cmd.name,
+            cmd.decayMs !== undefined ? { decayMs: cmd.decayMs } : undefined,
+          )
       } else if (cmd.type === 'playMotion') {
         ctrl.playMotion(cmd.group, cmd.index)
       }
@@ -1859,17 +1868,21 @@ export default function App() {
                 gap: 10,
                 padding: '10px 14px',
                 marginBottom: 8,
-                // Stronger amber backdrop + crisp text for the chat-
-                // panel translucent background. The previous 0.12
-                // alpha + '#ddc' text was washed out to the point of
-                // being unreadable on the dark chat surface.
-                background: 'rgba(255, 180, 80, 0.22)',
-                border: '1px solid rgba(255, 180, 80, 0.65)',
+                // Previous attempts (alpha 0.12 #ddc, then alpha 0.22
+                // #ffe7c2) still failed legibility on the translucent
+                // chat panel — cream-on-faint-amber blended into the
+                // dark backdrop bleeding through. Going solid: opaque
+                // amber pill with dark-brown text, mirrors the button's
+                // already-readable color scheme. Trades subtlety for
+                // legibility, which is the right tradeoff for a
+                // "you can't actually chat yet" blocking banner.
+                background: '#ffc870',
+                border: '1px solid #e89c30',
                 borderRadius: 6,
                 fontSize: 12.5,
-                color: '#ffe7c2',
+                color: '#3a2a08',
                 lineHeight: 1.5,
-                fontWeight: 500,
+                fontWeight: 600,
               }}
             >
               <span style={{ fontSize: 16 }}>⚙</span>
@@ -1916,7 +1929,7 @@ export default function App() {
               {[
                 { emoji: '📧', label: '看邮件', text: '帮我看一下最近的邮件' },
                 { emoji: '📋', label: '任务清单', text: '我现在有哪些任务？' },
-                { emoji: '✨', label: '总结一下', text: '总结一下我们今天聊了什么' },
+                { emoji: '📄', label: '总结文档', text: '帮我总结一份文档' },
                 { emoji: '🙂', label: '跟我聊聊', text: '跟我随便聊聊吧' },
               ].map((q) => (
                 <button

@@ -75,7 +75,10 @@ export type Coverage = 'pixel' | 'transparent' | 'outside'
  * imouto-oss exposed on `window.imouto`, but typed.
  */
 export interface Live2DController {
-  setExpression(idOrName?: string | number, opts?: { decay?: boolean }): void
+  setExpression(
+    idOrName?: string | number,
+    opts?: { decay?: boolean; decayMs?: number },
+  ): void
   clearExpression(): void
   randomExpression(): void
   playMotion(group: string, index?: number): void
@@ -371,7 +374,10 @@ export class Live2DStage implements Live2DController {
 
   // -------------------- public controller API --------------------
 
-  setExpression(idOrName?: string | number, opts?: { decay?: boolean }): void {
+  setExpression(
+    idOrName?: string | number,
+    opts?: { decay?: boolean; decayMs?: number },
+  ): void {
     if (!this.model) return
     try {
       this.model.expression(idOrName)
@@ -379,7 +385,8 @@ export class Live2DStage implements Live2DController {
       console.warn('[Live2DStage] expression failed:', err)
       return
     }
-    if (opts?.decay !== false) this.scheduleExpressionDecay()
+    if (opts?.decay === false) return
+    this.scheduleExpressionDecay(opts?.decayMs)
   }
 
   clearExpression(): void {
@@ -580,12 +587,13 @@ export class Live2DStage implements Live2DController {
     }
   }
 
-  private scheduleExpressionDecay(): void {
+  private scheduleExpressionDecay(overrideMs?: number): void {
     this.clearExpressionTimer()
-    if (this.expressionDecayMs <= 0) return
+    const ms = overrideMs ?? this.expressionDecayMs
+    if (ms <= 0) return
     this.expressionTimer = setTimeout(() => {
       this.clearExpression()
-    }, this.expressionDecayMs)
+    }, ms)
   }
 
   destroy(): void {

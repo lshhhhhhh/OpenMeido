@@ -20,6 +20,12 @@ export interface BodyTransformFlags {
    *  `reasoning_content` on every replayed assistant tool-call message.
    *  Force-disable to avoid the 400. */
   isKimi?: boolean
+  /** Kimi web search: inject `$web_search` builtin function tool when
+   *  searchEnabled. Moonshot's server auto-executes it; the response-
+   *  side stream filter in chat/kimi-search-stream.ts strips the
+   *  builtin_function tool_call chunks before Vercel AI SDK rejects
+   *  them. */
+  injectKimiSearch?: boolean
   /** DeepSeek reasoner — when replaying an assistant tool-call message
    *  back to the API, `reasoning_content` is required. Vercel AI SDK
    *  doesn't capture it, so we fill an empty string. */
@@ -50,6 +56,15 @@ export function transformOpenAIBody(
     if (Array.isArray(body.tools)) body.tools.push(entry)
     else body.tools = [entry]
   }
+  if (flags.injectKimiSearch) {
+    // Moonshot's `$web_search` builtin function. Server-executed: the
+    // SSE stream will emit a tool_call chunk with type='builtin_function'
+    // (which our response-side filter strips), then continue with the
+    // grounded answer text.
+    const entry = { type: 'builtin_function', function: { name: '$web_search' } }
+    if (Array.isArray(body.tools)) body.tools.push(entry)
+    else body.tools = [entry]
+  }
   if (flags.isKimi) {
     body.thinking = { type: 'disabled' }
   }
@@ -69,5 +84,10 @@ export function transformOpenAIBody(
 
 /** True iff any flag is set — caller can skip wrapping fetch when false. */
 export function needsBodyTransform(flags: BodyTransformFlags): boolean {
-  return Boolean(flags.injectGlmSearch || flags.isKimi || flags.isDeepSeek)
+  return Boolean(
+    flags.injectGlmSearch ||
+      flags.injectKimiSearch ||
+      flags.isKimi ||
+      flags.isDeepSeek,
+  )
 }

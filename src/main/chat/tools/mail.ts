@@ -36,7 +36,14 @@ export const listRecentEmails = tool({
     '**如果某条邮件是回复某封信，items[i].parent 会包含用户当初发出的那封原信的摘要**' +
     '（同样的字段），用来生成"对方说了什么 + 你之前说了什么"的成对总结。' +
     'parent === null 表示是回复但找不到原信；parent === undefined 表示这条不是回复或没查。\n' +
-    '如果用户问邮件细节正文，从某一项的 id 再调 readEmail 取全文。',
+    '如果用户问邮件细节正文，从某一项的 id 再调 readEmail 取全文。\n' +
+    '\n' +
+    '**呈现规则——按你的判断折叠营销/通知类邮件**：\n' +
+    '从 from / subject / snippet 你能看出来哪些是营销邮件 / 订阅推送 / 自动通知（订单确认 / 发货提醒 / 账单 / 折扣促销 / 论坛日报 / 平台通知等）。' +
+    '**不要逐封列**这些——把它们合并成一行计数总结，例如："另有 5 封订单/通知/营销邮件没列（淘宝、AliExpress、Medium daily 等）"。' +
+    '**逐封展开**只留给值得用户决定怎么处理的邮件：真人发来的工作邮件 / 回信 / 询问 / 朋友家人消息。' +
+    '不确定时**倾向逐封展开**——错把营销折叠成"另有 N 封"用户失去信号，错把工作邮件折叠则用户根本看不见。\n' +
+    '用户如果主动问"那些营销/订单邮件呢"或者"全部列出来"，就把折叠的也展开。',
   // OpenAI's strict tool schema requires every property in `properties` to
   // also appear in `required`. Zod .default() / .optional() produce
   // properties that are NOT required, and the API rejects the whole tool.

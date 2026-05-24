@@ -246,8 +246,19 @@ export function createTextDeltaFilter(): TextDeltaFilter {
         pendingReset = 0
         return resetLength > 0 ? { emit: '', resetLength } : { emit: '' }
       }
-      const tail = buffer
+      // Strip orphan trailing backticks. safeReleaseOffset holds back
+      // 1-3 trailing backticks during streaming because they MIGHT grow
+      // into a code-fence opener ("```html\n..."). If the stream ends
+      // with those backticks still in the buffer, they're stranded — a
+      // fence opener that never got its content, or just dangling
+      // characters the model didn't intend. Either way, surfacing them
+      // to the user reads as garbage. Drop runs of 2+ backticks (with
+      // optional surrounding whitespace) at the very tail. Single
+      // backticks are preserved — could be inline-code marker the
+      // model legitimately ended on.
+      let tail = buffer
       buffer = ''
+      tail = tail.replace(/[ \t\r\n]*`{2,}[ \t\r\n]*$/, '')
       return consume(tail)
     },
     checkpoint(): void {

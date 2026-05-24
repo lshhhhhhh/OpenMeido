@@ -666,14 +666,14 @@ const api = {
     onCommand(
       cb: (
         cmd:
-          | { type: 'setExpression'; name: string | null }
+          | { type: 'setExpression'; name: string | null; decayMs?: number }
           | { type: 'playMotion'; group: string; index?: number },
       ) => void,
     ): () => void {
       const handler = (
         _: Electron.IpcRendererEvent,
         cmd:
-          | { type: 'setExpression'; name: string | null }
+          | { type: 'setExpression'; name: string | null; decayMs?: number }
           | { type: 'playMotion'; group: string; index?: number },
       ): void => cb(cmd)
       ipcRenderer.on('live2d:command', handler)

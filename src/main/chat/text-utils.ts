@@ -16,6 +16,11 @@ export function cleanInlineText(s: string): string {
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/```(?:html|xml)?\s*<\/?(?:tool_call|arg_key|arg_value)[\s\S]*?```/gi, '')
     .replace(/<\/?(?:tool_call|arg_key|arg_value)(?:\s[^>]*)?>/gi, '')
+    // Same orphan-trailing-backticks fix as the streaming filter — if a
+    // reply persists with stray "``" / "```" at the end, both the chat
+    // bubble and the replayed history would surface them. Strip 2+
+    // backticks at the tail; preserve single backtick (inline code).
+    .replace(/[ \t\r\n]*`{2,}[ \t\r\n]*$/, '')
     .trim()
 }
 
@@ -36,13 +41,20 @@ export function extractBakedEmotion(raw: string): Emotion | null {
 }
 
 /** Apply a baked emotion the same way the classifier would. Mirrors
- *  classifier deps so behavior stays consistent. */
-export async function applyBakedEmotion(emotion: Emotion, _personaId: string): Promise<void> {
+ *  classifier deps so behavior stays consistent. `textLength` scales
+ *  the auto-decay duration — pass the assistant reply's character
+ *  count (excluding tool noise) so the face matches the spoken length. */
+export async function applyBakedEmotion(
+  emotion: Emotion,
+  _personaId: string,
+  textLength?: number,
+): Promise<void> {
   const cfg = getConfig()
   await applyEmotion(emotion, {
     send: broadcastLive2D,
     pushEvent: pushEmotionEvent,
     sidecarFor: live2dGetSidecar,
     modelName: cfg.live2d.activeModel,
+    textLength,
   })
 }

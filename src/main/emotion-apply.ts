@@ -28,6 +28,28 @@ export interface ApplyEmotionDeps {
   pushEvent: (e: EmotionEvent) => void
   sidecarFor: (modelName: string) => Promise<ModelSidecar | null>
   modelName: string
+  /** Length of the assistant text this expression accompanies, in
+   *  characters. Used to size the auto-decay so a short reply doesn't
+   *  hold the face for 8s and a long monologue doesn't snap clear
+   *  mid-sentence. Omit to fall back to the stage's default decay. */
+  textLength?: number
+}
+
+/**
+ * Pace heuristic: Chinese TTS at maid/imouto persona warmth runs about
+ * 4.5 chars/sec → ~220ms per char. Add a 1.5s tail buffer so the face
+ * doesn't snap to neutral the instant the last syllable ends. Clamped
+ * to a sensible range so a single-emoji reply still registers and a
+ * 500-char essay doesn't lock the face for 2 minutes.
+ */
+const MS_PER_CHAR = 220
+const TAIL_BUFFER_MS = 1500
+const MIN_DECAY_MS = 3000
+const MAX_DECAY_MS = 25_000
+
+export function decayMsForTextLength(len: number): number {
+  const raw = len * MS_PER_CHAR + TAIL_BUFFER_MS
+  return Math.max(MIN_DECAY_MS, Math.min(MAX_DECAY_MS, raw))
 }
 
 export async function applyEmotion(
@@ -43,9 +65,11 @@ export async function applyEmotion(
     deps.send({ type: 'setExpression', name: null })
     return
   }
+  const decayMs =
+    deps.textLength !== undefined ? decayMsForTextLength(deps.textLength) : undefined
   const expr = sidecar.emotionMapping?.[emotion]
   if (expr) {
-    deps.send({ type: 'setExpression', name: expr })
+    deps.send({ type: 'setExpression', name: expr, decayMs })
     deps.pushEvent({
       ts: new Date().toISOString(),
       emotion,

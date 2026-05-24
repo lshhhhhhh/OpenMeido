@@ -30,6 +30,7 @@ import { recordUsage, providerFromUrl } from '../usage-host.js'
 import { createTextDeltaFilter } from '../chat-text-filter.js'
 import { classifyAndApply } from '../emotion-classifier.js'
 import { transformOpenAIBody, needsBodyTransform } from '../openai-compat-body.js'
+import { wrapKimiSearchResponse } from './kimi-search-stream.js'
 import { isMailEnabled } from '../mail-host.js'
 
 import { setActiveEmit } from './active-emit.js'
@@ -64,14 +65,14 @@ import { readClipboard, readWebPage, readFileTool } from './tools/perception.js'
 // always invoked once per reply with a lightweight LLM call, so every
 // turn ends with the right face instead of whatever was held last.
 
-// Note: Kimi's `$web_search` builtin function is NOT supported. Their
-// protocol sends `type: "builtin_function"` in streaming tool_calls,
-// which the Vercel AI SDK's strict OpenAI-compat parser rejects. Their
-// official docs only demonstrate the feature in NON-streaming mode
-// (chat.completions.create without stream:true). Adding it would
-// require bypassing streamText for that turn, which costs us all the
-// other tool integrations. Users wanting web search on Kimi should
-// switch to Gemini or GLM for the moment.
+// Kimi `$web_search` IS supported via fetch wrapping (added 2026-05):
+// request-side injects the builtin_function tool entry, response-side
+// strips the builtin_function tool_call chunks from the SSE stream
+// before Vercel AI SDK's strict parser rejects them. See
+// chat/kimi-search-stream.ts + openai-compat-body.ts (injectKimiSearch).
+// Moonshot's server auto-executes the search; we just need to pipe
+// through the grounded continuation text. No client-side tool handler
+// required, no separate non-streaming path.
 
 export async function runChat(
   messageId: string,
@@ -225,25 +226,26 @@ export async function runChat(
         modelId.toLowerCase().includes('reasoner')
 
       const injectGlmSearch = isGlm && cfg.backend.searchEnabled
-      // Kimi search disabled — see the comment block above kimiWebSearchEcho
-      // for context. The toggle in Settings warns users; if they still flip
-      // it on against a Kimi backend, we just silently ignore it.
-      if (cfg.backend.searchEnabled && isKimi) {
-        console.log(
-          '[chat] searchEnabled set but Kimi web search is not currently supported. ' +
-            'Use Gemini or GLM for web search.',
-        )
-      } else if (cfg.backend.searchEnabled && !isGlm) {
+      const injectKimiSearch = isKimi && cfg.backend.searchEnabled
+      // Surface a heads-up for backends that genuinely don't support it.
+      // Gemini / GLM / Kimi are now all wired; everyone else is no-op.
+      if (
+        cfg.backend.searchEnabled &&
+        !isGlm &&
+        !isKimi &&
+        !cfg.backend.baseUrl.includes('googleapis.com')
+      ) {
         console.log(
           '[chat] searchEnabled set but backend (' +
             cfg.backend.baseUrl +
-            ') is not Gemini / GLM. No-op.',
+            ') is not Gemini / GLM / Kimi. No-op.',
         )
       }
       // Provider-specific body mutations live in openai-compat-body.ts —
       // see that file for the per-flag rationale (GLM web_search inject,
-      // Kimi thinking-disable, DeepSeek reasoning_content fill).
-      const bodyFlags = { injectGlmSearch, isKimi, isDeepSeek }
+      // Kimi $web_search inject, Kimi thinking-disable, DeepSeek
+      // reasoning_content fill).
+      const bodyFlags = { injectGlmSearch, injectKimiSearch, isKimi, isDeepSeek }
       const wrappedFetch = needsBodyTransform(bodyFlags)
         ? ((async (url, init) => {
             if (init && init.method === 'POST' && typeof init.body === 'string') {
@@ -255,10 +257,18 @@ export async function runChat(
                 /* malformed body — fall through to original fetch */
               }
             }
-            return globalThis.fetch(
+            const response = await globalThis.fetch(
               url as Parameters<typeof globalThis.fetch>[0],
               init as Parameters<typeof globalThis.fetch>[1],
             )
+            // Response-side filtering: strip Moonshot's builtin_function
+            // tool_call chunks from the SSE stream so Vercel AI SDK's
+            // strict parser doesn't choke on type='builtin_function'.
+            // Only active when we asked Moonshot to use $web_search.
+            if (injectKimiSearch) {
+              return wrapKimiSearchResponse(response)
+            }
+            return response
           }) as typeof globalThis.fetch)
         : undefined
       const openai = createOpenAI({
@@ -374,12 +384,15 @@ export async function runChat(
         (mailEnabled ? `看邮件列表和邮件内容、` : ``) +
         `看用户主动发来的截图、把多条结构化数据用 presentTable 工具开一个独立表格窗口。**就这些**。\n` +
         // Web-search hint only when the backend ACTUALLY has search wired
-        // (Gemini grounding + GLM web_search; Kimi search isn't supported
-        // because their builtin_function tool type doesn't survive the
-        // Vercel AI SDK's streaming OpenAI parser).
+        // (Gemini grounding + GLM web_search + Kimi $web_search). For
+        // Kimi we inject a builtin_function tool on the way out and
+        // strip the resulting tool_call chunks on the way back in — see
+        // chat/kimi-search-stream.ts.
         (cfg.backend.searchEnabled &&
         (cfg.backend.baseUrl.includes('googleapis.com') ||
-          cfg.backend.baseUrl.includes('bigmodel.cn'))
+          cfg.backend.baseUrl.includes('bigmodel.cn') ||
+          cfg.backend.baseUrl.includes('moonshot.cn') ||
+          cfg.backend.baseUrl.includes('moonshot.ai'))
           ? `\n# 联网搜索（这次已开启）\n` +
             `主人问到时效性话题（"现在/今天/最近"、"谁是当前的 X"、"X 现在怎么样"、最新新闻、` +
             `比赛/股价/天气当前值等），**直接联网搜索后再回答，不要说做不到**。` +
@@ -750,9 +763,11 @@ export async function runChat(
     // affinity, but with skipEmotion so it doesn't fight us.
     const bakedEmotion = extractBakedEmotion(rawText)
     if (bakedEmotion) {
-      void applyBakedEmotion(bakedEmotion, cfg.persona.preset).catch((err) =>
-        console.warn('[chat] baked emotion apply failed:', err),
-      )
+      void applyBakedEmotion(
+        bakedEmotion,
+        cfg.persona.preset,
+        assistantText.length,
+      ).catch((err) => console.warn('[chat] baked emotion apply failed:', err))
     }
 
     // Affinity classifier — fire-and-forget. Skips affinity update when

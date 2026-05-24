@@ -288,6 +288,55 @@ const DEFAULT_FAKE_DATA: FakeMail[] = [
     messageId: '<contract-r6b@bigcorp.test>',
     inReplyTo: '<contract-q6b@openmeido.test>',
   },
+  // ---- Promo / newsletter / notification noise (ids 201-204) ----
+  // Older timestamps so they fall OUTSIDE limit=5 (preserve existing
+  // scenarios) but show up when the test asks for limit=15/20. Used
+  // by the agent smoke to verify the model folds these into a count
+  // summary instead of enumerating each one.
+  {
+    id: '201',
+    from: '淘宝订单 <noreply@taobao.com>',
+    to: [ME],
+    subject: '【淘宝】您的订单 4203 已发货',
+    body: '尊敬的会员，您于 5 月 7 日下单的商品已发出，预计 5 月 10 日送达。物流单号 SF1234567。',
+    ts: '2026-05-08T10:00:00+08:00',
+    unread: true,
+    folder: 'INBOX',
+    messageId: '<order-4203@taobao.test>',
+  },
+  {
+    id: '202',
+    from: 'AliExpress Marketing <hot-deals@aliexpress.com>',
+    to: [ME],
+    subject: 'AliExpress 限时大促 · 全场 50% OFF 仅剩 12 小时',
+    body: 'Limited time! Up to 50% off across all categories. Click to shop now. Unsubscribe link at the bottom.',
+    ts: '2026-05-09T08:30:00+08:00',
+    unread: true,
+    folder: 'INBOX',
+    messageId: '<promo-may9@aliexpress.test>',
+  },
+  {
+    id: '203',
+    from: 'Medium Daily Digest <noreply@medium.com>',
+    to: [ME],
+    subject: 'Your Medium Daily Digest - 5 stories you might like',
+    body: 'Today\'s picks: 1) The end of CSS frameworks 2) Why Rust is winning 3) ...',
+    ts: '2026-05-09T07:00:00+08:00',
+    unread: false,
+    folder: 'INBOX',
+    messageId: '<digest-may9@medium.test>',
+  },
+  {
+    id: '204',
+    from: 'LinkedIn <notifications@linkedin.com>',
+    to: [ME],
+    subject: '12 位猎头本周查看了你的资料',
+    body: '过去 7 天，有 12 位招聘者点开了你的 LinkedIn 主页。点击查看是谁感兴趣。',
+    ts: '2026-05-09T12:00:00+08:00',
+    unread: true,
+    folder: 'INBOX',
+    messageId: '<linkedin-week21@linkedin.test>',
+  },
 ]
 
 /**

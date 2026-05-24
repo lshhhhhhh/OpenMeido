@@ -105,6 +105,9 @@ export async function classifyAndApply(
       pushEvent: pushEmotionEvent,
       sidecarFor: live2dGetSidecar,
       modelName: cfg.live2d.activeModel,
+      // Pass reply length so the auto-decay scales: short giggle clears
+      // in ~3s, 30-char reply ~8s, long monologue up to 25s.
+      textLength: trimmed.length,
     })
   }
   // Affinity only when we have user context (chat path) AND this isn't
