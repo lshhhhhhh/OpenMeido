@@ -22,6 +22,69 @@ import type {
   MailFolder,
 } from '../../core/mail/types.js'
 
+/**
+ * Extract readable plain text from an HTML email body. Used as a fallback
+ * when mailparser's `parsed.text` is undefined — common for modern
+ * marketing / transactional emails that ship HTML-only with no
+ * text/plain MIME part (AliExpress, Uber, banking notifications, etc).
+ *
+ * Doesn't need to be a perfect HTML→text converter — the LLM is
+ * surprisingly tolerant of slightly messy input. We strip the
+ * obviously non-content tags (script/style), turn block-level
+ * boundaries into newlines, drop the rest of the tag soup, and
+ * decode the common entities. Quoted-printable / base64 transfer
+ * encoding has already been undone by simpleParser before we see it.
+ *
+ * Without this, our readMessage returns `body: ''` for HTML-only
+ * emails and the LLM has nothing to summarize / reply to — the
+ * "她突然看不懂邮件了" symptom that triggered this fix.
+ */
+function htmlToPlainText(html: string): string {
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|h[1-6]|tr|td|th|section|article)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&[a-z]+;/gi, ' ')
+    .replace(/&#\d+;/g, ' ')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/**
+ * Body extraction with the HTML-fallback chain. Order:
+ *   1. parsed.text       — if the email has a text/plain part, use it
+ *   2. parsed.textAsHtml — mailparser sometimes populates this when it
+ *      decides to auto-convert, but for HTML-only emails it's often
+ *      undefined; check anyway as a free win
+ *   3. htmlToPlainText(parsed.html) — last resort, strip the HTML
+ *      ourselves. Common path for HTML-only marketing emails.
+ *   4. ''                — truly empty body (rare)
+ */
+function extractBody(parsed: {
+  text?: string
+  textAsHtml?: string
+  html?: string | false
+}): string {
+  if (parsed.text && parsed.text.trim()) return parsed.text.trim()
+  if (parsed.textAsHtml && parsed.textAsHtml.trim()) return parsed.textAsHtml.trim()
+  if (typeof parsed.html === 'string' && parsed.html.trim()) {
+    return htmlToPlainText(parsed.html)
+  }
+  return ''
+}
+
 export interface ImapAdapterOptions {
   host: string
   port: number
@@ -118,10 +181,11 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
         skipImageLinks: true,
         skipHtmlToText: false,
       })
-      // Prefer the plaintext part; fall back to HTML-derived text (mailparser
-      // auto-converts unless skipHtmlToText is set) and finally to the raw
-      // text/plain field (sometimes set on edge cases).
-      const text = (parsed.text ?? '').trim()
+      // Prefer the plaintext part; fall back to HTML-derived text (same
+      // chain readMessage uses). The HTML fallback handles modern HTML-
+      // only emails (AliExpress, transactional notices) where parsed.text
+      // is undefined — without it the snippet shows blank.
+      const text = extractBody(parsed)
       if (text) return text.replace(/\s+/g, ' ').slice(0, SNIPPET_LEN)
       return ''
     } catch (err) {
@@ -218,7 +282,7 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
       from: parsed.from?.text ?? '',
       to: toList.map((a) => a.address ?? '').filter(Boolean),
       subject: parsed.subject ?? '',
-      body: (parsed.text ?? '').trim(),
+      body: extractBody(parsed),
       ts: (parsed.date ?? new Date()).toISOString(),
       unread: false,
       attachments: (parsed.attachments ?? []).map((a) => ({
@@ -261,7 +325,7 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
                   from: pparsed.from?.text ?? '',
                   to: pTo.map((a) => a.address ?? '').filter(Boolean),
                   subject: pparsed.subject ?? '',
-                  body: (pparsed.text ?? '').trim(),
+                  body: extractBody(pparsed),
                   ts: (pparsed.date ?? new Date()).toISOString(),
                   unread: false,
                   attachments: (pparsed.attachments ?? []).map((a) => ({
