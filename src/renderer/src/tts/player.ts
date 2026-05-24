@@ -121,7 +121,16 @@ export async function playMp3Base64(b64: string, opts: PlayOptions = {}): Promis
     resolveDone()
   }
 
-  source.start()
+  // Schedule playback ~80ms in the future instead of "now". Web Audio's
+  // source.start() with no arg fires immediately, but if the context
+  // just transitioned suspended → running (common for proactive remarks
+  // after long idle periods — Chromium auto-suspends idle contexts),
+  // the audio thread isn't fully ready and Chromium truncates the first
+  // 30-80ms of samples. 80ms lookahead is imperceptible to the user but
+  // gives the audio thread time to prime its buffer, so the first
+  // syllable of "主人" / "哥" / etc. plays in full.
+  const startAt = ctx.currentTime + 0.08
+  source.start(startAt)
 
   return {
     stop(): void {
