@@ -89,6 +89,7 @@ import {
   resolveModelFile,
 } from './live2d-models-host.js'
 import { initUpdater } from './updater-host.js'
+import { initUsage } from './usage-host.js'
 import { IPC, type ChatSendPayload } from '../shared/ipc.js'
 import { configSchema, ConfigIPC, type Config } from '../shared/config.js'
 import type { ModelSidecar } from '../shared/live2d-models.js'
@@ -600,10 +601,12 @@ ipcMain.handle('chat:quickScreenReact', async () => {
     const cfg = getConfig()
     const { resolvePersona } = await import('../shared/config.js')
     const { buildTierPromptBlock } = await import('../shared/affinity.js')
-    const { buildQuickScreenReactPrompt } = await import('../shared/daily-prompts.js')
-    const { runExtractionWithImages } = await import('./chat-host.js')
+    const { buildQuickScreenReactPrompt, buildQuickScreenFallbackPrompt } =
+      await import('../shared/daily-prompts.js')
+    const { runExtraction, runExtractionWithImages } = await import('./chat-host.js')
     const { classifyAndApply } = await import('./emotion-classifier.js')
     const { formatLocalNow } = await import('../shared/time-format.js')
+    const { visionModel } = await import('../shared/lightweight-models.js')
 
     const persona = resolvePersona(cfg.persona)
     const memory = getMemoryService()
@@ -614,6 +617,86 @@ ipcMain.handle('chat:quickScreenReact', async () => {
       persona.traits,
     )
     const userName = memory ? await memory.getUserName().catch(() => null) : null
+
+    // Two paths that lead to "can't see screen, fall back to text":
+    //   1. User toggled off proactive.includeScreen — they explicitly
+    //      don't want her looking. Respect it; produce a text-only
+    //      acknowledgement remark instead.
+    //   2. Configured backend's lightweight-tier table has vision:null
+    //      (DeepSeek today, plus any local model we don't know about).
+    //      Calling runExtractionWithImages would just 400 from the
+    //      provider; better to pre-detect and route to text fallback.
+    //
+    // Both produce a normal proactive:remark broadcast — TTS, persisted
+    // episode, emotion classifier all fire as if she said it of her
+    // own accord. The button always produces SOMETHING; never errors.
+    const fallbackReason: 'disabled' | 'no-vision' | null = !cfg.proactive.includeScreen
+      ? 'disabled'
+      : visionModel(cfg.backend.baseUrl) === null
+        ? 'no-vision'
+        : null
+
+    if (fallbackReason) {
+      console.log(`[quickScreen] text-fallback path · reason=${fallbackReason}`)
+      const prompt = buildQuickScreenFallbackPrompt({
+        persona,
+        tierBlock,
+        now: formatLocalNow(),
+        userName,
+        reason: fallbackReason,
+      })
+      let raw: string
+      try {
+        raw = await runExtraction(prompt, {
+          temperature: 0.7,
+          feature: 'quick-screen-fallback',
+        })
+      } catch (err) {
+        return {
+          ok: false as const,
+          error: 'LLM 调用失败：' + (err instanceof Error ? err.message : String(err)),
+        }
+      }
+      // Same JSON shape as quickScreenReact's parser would handle, but
+      // simpler — no noted field. Defensive parsing in case the model
+      // returns plain text.
+      let line = ''
+      try {
+        const cleaned = raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')
+        const parsed = JSON.parse(cleaned) as { should_speak?: boolean; comment?: string }
+        if (parsed.should_speak && typeof parsed.comment === 'string') {
+          line = parsed.comment.trim()
+        }
+      } catch {
+        // Treat raw output as the line if JSON parse fails.
+        line = raw.trim().slice(0, 80)
+      }
+      if (!line) {
+        line =
+          fallbackReason === 'disabled'
+            ? '看不到屏幕呢——不过聊点别的吧？'
+            : '现在这双眼睛看不见图——换个能看图的模型试试？'
+      }
+      if (memory) {
+        try {
+          await memory.addEpisode('assistant', line)
+        } catch (err) {
+          console.warn('[quickScreen-fallback] episode persist failed:', err)
+        }
+      }
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.webContents.send('proactive:remark', {
+            text: line,
+            ts: new Date().toISOString(),
+            triggers: ['quick-screen-fallback'],
+          })
+        }
+      }
+      void classifyAndApply(line, '')
+      console.log(`[quickScreen-fallback] → "${line}"`)
+      return { ok: true as const, text: line }
+    }
 
     // Pull memory context: distilled facts + recent silent observations
     // from past screen captures. This is what lets her say "又在看
@@ -647,7 +730,10 @@ ipcMain.handle('chat:quickScreenReact', async () => {
 
     let raw: string
     try {
-      raw = await runExtractionWithImages(prompt, images, { temperature: 0.8 })
+      raw = await runExtractionWithImages(prompt, images, {
+        temperature: 0.8,
+        feature: 'quick-screen',
+      })
     } catch (err) {
       return {
         ok: false as const,
@@ -1199,6 +1285,11 @@ void app.whenReady().then(async () => {
   // session and breaks continuity. createWindow is last so the renderer
   // never sees a half-initialized backend.
   await initMemory()
+  // Token usage tracker — separate sqlite file (usage.sqlite), not
+  // touched by reset:memory. After init the recordUsage path is wired
+  // into chat-host.runExtraction + chat/run.streamText so every LLM
+  // call lands a row. Safe to init before or after memory.
+  initUsage()
   // initReminders() was the v0.0.13-era host. It's been dead code since
   // the unified TaskService landed: no tool calls it, no UI reads from
   // it. Worse, it kept reminders.sqlite open during boot, which made

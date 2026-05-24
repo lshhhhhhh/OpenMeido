@@ -86,6 +86,7 @@ export async function classifyAndApply(
         tierLabel: tier.zhLabel,
         lastEmotion: lastEmotionByPersona.get(personaId) ?? null,
       }),
+      { feature: 'classifier' },
     )
   } catch (err) {
     console.warn('[classifier] LLM call failed:', err)

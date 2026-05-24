@@ -149,6 +149,44 @@ function collectTriggers(cadence: ProactiveCadence): Trigger[] {
 // buildProactiveRemarkPrompt — it consumes persona + now + triggers and
 // keeps the JSON contract identical to what parseDecision below expects.
 
+/**
+ * Pick a conversational angle for this proactive remark. Without this
+ * rotation, every fire defaults to "observe what the user is doing on
+ * screen" — felt monotonous after a day of use. Different angles let
+ * the maid sometimes share her own moment, ask a question, or reference
+ * past memory.
+ *
+ * Probability weights are tier-aware:
+ *   - Lv.1 (stranger): heavy on observer (the safest mode for someone
+ *     who barely knows the user); 'self' nearly suppressed because
+ *     "let me tell you my feelings" reads as presumptuous from a
+ *     stranger.
+ *   - Lv.5 (intimate): more self / callback weight — at that point
+ *     she has earned the right to share + reference shared history.
+ *
+ * 'callback' picks fall back to 'observer' here too when the caller
+ * later finds it has nothing real to reference (pastObservations +
+ * recentUserMessages both empty). That fallback decision is in the
+ * caller's hands; the picker is unconditional.
+ */
+type ProactiveAngle = 'observer' | 'self' | 'callback' | 'curiosity'
+function pickProactiveAngle(tier: 'tier1' | 'tier2' | 'tier3' | 'tier4' | 'tier5'): ProactiveAngle {
+  // [observer, self, callback, curiosity] — must sum to 1.
+  const weights: Record<typeof tier, [number, number, number, number]> = {
+    tier1: [0.70, 0.05, 0.05, 0.20],
+    tier2: [0.55, 0.15, 0.15, 0.15],
+    tier3: [0.40, 0.25, 0.25, 0.10],
+    tier4: [0.30, 0.30, 0.30, 0.10],
+    tier5: [0.25, 0.35, 0.30, 0.10],
+  }
+  const [pObserver, pSelf, pCallback /*, pCuriosity */] = weights[tier]
+  const r = Math.random()
+  if (r < pObserver) return 'observer'
+  if (r < pObserver + pSelf) return 'self'
+  if (r < pObserver + pSelf + pCallback) return 'callback'
+  return 'curiosity'
+}
+
 export function parseDecision(
   raw: string,
 ): (ProactiveDecision & { noted: string[] }) | null {
@@ -276,11 +314,31 @@ async function evaluate(): Promise<void> {
       console.warn('[proactive] grounding pull failed:', err)
     }
   }
+  // Pick a conversational angle so we don't fire the same "look at the
+  // user" framing every time. Probabilities are tier-weighted (low
+  // tiers stay observer-heavy; high tiers spread to self / callback).
+  // callback needs real material — if rolled but neither factsBlock,
+  // recentUserMessages, nor pastObservations have content, fall back
+  // to observer so the prompt's "only reference real records" guard
+  // doesn't make the model produce should_speak=false and waste the
+  // slot. Done AFTER the material loads above so this check has data.
+  let angle = pickProactiveAngle(tier.tier)
+  if (angle === 'callback') {
+    const hasMaterial =
+      factsBlock.length > 0 ||
+      recentUserMessages.length > 0 ||
+      pastObservations.length > 0
+    if (!hasMaterial) {
+      console.log('[proactive] callback rolled but no material — falling back to observer')
+      angle = 'observer'
+    }
+  }
+
   // Diagnostic: confirm the tier block is being built + which tier
   // it landed in. Helps users verify "tier got injected into proactive"
   // without having to print the full prompt.
   console.log(
-    `[proactive] score=${affinity?.score ?? 0} (${tier.zhLabel}), elaborate=${elaborate}, tierBlock len=${tierBlock.length}`,
+    `[proactive] score=${affinity?.score ?? 0} (${tier.zhLabel}), elaborate=${elaborate}, angle=${angle}, tierBlock len=${tierBlock.length}`,
   )
   // Creative temperature: 0.2 is fine for JSON gate decisions but
   // produces deterministic repetition on the `comment` field. Bump to
@@ -311,13 +369,18 @@ async function evaluate(): Promise<void> {
         factsBlock,
         recentUserMessages,
         pastObservations,
+        angle,
       })
       raw =
         images.length > 0
           ? await runExtractionWithImages(prompt, images, {
               temperature: creativeTemp,
+              feature: 'proactive-vision',
             })
-          : await runExtraction(prompt, { temperature: creativeTemp })
+          : await runExtraction(prompt, {
+              temperature: creativeTemp,
+              feature: 'proactive',
+            })
     } else {
       const prompt = buildProactiveRemarkPrompt({
         persona,
@@ -329,8 +392,12 @@ async function evaluate(): Promise<void> {
         elaborate,
         factsBlock,
         recentUserMessages,
+        angle,
       })
-      raw = await runExtraction(prompt, { temperature: creativeTemp })
+      raw = await runExtraction(prompt, {
+        temperature: creativeTemp,
+        feature: 'proactive',
+      })
     }
   } catch (err) {
     console.warn('[proactive] LLM call failed:', err)
@@ -473,8 +540,14 @@ async function forceOnboardingPeek(): Promise<void> {
   try {
     raw =
       images.length > 0
-        ? await runExtractionWithImages(prompt, images, { temperature: 0.7 })
-        : await runExtraction(prompt, { temperature: 0.7 })
+        ? await runExtractionWithImages(prompt, images, {
+            temperature: 0.7,
+            feature: 'onboarding-peek',
+          })
+        : await runExtraction(prompt, {
+            temperature: 0.7,
+            feature: 'onboarding-peek',
+          })
   } catch (err) {
     console.warn('[onboarding] LLM call failed:', err)
     return

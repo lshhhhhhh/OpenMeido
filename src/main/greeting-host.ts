@@ -216,7 +216,7 @@ export async function greetOnLaunch(): Promise<void> {
       // trailing-assistant strip in getRecentExchange (without that the
       // model just copies its previous greeting verbatim regardless of
       // temperature).
-      { temperature: 0.9 },
+      { temperature: 0.9, feature: 'greeting' },
     )
     line = raw.trim()
   } catch (err) {

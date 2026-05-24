@@ -26,6 +26,7 @@ import { buildTierPromptBlock } from '../../shared/affinity.js'
 import { getConfig, resolveApiKey, isAiConfigured } from '../config.js'
 import { getMemoryService } from '../memory-host.js'
 import { pickColdStartLine } from '../lines-host.js'
+import { recordUsage, providerFromUrl } from '../usage-host.js'
 import { createTextDeltaFilter } from '../chat-text-filter.js'
 import { classifyAndApply } from '../emotion-classifier.js'
 import { transformOpenAIBody, needsBodyTransform } from '../openai-compat-body.js'
@@ -733,6 +734,35 @@ export async function runChat(
         skipEmotion: bakedEmotion !== null,
         skipAffinity: turnType !== 'personal',
       })
+    }
+
+    // Record token usage for the Settings → AI 用量 dashboard.
+    // result.usage from streamText resolves AFTER the stream fully
+    // drains; awaiting it here at the end is the safe moment. Wrap
+    // defensively — provider impls vary and a usage shape mismatch
+    // shouldn't taint the user-visible "done" event.
+    try {
+      const usage = (await result.usage) as
+        | {
+            inputTokens?: number
+            outputTokens?: number
+            promptTokens?: number
+            completionTokens?: number
+            cachedInputTokens?: number
+          }
+        | undefined
+      if (usage) {
+        recordUsage({
+          provider: providerFromUrl(cfg.backend.baseUrl),
+          model: modelId,
+          feature: 'chat',
+          promptTokens: usage.inputTokens ?? usage.promptTokens ?? 0,
+          completionTokens: usage.outputTokens ?? usage.completionTokens ?? 0,
+          cachedTokens: usage.cachedInputTokens ?? 0,
+        })
+      }
+    } catch (err) {
+      console.warn('[usage] chat record failed (non-fatal):', err)
     }
 
     localEmit({ type: 'done' })

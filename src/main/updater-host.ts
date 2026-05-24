@@ -59,10 +59,49 @@ export function initUpdater(): void {
   if (initialized) return
   initialized = true
 
-  // Dev mode: don't touch the updater. autoUpdater throws if invoked
-  // without a real installed binary (no app-update.yml on disk).
+  // Register no-op IPC handlers FIRST, regardless of packaged state.
+  // Without these, dev-mode renderers calling `updater.queryState()` on
+  // mount would throw "No handler registered for 'updater:queryState'"
+  // and pollute the console. In dev we just return safe stubs so the
+  // UpdaterPill renders as if there were no update.
+  ipcMain.handle('updater:queryState', () => lastState)
+  ipcMain.handle('updater:checkNow', () => {
+    if (!app.isPackaged) {
+      console.log('[updater] dev mode — checkNow no-op')
+      return null
+    }
+    console.log('[updater] manual check requested')
+    return autoUpdater.checkForUpdates().catch((err) => {
+      console.warn('[updater] manual check failed:', err)
+      return null
+    })
+  })
+  ipcMain.handle('updater:download', async () => {
+    if (!app.isPackaged) {
+      console.log('[updater] dev mode — download no-op')
+      return
+    }
+    console.log('[updater] user consented — starting download')
+    try {
+      await autoUpdater.downloadUpdate()
+    } catch (err) {
+      console.warn('[updater] download failed:', err)
+    }
+  })
+  ipcMain.handle('updater:install', () => {
+    if (!app.isPackaged) {
+      console.log('[updater] dev mode — install no-op')
+      return
+    }
+    console.log('[updater] user requested install — quit + apply')
+    autoUpdater.quitAndInstall(false, true)
+  })
+
+  // Dev mode: stop here. Don't subscribe to autoUpdater events or
+  // start the periodic check — those need a real installed binary
+  // (no app-update.yml on disk in dev, autoUpdater would throw).
   if (!app.isPackaged) {
-    console.log('[updater] dev mode — skipping')
+    console.log('[updater] dev mode — skipping periodic check + event subscriptions')
     return
   }
 
@@ -150,48 +189,9 @@ export function initUpdater(): void {
     })
   }, PERIODIC_CHECK_INTERVAL_MS)
 
-  // IPC: renderer banner's "立即更新" button. User saw the available
-  // notification and consented to download — start the actual file
-  // transfer. Progress flows back via the on('download-progress')
-  // listener above into updater:progress events. Completion fires
-  // updater:downloaded.
-  ipcMain.handle('updater:download', async () => {
-    console.log('[updater] user consented — starting download')
-    try {
-      await autoUpdater.downloadUpdate()
-    } catch (err) {
-      console.warn('[updater] download failed:', err)
-    }
-  })
-
-  // IPC: renderer pill's "立即重启更新" button. quitAndInstall ends
-  // the current Electron process and lets NSIS swap the binary, then
-  // launches the new one. We pass `isSilent=false, isForceRunAfter=true`
-  // so user sees the standard installer flash (gives them a visible
-  // signal something is happening) and the app reopens automatically
-  // when done.
-  ipcMain.handle('updater:install', () => {
-    console.log('[updater] user requested install — quit + apply')
-    autoUpdater.quitAndInstall(false, true)
-  })
-
-  // IPC: Settings → 关于 has a "检查更新" button that fires this on
-  // demand instead of waiting for the 30 s post-boot or 6 h periodic
-  // check. The result still flows through the same updater:available /
-  // updater:not-available events (we already broadcast both), so the
-  // UI doesn't need a synchronous return value — fire-and-forget plus
-  // event subscription is the pattern.
-  ipcMain.handle('updater:checkNow', () => {
-    console.log('[updater] manual check requested')
-    return autoUpdater.checkForUpdates().catch((err) => {
-      console.warn('[updater] manual check failed:', err)
-      return null
-    })
-  })
-
-  // IPC: renderer queries this on mount to recover whatever state the
-  // updater is in. Closes the race where update events fire before the
-  // UpdaterPill component subscribes — replay on demand instead of
-  // hoping the subscription beats the event.
-  ipcMain.handle('updater:queryState', () => lastState)
+  // (All four updater IPC handlers are registered up top before the
+  // dev-mode short-circuit — see the block right after `initialized`
+  // is set. Putting them there keeps them reachable in dev too,
+  // returning safe stubs instead of throwing "no handler" at the
+  // renderer's queryState-on-mount.)
 }

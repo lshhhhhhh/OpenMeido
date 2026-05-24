@@ -606,6 +606,78 @@ export default function App() {
     })
   }, [])
 
+  // Idle fidget — every 75-150s of true idle, randomly play an
+  // expression or motion so the model doesn't sit perfectly still
+  // between events. Without this the maid felt "dry" between chat
+  // turns / proactive remarks. Eye tracking already covers "she looks
+  // at where my mouse is", but the rest of her face/body stayed
+  // static. This adds the missing layer of "she just adjusted, looked
+  // around, fixed her hair" — micro-fidgets that read as alive.
+  //
+  // Guards: skip while chat is in flight (busy), while TTS is playing
+  // (speakingIdx !== null — would override the speaking expression),
+  // or while the user is recording voice input (voiceState). All
+  // accessed via refs so the timer doesn't restart on every render.
+  const idleStateRef = useRef({ busy, speakingIdx, voiceState })
+  useEffect(() => {
+    idleStateRef.current = { busy, speakingIdx, voiceState }
+  }, [busy, speakingIdx, voiceState])
+  useEffect(() => {
+    let mainTimer: number | null = null
+    let clearExprTimer: number | null = null
+
+    const scheduleNext = (): void => {
+      // Random delay 75-150s. Wide range prevents periodicity (user
+      // would notice "she always fidgets at 1m30s after each chat").
+      const delayMs = 75_000 + Math.random() * 75_000
+      mainTimer = window.setTimeout(fire, delayMs)
+    }
+
+    const fire = (): void => {
+      const ctrl = live2dRef.current
+      const state = idleStateRef.current
+      // Bail if model not loaded or anything else has the stage. The
+      // re-schedule still runs so we try again later.
+      const occupied =
+        !ctrl ||
+        state.busy ||
+        state.speakingIdx !== null ||
+        state.voiceState !== 'idle'
+      if (occupied) {
+        scheduleNext()
+        return
+      }
+      // 70/30 split: expressions are subtler, motions are more
+      // visible. Tilt toward expressions so the fidget doesn't feel
+      // performative. For models with no .exp3.json (Hiyori / Haru),
+      // randomExpression silently no-ops — the next tick will land
+      // on motion and the user still sees something.
+      if (Math.random() < 0.7) {
+        ctrl!.randomExpression()
+        // Return to default after 6-10s so the fidget reads as a
+        // brief look, not a held emotion.
+        const clearDelayMs = 6_000 + Math.random() * 4_000
+        clearExprTimer = window.setTimeout(() => {
+          // Re-check the state — TTS / chat may have started during
+          // the held window; in that case the speaking expression
+          // already took over and we don't want to step on it.
+          const now = idleStateRef.current
+          if (now.busy || now.speakingIdx !== null) return
+          live2dRef.current?.clearExpression()
+        }, clearDelayMs)
+      } else {
+        ctrl!.randomMotion()
+      }
+      scheduleNext()
+    }
+
+    scheduleNext()
+    return () => {
+      if (mainTimer !== null) clearTimeout(mainTimer)
+      if (clearExprTimer !== null) clearTimeout(clearExprTimer)
+    }
+  }, [])
+
   // Resolve activeModel → meido-live2d:// URL. We need the sidecar to know
   // which *.model3.json inside the model dir is the entry point. Re-runs when
   // the user picks a different model in Settings.

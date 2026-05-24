@@ -573,6 +573,15 @@ export function Settings({ initial, onClose }: SettingsProps) {
         </Section>
         )}
 
+        {/* Token-usage panel — appears under the AI tab. Refreshes each
+            time the user opens Settings (not live during chat, which
+            would burn render cycles). */}
+        {activeTab === 'ai' && (
+          <Section title="用量">
+            <TokenUsagePanel />
+          </Section>
+        )}
+
         {/* ---- Persona ---- */}
         {activeTab === 'persona' && (
         <Section title="人物">
@@ -3015,6 +3024,177 @@ function UpdateChecker(): React.ReactElement {
       </div>
     </div>
   )
+}
+
+/**
+ * Token-usage dashboard. Recorded server-side by chat-host's
+ * runExtraction + chat/run's streamText; we just aggregate + render.
+ *
+ * Deliberately NO price column — provider pricing changes too often
+ * and every backend has its own structure (per-token / per-char /
+ * cached discounts / CNY subsidy). Maintaining a price table ages
+ * badly. Instead we link out to the active provider's own usage
+ * dashboard for the actual billing number — that page is always
+ * accurate and reflects real account credit.
+ *
+ * Feature breakdown helps users identify where their tokens go:
+ * proactive observer + emotion classifier + greeting are the
+ * "always-on" cost; chat replies are the demand-driven cost.
+ */
+function TokenUsagePanel(): React.ReactElement {
+  const [s, setS] = useState<{
+    today: { prompt: number; completion: number; total: number }
+    week: { prompt: number; completion: number; total: number }
+    month: { prompt: number; completion: number; total: number }
+    byFeatureToday: { feature: string; total: number }[]
+    byFeatureWeek: { feature: string; total: number }[]
+    topProviderWeek: string | null
+    topProviderUrl: string
+  } | null>(null)
+
+  useEffect(() => {
+    void window.api.usage.summary().then(setS)
+  }, [])
+
+  if (!s) return <div style={{ fontSize: 12, color: '#888' }}>加载中…</div>
+  if (s.month.total === 0) {
+    return (
+      <div style={{ fontSize: 12, color: '#888', lineHeight: 1.6 }}>
+        还没记录到 token 用量。聊几句 / 让她主动开口几次 — 数字会从下次重启或下次保存设置后开始累计。
+      </div>
+    )
+  }
+
+  const fmt = (n: number): string => {
+    if (n < 1000) return n.toString()
+    if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`
+    return `${(n / 1_000_000).toFixed(2)}M`
+  }
+
+  const totalWeek = s.byFeatureWeek.reduce((sum, f) => sum + f.total, 0) || 1
+
+  return (
+    <div style={{ fontSize: 13, color: '#ddd', lineHeight: 1.6 }}>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(3, 1fr)',
+          gap: 8,
+          marginBottom: 12,
+        }}
+      >
+        {[
+          { label: '今日', data: s.today },
+          { label: '本周', data: s.week },
+          { label: '本月', data: s.month },
+        ].map((col) => (
+          <div
+            key={col.label}
+            style={{
+              padding: '8px 10px',
+              background: 'rgba(255,255,255,0.04)',
+              borderRadius: 6,
+              border: '1px solid rgba(255,255,255,0.08)',
+            }}
+          >
+            <div style={{ fontSize: 10, color: '#888' }}>{col.label}</div>
+            <div style={{ fontSize: 18, fontFamily: 'monospace', color: '#aad4ff' }}>
+              {fmt(col.data.total)}
+            </div>
+            <div style={{ fontSize: 10, color: '#666' }}>
+              in {fmt(col.data.prompt)} · out {fmt(col.data.completion)}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>本周 token 流向</div>
+        {s.byFeatureWeek.length === 0 ? (
+          <div style={{ fontSize: 11, color: '#666' }}>本周还没数据</div>
+        ) : (
+          s.byFeatureWeek.map((f) => {
+            const pct = (f.total / totalWeek) * 100
+            return (
+              <div key={f.feature} style={{ marginBottom: 4 }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    fontSize: 11,
+                    marginBottom: 2,
+                  }}
+                >
+                  <span style={{ color: '#ccc' }}>{featureLabel(f.feature)}</span>
+                  <span style={{ color: '#888', fontFamily: 'monospace' }}>
+                    {fmt(f.total)} · {pct.toFixed(0)}%
+                  </span>
+                </div>
+                <div
+                  style={{
+                    width: '100%',
+                    height: 4,
+                    background: 'rgba(255,255,255,0.06)',
+                    borderRadius: 2,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${pct}%`,
+                      height: '100%',
+                      background: 'linear-gradient(90deg, #5a8edf, #7ab8ff)',
+                    }}
+                  />
+                </div>
+              </div>
+            )
+          })
+        )}
+      </div>
+
+      {s.topProviderUrl && (
+        <div style={{ fontSize: 11, color: '#888', marginTop: 12, lineHeight: 1.6 }}>
+          想看准确的实际花费（这里的数字是 token 计数，不是 ¥）？
+          {' '}
+          <a
+            href={s.topProviderUrl}
+            onClick={(e) => {
+              e.preventDefault()
+              void window.open(s.topProviderUrl, '_blank', 'noopener,noreferrer')
+            }}
+            style={{ color: '#7ab8ff', textDecoration: 'underline' }}
+          >
+            打开 {s.topProviderWeek} 后台
+          </a>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Human-readable label for the feature key recorded by usage-host. */
+function featureLabel(feature: string): string {
+  switch (feature) {
+    case 'chat':
+      return '聊天'
+    case 'proactive':
+      return '主动 (无屏)'
+    case 'proactive-vision':
+      return '主动 (看屏)'
+    case 'onboarding-peek':
+      return '首日 onboarding'
+    case 'greeting':
+      return '开机问候'
+    case 'classifier':
+      return '情绪分类'
+    case 'extraction':
+      return '其他 (无屏)'
+    case 'extraction-vision':
+      return '其他 (看屏)'
+    default:
+      return feature
+  }
 }
 
 function EmbedModelPanel(): React.ReactElement {

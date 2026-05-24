@@ -16,6 +16,7 @@ import { generateText, type LanguageModel } from 'ai'
 import type { Config } from '../shared/config.js'
 import { getConfig, resolveApiKey, resolveBackendKey } from './config.js'
 import { lightweightModel, resolveTemperature } from '../shared/lightweight-models.js'
+import { recordUsage, providerFromUrl } from './usage-host.js'
 
 export type LlmStatus = 'ok' | 'error' | 'idle'
 
@@ -60,7 +61,7 @@ export function notifyLlmStatus(status: LlmStatus): void {
  */
 export async function runExtraction(
   prompt: string,
-  opts: { temperature?: number } = {},
+  opts: { temperature?: number; feature?: string } = {},
 ): Promise<string> {
   const cfg = getConfig()
   const apiKey = resolveApiKey(cfg)
@@ -116,6 +117,33 @@ export async function runExtraction(
   // Default 0.2 (structured / deterministic).
   const temperature = resolveTemperature(modelId, opts.temperature ?? 0.2)
   const result = await generateText({ model, prompt, temperature })
+  // Record token usage for the Settings → AI 用量 dashboard. Wraps
+  // every call defensively — usage shape varies slightly across
+  // provider impls in Vercel AI SDK and a missing field shouldn't
+  // crash the LLM path it's instrumenting.
+  try {
+    const usage = result.usage as
+      | {
+          inputTokens?: number
+          outputTokens?: number
+          promptTokens?: number
+          completionTokens?: number
+          cachedInputTokens?: number
+        }
+      | undefined
+    if (usage) {
+      recordUsage({
+        provider: providerFromUrl(cfg.backend.baseUrl),
+        model: modelId,
+        feature: opts.feature ?? 'extraction',
+        promptTokens: usage.inputTokens ?? usage.promptTokens ?? 0,
+        completionTokens: usage.outputTokens ?? usage.completionTokens ?? 0,
+        cachedTokens: usage.cachedInputTokens ?? 0,
+      })
+    }
+  } catch (err) {
+    console.warn('[usage] runExtraction record failed (non-fatal):', err)
+  }
   return result.text
 }
 
@@ -131,7 +159,7 @@ export async function runExtraction(
 export async function runExtractionWithImages(
   prompt: string,
   images: { mimeType: string; bytes: Uint8Array }[],
-  opts: { temperature?: number } = {},
+  opts: { temperature?: number; feature?: string } = {},
 ): Promise<string> {
   const cfg = getConfig()
   const apiKey = resolveApiKey(cfg)
@@ -192,6 +220,29 @@ export async function runExtractionWithImages(
       },
     ],
   })
+  try {
+    const usage = result.usage as
+      | {
+          inputTokens?: number
+          outputTokens?: number
+          promptTokens?: number
+          completionTokens?: number
+          cachedInputTokens?: number
+        }
+      | undefined
+    if (usage) {
+      recordUsage({
+        provider: providerFromUrl(url),
+        model: modelId,
+        feature: opts.feature ?? 'extraction-vision',
+        promptTokens: usage.inputTokens ?? usage.promptTokens ?? 0,
+        completionTokens: usage.outputTokens ?? usage.completionTokens ?? 0,
+        cachedTokens: usage.cachedInputTokens ?? 0,
+      })
+    }
+  } catch (err) {
+    console.warn('[usage] runExtractionWithImages record failed (non-fatal):', err)
+  }
   return result.text
 }
 

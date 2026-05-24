@@ -798,6 +798,26 @@ const api = {
     },
   },
 
+  usage: {
+    /**
+     * Aggregate token-usage summary for Settings → AI 用量 panel.
+     * Returns today / week / month totals + breakdown by feature.
+     * topProviderUrl points at the most-used provider's billing page
+     * so users can cross-check actual spend.
+     */
+    summary(): Promise<{
+      today: { prompt: number; completion: number; total: number }
+      week: { prompt: number; completion: number; total: number }
+      month: { prompt: number; completion: number; total: number }
+      byFeatureToday: { feature: string; total: number }[]
+      byFeatureWeek: { feature: string; total: number }[]
+      topProviderWeek: string | null
+      topProviderUrl: string
+    }> {
+      return ipcRenderer.invoke('usage:summary') as ReturnType<typeof api.usage.summary>
+    },
+  },
+
   app: {
     /** Current app version string from package.json (main process side). */
     version(): Promise<string> {

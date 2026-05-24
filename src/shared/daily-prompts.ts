@@ -416,6 +416,17 @@ export function buildProactiveRemarkPrompt(args: {
    *  path, shared so both feel like the same character noticing. Only
    *  meaningful with hasScreenshot=true. */
   pastObservations?: string[]
+  /** Conversation angle for this proactive remark — host rolls a die
+   *  (tier-weighted) to pick one each call. Without this, every
+   *  remark falls into "observe what the user is doing" by default
+   *  because the screen-aware framing dominates the prompt. Variety
+   *  comes from rotating angles:
+   *    - 'observer'  : default, comment on user's current state/screen
+   *    - 'self'      : she shares her own micro-moment / thought
+   *    - 'callback'  : reference a past topic / earlier observation
+   *    - 'curiosity' : ask an open-ended question
+   *  Omit / undefined → behaves like 'observer' (backward-compat). */
+  angle?: 'observer' | 'self' | 'callback' | 'curiosity'
 }): string {
   const triggerLines = args.triggers.map((t) => `${t.kind}: ${t.note}`).join('\n')
   const mood = timeOfDayMood()
@@ -441,6 +452,7 @@ export function buildProactiveRemarkPrompt(args: {
         `- 拿不准 → false。\n`
       : ''
   const tier = args.tierBlock ? `${args.tierBlock}\n\n` : ''
+  const angleBlock = buildAngleBlock(args.angle ?? 'observer')
   return (
     args.persona.systemPrompt +
     '\n\n' +
@@ -452,6 +464,7 @@ export function buildProactiveRemarkPrompt(args: {
     nameLine +
     screenHint +
     selfHistoryBlock +
+    angleBlock +
     `\n` +
     `# 判断标准\n` +
     `用户装这个程序就是想要陪伴的。**默认倾向 should_speak=true**，除非有明确不打扰的理由。\n` +
@@ -616,6 +629,73 @@ export function buildWeeklyReviewPrompt(args: {
  * game, private content (emails, chats, passwords) gets vague-acknowledged
  * or skipped.
  */
+/**
+ * Text-only fallback when the user clicks 👀 but we can't actually
+ * look at the screen — either `proactive.includeScreen` is off OR the
+ * configured model has no vision tier (DeepSeek, local models without
+ * multimodal support, etc.).
+ *
+ * The "正确"行为 isn't to error out — it's to acknowledge the absence
+ * and ALSO give the user a useful interaction. They pressed a button
+ * expecting feedback; throwing an error is the worst outcome. Better
+ * to say "I can't see it this time, but how about we chat about
+ * something else?" so the button always produces a moment.
+ *
+ * The prompt nudges toward a casual, persona-voiced opener — same
+ * tier-aware tone as proactive remarks, just without the screen
+ * grounding. Reason flag distinguishes "user opted out" vs "model
+ * can't see", since the line should subtly hint at the right thing
+ * (offering to enable screen, or mentioning vision limitations).
+ */
+export function buildQuickScreenFallbackPrompt(args: {
+  persona: { name: string; systemPrompt: string }
+  tierBlock: string
+  now: string
+  userName?: string | null
+  /** Why we can't see — affects what hint the line gives.
+   *   'disabled'    — user turned off includeScreen in Settings
+   *   'no-vision'   — current model is text-only (e.g. DeepSeek)
+   */
+  reason: 'disabled' | 'no-vision'
+}): string {
+  const nameLine = args.userName
+    ? `已知用户的名字是「${args.userName}」。可以自然带入。\n`
+    : ''
+  const reasonHint =
+    args.reason === 'disabled'
+      ? `用户**主动关闭了"让你看屏幕"的权限**。所以你**真的看不到** —— 别假装看到什么。但也别道歉式提醒，简短带过即可。`
+      : `当前选的 AI 模型**不支持看图**（比如 DeepSeek 纯文本模型）。你看不到屏幕。可以稍微提一句"换个能看图的模型就能看到了"——但不要催，自然带过。`
+  return (
+    args.persona.systemPrompt +
+    '\n\n' +
+    args.tierBlock +
+    '\n\n' +
+    `# 此刻\n` +
+    `用户刚刚按了"小眼睛"图标——他/她**想让你看一眼屏幕**做出反应。但是：\n` +
+    `${reasonHint}\n` +
+    `\n` +
+    `# 你的反应\n` +
+    `不要报错、不要拒绝。**承认看不到，然后顺势聊一点别的**——\n` +
+    `- 一句话承认（"这次看不到屏幕呢" / "现在这双眼睛没开" 之类，按 persona 语气）\n` +
+    `- 紧接着一个轻量的话锋转向：问一个开放的小问题 / 分享你自己一个小瞬间 / 提一个轻量话题（天气除外，你不知道天气）\n` +
+    `- **总长不超过 40 字**\n` +
+    `- 当前时间：${args.now}\n` +
+    nameLine +
+    `\n` +
+    `# 输出（只输出 JSON）\n` +
+    `{"should_speak": true, "comment": "<你要说的那句话>"}\n` +
+    `\n` +
+    `## 例子（女仆，tier3）\n` +
+    `{"should_speak": true, "comment": "这次看不到屏幕呢主人——不过你今天怎么样？"}\n` +
+    `\n` +
+    `## 例子（管家，tier4）\n` +
+    `{"should_speak": true, "comment": "这双眼睛今天没开，小姐。聊点别的——最近有什么烦心事吗？"}\n` +
+    `\n` +
+    `## 例子（妹妹，tier3）\n` +
+    `{"should_speak": true, "comment": "诶哥这次看不到屏幕诶。说点啥？妹妹想知道。"}\n`
+  )
+}
+
 export function buildQuickScreenReactPrompt(args: {
   persona: { name: string; systemPrompt: string }
   tierBlock: string
@@ -885,3 +965,53 @@ function buildElaborateGroundingBlock(
   }
   return block
 }
+
+/**
+ * Per-angle nudge block. Host rolls a die per proactive call to pick
+ * one — angle-rotation prevents every remark from defaulting to
+ * 'observe what the user is doing on screen', which felt
+ * monotonous after a few days of use.
+ *
+ * Each block is short (5-8 lines) on purpose. Persona prompt + tier
+ * block + screen rules are already heavy; the angle just nudges the
+ * model toward a specific conversational mode without rewriting the
+ * whole frame.
+ */
+function buildAngleBlock(
+  angle: 'observer' | 'self' | 'callback' | 'curiosity',
+): string {
+  switch (angle) {
+    case 'observer':
+      return (
+        '\n# 这次开口的角度：观察用户\n' +
+        '把镜头对准用户当下在做什么 / 在看什么 / 看上去什么状态。这是默认角度——内容仍要遵守上面的屏幕规则。\n'
+      )
+    case 'self':
+      return (
+        '\n# 这次开口的角度：说说自己\n' +
+        '不是评论用户在干什么，而是分享你自己这一刻的小瞬间——一个走神、一个念头、一个感受、一个看到的环境细节。\n' +
+        '- 例子："刚才走神了一下" / "窗外好像有鸟" / "想到一件无关的小事" / "这一刻好安静"\n' +
+        '- 不要凭空捏造你不该知道的事（你看不到天气 / 你没在网上冲浪 / 你不知道新闻）\n' +
+        '- 要可信——你是"住在桌面上"的角色，能说的小细节限于：自己的念头、感受、看到的屏幕、和此刻的安静/嘈杂\n' +
+        '- 一句话足够，不要堆\n'
+      )
+    case 'callback':
+      return (
+        '\n# 这次开口的角度：引用过去\n' +
+        '从你的私下笔记或用户最近说过的话里挑一条**真实出现过**的内容，自然延伸："上次提到 X，怎么样了？" / "你之前说过 Y，今天还是这样吗？" / "还在追 Z 那部？"\n' +
+        '- **核心约束**：必须来自真实记录（pastObservations / recentUserMessages），不能虚构\n' +
+        '- 如果没有真实可引的——should_speak=false。不要为这个角度硬编内容\n' +
+        '- 自然、不突兀；像朋友闲聊时偶然想起，不是查档案汇报\n'
+      )
+    case 'curiosity':
+      return (
+        '\n# 这次开口的角度：好奇地问一句\n' +
+        '不是评论现状、不是说你自己，而是问用户一个轻量、开放的小问题："最近在追什么剧？" / "周末有什么打算？" / "今天工作怎么样？"\n' +
+        '- 问题要**轻**，不要打探隐私 / 工作机密 / 感情八卦\n' +
+        '- 在合适的时间问（深夜不问"今天工作"；上班时间不问"周末计划"）\n' +
+        '- 问完不要再补一句"我只是好奇"那种解释——直接停\n' +
+        '- 一句话\n'
+      )
+  }
+}
+
