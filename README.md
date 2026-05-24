@@ -4,17 +4,48 @@
 
 ![screenshot](screenshot/1.png)
 
+她不是另一个 ChatGPT 套皮——她有**关系演进**、**自己的内心世界**、还能**帮你处理日常事务**。三个核心特色：
+
+### 🎮 好感度系统 — 关系真的会演进
+
+跟她聊得越久，她的说话方式真的变。不是改个称呼那么简单：
+
+- **Lv.1 生疏期** — 礼貌的 1-2 句应答，不主动找话题，不分享自己看法
+- **Lv.3 熟络期** — 会反问你近况、关心你状态、敢有自己观点
+- **Lv.5 默契期** — 敢顶嘴、敢撒娇、敢翻旧账、敢有不同意见
+
+聊天面板右上角 chip 显示当前好感度 + 进度条到下一档。每次 LLM 判定后浮 `+1` / `-1` 数字（像 MMO 伤害数）。跨人设独立计数——女仆好感度跟妹妹的不互通。
+
+### 🎭 不同人设 + 内心世界
+
+四种人设——**女仆 / 妹妹 / 管家 / 大小姐**——每个有自己的称呼 + 性格 + tier 演进曲线。但真正有意思的是：**她有自己的过去**。
+
+每个 persona 自带一份关系背景（lore pack）注入她的内心：
+
+- **女仆**：才到岗的新人。"主人是我接的第一份工"、"私下对着镜子练'主人，您回来了'"、"移动过主人房间任何东西后会偷偷记下原位再放回去"
+- **妹妹**：从小一起长大的兄妹。"我书桌抽屉有本本子记了哥哥说过的话"、"妈妈做红烧肉我会先挑肥的塞给哥哥"、"我对哥哥说过最难听的话其实不是真心的"
+
+聊到相关话题这些细节会**通过 RAG 自动浮上来**。她说出来的内容是有根的，不是模型现编的——这是和"ChatGPT 装女仆装"最大的区别。也可以**自定义 persona**：在 Settings 里写你自己的人设 prompt。
+
+### 🛠 生产力工具 — 不止聊天
+
+| 工具 | 做什么 |
+|---|---|
+| **📧 邮箱** | IMAP 接入 Gmail / 网易 / Outlook 等。她会自动把促销/订阅/通知**折叠成一行计数**，只逐封展开真人邮件 |
+| **📄 总结文档** | 拖任意 PDF / Word / 文本，要点 + 追问问题一键产出 |
+| **📋 任务清单** | 自然语言加待办 + 提醒，她会按时机主动提醒你 |
+| **🌐 联网搜索** | Gemini / GLM / Kimi 都支持。问"今天比特币多少钱"她会先搜再答 |
+| **👀 看屏幕** | 一键截图给她，可以解释 / 翻译 / 锐评 |
+| **📊 表格窗口** | "总结最近 10 封邮件" → 自动开独立表格窗口，多 tab 对比 |
+| **🔔 一键闭嘴** | 工作中按一下她安静，再按回来打招呼。专注模式不破坏陪伴感 |
+
 ---
 
-## 中文
+### 下载安装
 
-桌面上一个透明置顶的 Live2D 形象，会和你聊天、记住你说过的事、读你的邮箱、定提醒、在你长时间不动的时候主动来一句关心。
+到 [Releases](https://github.com/lshhhhhhh/OpenMeido/releases) 拿最新的 `OpenMeido-Setup-X.X.X.exe`，双击安装。无签名，Windows SmartScreen 弹一次「更多信息 → 仍要运行」过掉。
 
-**v0.0.36 开始**：会和你**经营关系**——好感度上去了她说话方式都会变（从生疏礼貌到敢顶嘴、敢撒娇），不只是换个称呼。
-
-### 下载
-
-到 [Releases](https://github.com/lshhhhhhh/OpenMeido/releases) 拿最新的 `OpenMeido-Setup-X.X.X.exe`，双击安装。没签名，Windows SmartScreen 弹一次「更多信息 → 仍要运行」过掉。
+**国内用户**：装好后第一次升级慢的话，去 Settings → 关于 → 下载源切到 **ghproxy** 镜像，速度从几十 KB/s 提到 1-5 MB/s。
 
 ### 首次启动
 
@@ -22,65 +53,95 @@
 
 | Backend | 特点 |
 |---|---|
-| **智谱 GLM** | 免费多模态、国内 ★ 推荐 |
-| Gemini | Google · 有免费额度 |
+| **智谱 GLM** | 免费多模态 · 国内 · 内置搜索 ★ 推荐 |
+| **Kimi** | Moonshot · 内置搜索 · 国内 / 国际两个端点 |
+| Gemini | Google · 有免费额度 · grounding 搜索 |
 | DeepSeek | V4 价格屠夫（不支持图） |
 | 通义千问 Qwen | 阿里 · 新用户送 token |
 | 豆包 Doubao | 字节 · 国内手机号 |
 | OpenAI | 付费 |
-| LM Studio | 本地跑、无需 key |
+| LM Studio | 本地跑 · 无需 key |
 
-### 核心特色
+### 自带 Live2D 模型 + 导入新模型
 
-- **🎮 游戏化好感度** — 跟她聊得越久，她对你越熟。**生疏期**（Lv.1）只回 1-2 句礼貌应答；**熟络后**（Lv.3）会反问 / 关心你的状态；**默契期**（Lv.5）敢顶嘴、敢分享自己的看法、敢有不同意见。聊天时右上角 chip 显示当前好感度 + 进度条到下一档，每次判定后会浮 +1 / -1 数字像 MMO 伤害数字
-- **🔔 一键闭嘴 / 一键召回** — 聊天面板顶部一个按钮，工作中按一下让她闭嘴 + 红色提示，再按一下她回来打招呼。每个人设有专属的进 / 出口台词随机抽（"主人忙完啦？想我没？"）
-- **多个人设** — 内置女仆、妹妹、傲娇大小姐三个原型，每个有自己的称呼 + 性格 + 专属台词。也可以**自定义**：填写性格、口头禅、称呼
-- **4 种 TTS** — Microsoft Edge TTS（默认，免费）/ GPT-SoVITS（本地、零样本声音克隆）/ **MiniMax 海螺**（云端，国内 + 国际双端点，多种音色）/ **火山引擎 豆包**（云端大模型语音）
-- **3 种内置字体** — 小赖（最日系手书）/ LXGW 文楷 / 得意黑（开源字体打包入安装包），Settings 里可视化对比 + 切换
-- **截屏给她看** — 一键截屏发给 LLM，让她评论 / 解释 / 翻译屏幕内容
-- **邮件 + 表格** — 连了 IMAP 邮箱后，"总结最近 10 封"她会读完用表格窗口呈现，可以让她"加一列时间 / 隐藏广告 / 帮我起草回信"。多 tab 表格可对比
-- **会记得你说过的话** — 跨会话续连。她记得你的名字、工作、兴趣，自然带进后续对话
-- **预制台词可编辑** — `%APPDATA%/openmeido/lines.json`，记事本改她的反应风格
-- **透明窗口 + 点穿** — 形象边缘点击穿透到桌面，形象本体 + 聊天框正常响应
+默认带 **Hiyori**（蓝头发萝莉，女性 persona 用）和 **Natori**（成熟男性，管家 persona 用）。这两个是 Live2D 官方免费样本。
 
-### 自带模型
+想要更多？去 [Live2D 官方 sample 库](https://www.live2d.com/zh-CHS/learn/sample/) 下载任意 zip → **Settings → Live2D → 导入 zip**。导入完点 **✨ AI 绑定** 让大模型自动猜表情/情绪映射，也可以手编。
 
-启动后默认是 **Hiyori**（蓝头发萝莉）。设置里可切换 **Haru**（粉头发大姐姐）。这两个是 Live2D 官方免费样本。
+### 其他特色
 
-### 自己导入 Live2D 模型
+- **4 种 TTS**：Edge TTS（默认免费）/ GPT-SoVITS（本地零样本声音克隆）/ MiniMax 海螺 / 火山引擎豆包
+- **3 种内置字体**：小赖（日系手书）/ LXGW 文楷 / 得意黑
+- **跨会话记忆**：她记得你的名字、工作、兴趣，自然带进后续对话
+- **透明窗口 + 点穿**：形象边缘点击穿透到桌面，形象本体 + 聊天框正常响应
+- **自动更新**：electron-updater + GitHub Releases，国内可用 ghproxy 镜像
+- **本地数据 / 离线优先**：长期记忆 embed 在本地跑（bge-small-zh-v1.5），不上云
 
-去 [Live2D 官方 sample 页](https://www.live2d.com/zh-CHS/learn/sample/)（或网上找别的）下载 zip，**设置 → Live2D → 导入 zip**。情绪绑表情可以手动编辑，或者点 **✨ AI 绑定**让大模型自动猜。
+---
 
-### 配置 / 数据存哪儿
+### 数据存哪儿
 
-所有用户数据放在 `%APPDATA%/openmeido/`。设置界面里全都能改，手编 JSON 主要用于跨机器同步或版本控制。
+所有用户数据在 `%APPDATA%/openmeido/`。Settings GUI 覆盖了 99% 的配置项，手编 JSON 主要用于跨机器同步或版本控制：
 
 | 文件 | 内容 |
 |---|---|
 | `config.json` | Backend / 人设 / 邮箱 / 语音 / 主动模式等 |
-| `lines.json` | 闭嘴按钮反馈台词（每人设 × 好感度档分类）|
-| `memory.sqlite` | 对话记忆 + 好感度 + 提炼出的事实 |
-| `live2d-models/<name>/openmeido.json` | 每个 Live2D 模型的情绪绑定 |
-| `demos.json` | Demo 模式的热键 + 台词 |
+| `memory.sqlite` | 对话记忆 + 好感度 + 提炼的事实 + lore 碎片 |
+| `live2d-models/<name>/openmeido.json` | 每个 Live2D 模型的情绪/表情绑定 |
+| `lines.json` | 闭嘴按钮反馈台词（不暴露在 UI，高级用户可手编）|
+| `hf-cache/` | 长期记忆 embed 模型（首次启用时下载 ~95MB）|
 
-### 自带模型版权说明
+### 自带内容版权说明
 
-- **Hiyori Pro / Haru Greeter Pro** —— Live2D Inc. 出品，授权基于 [Live2D Free Material License Agreement](https://www.live2d.com/eula/live2d-free-material-license-agreement_zh-CN.html)。商业使用前请阅读条款
-- **Live2D Cubism Core** —— [Cubism SDK Release License](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_zh.html)
-- **Cubism Components**（JS runtime）—— MIT
-- **小赖字体 / LXGW 文楷 / 得意黑** —— SIL OFL 1.1（开源商用免费）
+- **Hiyori Pro / Natori Pro** — Live2D Inc. 出品，[Live2D Free Material License Agreement](https://www.live2d.com/eula/live2d-free-material-license-agreement_zh-CN.html)。商业使用前请阅读条款
+- **Live2D Cubism Core** — [Cubism SDK Release License](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_zh.html)
+- **Cubism Components**（JS runtime）— MIT
+- **小赖字体 / LXGW 文楷 / 得意黑** — SIL OFL 1.1（开源商用免费）
 
 ### 致谢
 
-- **INVC. 老潘** —— 早期产品想法 + 功能需求反馈
+- **INVC. 老潘** — 早期产品想法 + 功能需求反馈
 
 ---
 
 ## English
 
-A transparent always-on-top Live2D character that sits on your desktop. She chats with you, remembers what you tell her, reads your email, sets reminders, and quietly speaks up when you've gone idle for too long.
+She isn't another ChatGPT wrapper — she has **relationship progression**, **her own inner life**, and **handles your day-to-day stuff**. Three pillars:
 
-**Starting v0.0.36**: She has a **relationship meter** — as you chat more, she gets less formal and more candid. At low affinity she answers in polite 1-2 sentence replies; at high affinity she pushes back, shares her own views, and reminisces. It's not just an address-term swap.
+### 🎮 Affinity system — the relationship actually evolves
+
+Chat with her enough and her speaking style actually changes. Not a title swap:
+
+- **Lv.1 stranger** — polite 1-2 sentence answers, no proactive topics, no opinions
+- **Lv.3 friendly** — asks back, checks on you, shares her view
+- **Lv.5 close** — pushes back, teases, brings up old stuff, holds disagreement
+
+A chip top-right shows the score + progress bar to the next tier. Every LLM judgement floats a `+1` / `-1` over the chip MMO-damage-number style. Each persona has its own affinity track — your maid score isn't your imouto score.
+
+### 🎭 Distinct personas with inner lives
+
+Four personas — **maid / sister / butler / tsundere lady** — each with their own address, tier-driven progression, and personality. The interesting part: **she has her own past**.
+
+Each persona ships with a relationship-background lore pack injected into her inner state:
+
+- **Maid**: a newcomer who just started. "Master is my first employer." "I privately practice greetings in front of the mirror." "If I move anything in master's room I secretly note the original spot and double-check when I put it back."
+- **Imouto**: a sister you grew up with. "I have a notebook of things my brother said." "When mom made braised pork I'd pick the fatty pieces for him." "The mean things I've said to my brother weren't really my truth."
+
+When the conversation touches related topics, these details **surface via RAG** — what she says has roots, not on-the-fly model fabrication. That's the biggest difference vs "ChatGPT in a maid outfit". Custom personas supported too (write your own prompt in Settings).
+
+### 🛠 Productivity — not just chatting
+
+| Tool | What |
+|---|---|
+| **📧 Mail** | IMAP into Gmail / Outlook / etc. She **auto-folds promos / subscriptions / notifications** into a count summary, only enumerates real-person emails |
+| **📄 Document summary** | Drop any PDF / Word / text file — bullet points + follow-up questions in one click |
+| **📋 Tasks** | Add todos / reminders in natural language, she nudges you at the right time |
+| **🌐 Web search** | Gemini / GLM / Kimi all wired. Ask "what's bitcoin at today" she searches first then answers |
+| **👀 Screen capture** | One-click send your current screen to the LLM for commentary / translation |
+| **📊 Table windows** | "Summarize last 10 emails" → standalone table window, multi-tab for comparison |
+| **🔔 One-click mute** | Silences her during focus, click again she greets you back |
+
+---
 
 ### Install
 
@@ -88,56 +149,53 @@ Grab the latest `OpenMeido-Setup-X.X.X.exe` from [Releases](https://github.com/l
 
 ### First run
 
-A setup window asks you to pick an AI backend, register, and paste an API key. **Default recommendation is Zhipu GLM** — free multimodal tier, China-accessible, one-click registration.
+A setup window asks you to pick an AI backend, register, and paste an API key. **Default recommendation is Zhipu GLM** — free multimodal, China-accessible, one-click registration.
 
 | Backend | Notes |
 |---|---|
-| **Zhipu GLM** | Free multimodal · China-accessible ★ recommended |
-| Gemini | Google · free quota |
+| **Zhipu GLM** | Free multimodal · China-accessible · built-in search ★ recommended |
+| **Kimi** | Moonshot · built-in search · CN / intl endpoints |
+| Gemini | Google · free quota · grounding search |
 | DeepSeek | V4 cheapest (text-only) |
 | Qwen | Alibaba · new-user token bonus |
 | Doubao | ByteDance · mainland-China phone required |
 | OpenAI | Paid |
 | LM Studio | Local · no key needed |
 
-### Highlights
+### Bundled Live2D models + importing your own
 
-- **🎮 Gamified affinity** — chat with her enough and she opens up. **Stranger tier** (Lv.1) gets polite 1-2 sentence answers; **friendly** (Lv.3) she'll ask back and check on you; **close** (Lv.5) she pushes back, shares opinions, holds her ground. A chip in the top-right shows the score + progress bar to next tier; every judgement floats a `+1` / `-1` over the chip MMO-damage-number style
-- **🔔 One-click mute / unmute** — top-right button in the chat panel. Click to silence her (turns red); click again and she greets you back with a randomly picked persona-aware line ("主人忙完啦？想我没？")
-- **Multiple personas** — three built-in archetypes (maid / younger sister / tsundere lady), each with their own address terms, personality traits, and feedback lines. Or write your own custom persona
-- **4 TTS engines** — Microsoft Edge TTS (default, free) / GPT-SoVITS (local zero-shot voice cloning) / **MiniMax Hailuo** (cloud, CN + international endpoints, many voices) / **Volcengine Doubao** (cloud, ByteDance LLM-based voices)
-- **3 bundled fonts** — Xiaolai (Japanese 濑户 style handwriting) / LXGW WenKai / Smiley Sans (all open source SIL OFL, ship with the installer). Settings shows live previews to pick
-- **Screen capture** — one-click send your current screen to the LLM for commentary / explanation / translation
-- **Email + tables** — wire up an IMAP mailbox and she'll "summarize the latest 10" by reading them and rendering a sortable table window. Then say "add a date column / hide ads / draft a reply" and watch her iterate. Multi-tab tables for side-by-side comparison
-- **Memory across sessions** — she remembers your name, job, interests, naturally bringing them up later
-- **Editable preset台词** — `%APPDATA%/openmeido/lines.json`. Open in Notepad to tune her in-character reactions
-- **Transparent window + click-through** — empty pixels around the character pass clicks to your desktop; body + chat panel intercept normally
+Ships with **Hiyori** (blue-hair, female personas) and **Natori** (male, butler persona) — both Live2D official free samples.
 
-### Bundled models
+Want more? Grab any zip from the [Live2D sample library](https://www.live2d.com/en/learn/sample/) → **Settings → Live2D → Import zip**. Hit **✨ AI auto-bind** to let the LLM guess the emotion/expression mapping, or edit manually.
 
-Default is **Hiyori** (blue-hair loli). Settings lets you switch to **Haru** (pink-hair onee-san). Both are Live2D official free samples.
+### Other features
 
-### Adding your own Live2D model
+- **4 TTS engines**: Edge TTS (default, free) / GPT-SoVITS (local zero-shot voice cloning) / MiniMax Hailuo / Volcengine Doubao
+- **3 bundled fonts**: Xiaolai (Japanese-style handwriting) / LXGW WenKai / Smiley Sans
+- **Cross-session memory**: She remembers your name, work, interests — brings them up naturally
+- **Transparent window + click-through**: empty pixels pass clicks to your desktop; body + chat panel intercept normally
+- **Auto-update**: electron-updater + GitHub Releases (CN users can switch to ghproxy mirror in Settings)
+- **Offline-first memory**: bge-small-zh-v1.5 embedding model runs locally, no cloud needed
 
-Download a sample zip from the [Live2D sample page](https://www.live2d.com/en/learn/sample/), then **Settings → Live2D → Import zip**, pick the file. The model unpacks into your user directory and shows up in the dropdown. Edit the emotion mapping manually or hit ✨ AI auto-bind.
+---
 
 ### Where things live
 
-All user data lives under `%APPDATA%/openmeido/`. The Settings GUI covers everything; hand-edit JSON only when you want to share / version-control your config.
+All user data under `%APPDATA%/openmeido/`. Settings GUI covers ~all config; hand-edit JSON only for cross-machine sync or version control:
 
 | File | What |
 |---|---|
-| `config.json` | Backend / persona / mail / voice / proactive mode etc. |
-| `lines.json` | Mute-button feedback lines (per persona × tier) |
-| `memory.sqlite` | Chat memory + affinity + distilled facts |
-| `live2d-models/<name>/openmeido.json` | Per-model emotion mapping |
-| `demos.json` | Demo hotkeys + lines |
+| `config.json` | Backend / persona / mail / voice / proactive |
+| `memory.sqlite` | Chat memory + affinity + distilled facts + lore fragments |
+| `live2d-models/<name>/openmeido.json` | Per-model emotion/expression mapping |
+| `lines.json` | Mute-button feedback lines (not in UI; advanced-user override) |
+| `hf-cache/` | Long-term memory embed model (~95MB, downloaded on first enable) |
 
 ### Bundled-content licensing
 
-- **Hiyori Pro / Haru Greeter Pro** — © Live2D Inc., [Live2D Free Material License Agreement](https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html). Read terms before commercial use
+- **Hiyori Pro / Natori Pro** — © Live2D Inc., [Live2D Free Material License Agreement](https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html). Read terms before commercial use
 - **Live2D Cubism Core** — [Cubism SDK Release License](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html)
-- **Cubism Components** (the JS runtime) — MIT
+- **Cubism Components** (JS runtime) — MIT
 - **Xiaolai / LXGW WenKai / Smiley Sans fonts** — SIL OFL 1.1 (open source, commercial use OK)
 
 ### Acknowledgements
