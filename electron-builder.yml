@@ -77,6 +77,18 @@ files:
   - "!**/node_modules/**/{CHANGELOG.md,README.md,LICENSE*,readme.md,license,*.d.ts.map,*.js.map}"
   - "!**/node_modules/*/{test,tests,docs,doc,example,examples,benchmark}"
   - "!**/{.DS_Store,.git*,.editorconfig,.eslintrc,.prettierrc}"
+  # onnxruntime-node ships binaries for ALL platforms (darwin/linux/win32)
+  # plus optional GPU providers. We're a Windows-only build doing CPU
+  # inference via transformers.js → the macOS/Linux .dylib/.so and the
+  # DirectML GPU stack are dead weight. Cutting them takes the installer
+  # from 400MB → ~210MB without touching any feature.
+  - "!**/node_modules/onnxruntime-node/bin/napi-v6/darwin/**"
+  - "!**/node_modules/onnxruntime-node/bin/napi-v6/linux/**"
+  # win32/arm64 — we only ship x64 builds. arm64 binaries are 65MB dead weight.
+  - "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**"
+  - "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/DirectML.dll"
+  - "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxcompiler.dll"
+  - "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxil.dll"
 
 # Files shipped alongside the asar (NOT compressed into it). PowerShell
 # can't read files inside app.asar — the .ps1 listener lives next to the
