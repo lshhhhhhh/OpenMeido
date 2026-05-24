@@ -1242,11 +1242,11 @@ export function Settings({ initial, onClose }: SettingsProps) {
                     用户自带的模型版权归各原作者所有。
                   </li>
                   <li style={{ marginBottom: 4 }}>
-                    AI 生成的对话、表情、判断**仅供娱乐**，不代表任何事实陈述或建议；
+                    AI 生成的对话、表情、判断<b>仅供娱乐</b>，不代表任何事实陈述或建议；
                     不要把 OpenMeido 当成医疗、法律、金融顾问。
                   </li>
                   <li>
-                    本软件按 GPL-3.0 第 15、16 条之规定，**不附带任何明示或暗示的担保**——
+                    本软件按 GPL-3.0 第 15、16 条之规定，<b>不附带任何明示或暗示的担保</b>——
                     使用过程中的数据丢失、设备损坏、心情起伏等概由用户自负。
                   </li>
                 </ul>
@@ -3431,7 +3431,7 @@ function DangerZone() {
     <>
       <div style={{ fontSize: 12, color: '#bbb', marginBottom: 8, lineHeight: 1.5 }}>
         遇到问题想从头开始？或者想测试一下首次安装的体验？这里一键清空本地数据。
-        每个选项**都会立即重启 app**，操作不可撤销。
+        每个选项<b>都会立即重启 app</b>，操作不可撤销。
       </div>
       {!open && (
         <button
@@ -3461,7 +3461,7 @@ function DangerZone() {
           />
           <ResetOption
             title="全部清空（factory reset）"
-            desc="删 %APPDATA%/openmeido/ 下所有内容。设置 + 记忆 + 下载的字体 + 用户导入的 Live2D 模型全没。**重启后看到首次安装引导窗**。"
+            desc="删 %APPDATA%/openmeido/ 下所有内容。设置 + 记忆 + 下载的字体 + 用户导入的 Live2D 模型全没。重启后看到首次安装引导窗。"
             buttonLabel="全部清空"
             onClick={resetAll}
             destructive
@@ -3589,7 +3589,7 @@ function TierLadder({ personaId }: { personaId: string }) {
   return (
     <>
       <div style={{ fontSize: 12, color: '#bbb', marginBottom: 10, lineHeight: 1.5 }}>
-        跟她聊得越多，好感度越高，**她的反应会自然变化**——不只是换个称呼。下面是各阶段她会解锁的行为。
+        跟她聊得越多，好感度越高，<b>她的反应会自然变化</b>——不只是换个称呼。下面是各阶段她会解锁的行为。
         当前好感度：<b style={{ color: '#fff' }}>{score.toFixed(1)}</b> / 100，
         在 <b style={{ color: '#ffd566' }}>{currentTier.label} {currentTier.name}</b> 阶段。
       </div>

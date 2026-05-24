@@ -55,6 +55,16 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
           : '主人'
   const [callAs, setCallAs] = useState('')
   const [occupation, setOccupation] = useState('')
+  // Privacy consent — both default ON because they ARE the soul of
+  // OpenMeido (without them she's a generic chat box). But making the
+  // user see + confirm during setup beats "default-on, hope they
+  // notice in Settings" — first impression matters and we don't want
+  // anyone surprised by "wait she's been watching my screen?" 3 days
+  // in. Settings → 主动 still has the same toggles.
+  const [includeScreen, setIncludeScreen] = useState(initial.proactive.includeScreen)
+  const [notifListener, setNotifListener] = useState(
+    initial.proactive.notifListener.enabled,
+  )
 
   // Auto-derive a sensible default model for the picked provider. We always
   // Prefer the perf-tier default (the recommended chat model for that
@@ -141,6 +151,18 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
         live2d: {
           ...initial.live2d,
           activeModel: matchingModel,
+        },
+        proactive: {
+          ...initial.proactive,
+          // Persist privacy consent. Both default ON in wizard state
+          // (initial values come from config defaults which are true
+          // post-v0.0.39) — but a user who unchecked them above gets
+          // their choice persisted here, not silently re-flipped.
+          includeScreen,
+          notifListener: {
+            ...initial.proactive.notifListener,
+            enabled: notifListener,
+          },
         },
       })
       // Seed personalization facts AFTER config save (which initializes
@@ -343,6 +365,104 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
               </button>
             )
           })}
+        </div>
+
+        {/* Privacy consent — two upfront toggles for the sensitive
+            default-on inputs (screen capture + notification listener).
+            Both default checked because they ARE the OpenMeido soul
+            (without them she's a generic chat box). Surfacing them
+            here means no surprise "wait she's been watching my
+            screen?" 3 days in — Settings → 主动 has the same toggles
+            for later changes. */}
+        <div
+          style={{
+            marginBottom: 16,
+            padding: '10px 12px',
+            background: 'rgba(255, 200, 100, 0.06)',
+            border: '1px solid rgba(255, 200, 100, 0.18)',
+            borderRadius: 6,
+          }}
+        >
+          <div style={{ fontSize: 12, color: '#ddd', fontWeight: 600, marginBottom: 4 }}>
+            🔒 她能感知什么（默认全开，不舒服的关掉）
+          </div>
+          <div style={{ fontSize: 11, color: '#888', lineHeight: 1.6, marginBottom: 8 }}>
+            这两件事让她"活着"——主动发现你在干什么、注意到 QQ 消息。但都会
+            <b style={{ color: '#bbb' }}>把屏幕/通知内容发给 AI</b>
+            。Settings 里随时改。
+          </div>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 8,
+              padding: '6px 0',
+              cursor: 'pointer',
+              fontSize: 12,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={includeScreen}
+              onChange={(e) => setIncludeScreen(e.target.checked)}
+              style={{ marginTop: 2, accentColor: '#7ab8ff' }}
+            />
+            <div style={{ flex: 1 }}>
+              <div style={{ color: '#eee' }}>👁 让她偶尔瞥一眼屏幕</div>
+              <div style={{ color: '#888', fontSize: 10, marginTop: 2 }}>
+                主动模式下她会随机抓一张屏幕截图给 AI 看，做出反应（"你又在看 CS2 啊"）。
+                <b style={{ color: '#aaa' }}>
+                  她能看到屏幕上一切内容，包括聊天记录 / 文档 / 密码框
+                </b>
+                。AI 厂商也会看到。
+              </div>
+            </div>
+          </label>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 8,
+              padding: '6px 0',
+              cursor: 'pointer',
+              fontSize: 12,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={notifListener}
+              onChange={(e) => setNotifListener(e.target.checked)}
+              style={{ marginTop: 2, accentColor: '#7ab8ff' }}
+            />
+            <div style={{ flex: 1 }}>
+              <div style={{ color: '#eee' }}>🔔 让她注意 Windows 通知</div>
+              <div style={{ color: '#888', fontSize: 10, marginTop: 2 }}>
+                QQ / 微信 / 邮件 / 日历提醒被她看到，她可能主动提一下（"QQ 有消息"）。通知
+                <b style={{ color: '#aaa' }}>正文也会被发给 AI</b>
+                。首次启用 Windows 会弹权限对话框。
+              </div>
+            </div>
+          </label>
+          {/* Trust note — clarify the data flow. Common misconception:
+              "Open-source desktop apps that talk to AI must be sending
+              my data to the developer too." Easiest way to dispel it
+              is just to state the architecture plainly. */}
+          <div
+            style={{
+              marginTop: 10,
+              paddingTop: 8,
+              borderTop: '1px solid rgba(255,200,100,0.15)',
+              fontSize: 10,
+              color: '#999',
+              lineHeight: 1.7,
+            }}
+          >
+            📡 <b style={{ color: '#bbb' }}>数据流向</b>：屏幕 / 通知 / 对话内容
+            <b style={{ color: '#bbb' }}>从你的本机直接发给你选的 AI 后端</b>
+            （OpenAI / Gemini / GLM / DeepSeek 等）。OpenMeido 是开源本地应用，
+            <b style={{ color: '#bbb' }}>开发者没有服务器中转、看不到任何内容</b>
+            。所有传输只在你和 AI 厂商之间。
+          </div>
         </div>
 
         <div style={{ fontSize: 12, color: '#aaa', marginBottom: 16 }}>
