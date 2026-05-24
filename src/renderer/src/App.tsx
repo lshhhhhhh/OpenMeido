@@ -1753,14 +1753,19 @@ export default function App() {
                 display: 'flex',
                 alignItems: 'center',
                 gap: 10,
-                padding: '8px 12px',
+                padding: '10px 14px',
                 marginBottom: 8,
-                background: 'rgba(255, 180, 80, 0.12)',
-                border: '1px solid rgba(255, 180, 80, 0.4)',
+                // Stronger amber backdrop + crisp text for the chat-
+                // panel translucent background. The previous 0.12
+                // alpha + '#ddc' text was washed out to the point of
+                // being unreadable on the dark chat surface.
+                background: 'rgba(255, 180, 80, 0.22)',
+                border: '1px solid rgba(255, 180, 80, 0.65)',
                 borderRadius: 6,
-                fontSize: 12,
-                color: '#ddc',
+                fontSize: 12.5,
+                color: '#ffe7c2',
                 lineHeight: 1.5,
+                fontWeight: 500,
               }}
             >
               <span style={{ fontSize: 16 }}>⚙</span>
