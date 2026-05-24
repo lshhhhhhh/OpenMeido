@@ -41,6 +41,12 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
   const [personaPick, setPersonaPick] = useState<'maid' | 'butler'>(
     initial.persona.preset === 'butler' ? 'butler' : 'maid',
   )
+  // Relationship archetype — currently only the maid persona has lore packs
+  // (see shared/persona-lore.ts). 'newcomer' is the conservative default:
+  // user is her first employer, she has no fabricated history. 'childhood'
+  // is the deeper opt-in archetype (you grew up together) — players who
+  // want it know what they're signing up for. butler users skip this step.
+  const [archetypePick, setArchetypePick] = useState<'newcomer' | 'childhood'>('newcomer')
   // Default callAs hint follows the picked persona's tier-2 address
   // (主人 for maid, 小姐 for butler). The other presets — imouto's
   // 哥, ojou's 你 — are still respected when the user starts in those
@@ -182,6 +188,16 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
         await window.api.memory.upsertFact('user.occupation', trimmedOccupation).catch(
           (err) => console.warn('[wizard] seed occupation failed:', err),
         )
+      }
+      // Seed persona lore — anchor facts (scope='persona') for the every-turn
+      // backstory + lore episodes (kind='lore') for RAG-retrievable interior
+      // memories. Only the maid persona has lore packs configured today; for
+      // butler this call resolves with seeded:0 and is a no-op. Fire-and-
+      // forget; if it fails we don't block the wizard's success state.
+      if (personaPick === 'maid') {
+        await window.api.persona
+          .seedLore('maid', archetypePick)
+          .catch((err) => console.warn('[wizard] seedLore failed:', err))
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -366,6 +382,76 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
             )
           })}
         </div>
+
+        {/* Relationship archetype — only surfaced for the maid persona
+            (where lore packs exist). 'newcomer' is the conservative
+            default: user is her first employer, no fabricated history.
+            'childhood' is the deeper opt-in — players who want it know
+            what they're signing up for. Picking either fires a seed
+            after save; butler users skip this whole block. */}
+        {personaPick === 'maid' && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 13, color: '#ccc', marginBottom: 6 }}>
+              她和你的关系
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {(
+                [
+                  {
+                    id: 'newcomer',
+                    label: '新人（默认）',
+                    hint: '你是她的第一个主人，她刚来不久',
+                  },
+                  {
+                    id: 'childhood',
+                    label: '童年契约',
+                    hint: '你们从小一起长大 · 需较强代入感',
+                  },
+                ] as const
+              ).map((a) => {
+                const selected = archetypePick === a.id
+                return (
+                  <button
+                    key={a.id}
+                    onClick={() => setArchetypePick(a.id)}
+                    style={{
+                      flex: 1,
+                      padding: '10px 12px',
+                      background: selected
+                        ? 'rgba(120,160,255,0.18)'
+                        : 'rgba(255,255,255,0.04)',
+                      border: selected
+                        ? '1px solid rgba(120,160,255,0.6)'
+                        : '1px solid rgba(255,255,255,0.08)',
+                      borderRadius: 8,
+                      color: '#eee',
+                      cursor: 'pointer',
+                      textAlign: 'center',
+                      fontSize: 13,
+                      fontWeight: selected ? 600 : 500,
+                    }}
+                  >
+                    <div>{a.label}</div>
+                    <div
+                      style={{
+                        fontSize: 10,
+                        color: selected ? '#aad4ff' : '#888',
+                        marginTop: 4,
+                        fontWeight: 400,
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      {a.hint}
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+            <div style={{ fontSize: 10, color: '#777', marginTop: 6, lineHeight: 1.5 }}>
+              这个决定影响她的内心和记忆。之后可以在 Memory 设置里调整或清空。
+            </div>
+          </div>
+        )}
 
         {/* Privacy consent — two upfront toggles for the sensitive
             default-on inputs (screen capture + notification listener).

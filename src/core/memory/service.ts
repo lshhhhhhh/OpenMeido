@@ -87,6 +87,25 @@ export interface MemoryService {
   setAffinity(score: number, reason: string | null): Promise<void>
   /** Drop everything (episodes, facts, affinity) for a given persona. */
   deletePersona(personaId: string): Promise<number>
+
+  /**
+   * Lore-seeding primitives (used by the persona-backstory pipeline,
+   * not by regular chat). Lore episodes are indexed in vec0 so RAG
+   * can surface them when topically relevant, but filtered out of
+   * recent windows / session pickers. Anchor facts go through the
+   * normal fact path with scope='persona'.
+   */
+  seedLoreEpisode(personaId: string, text: string): Promise<number | null>
+  /** Wipe all kind='lore' episodes for a persona. Idempotent reseed step. */
+  clearLore(personaId: string): Promise<number>
+  /** Seed an anchor fact (scope='persona'). Used by the lore seeder
+   *  for archetype-defining statements that the persona reads every
+   *  turn via factsBlock. */
+  seedAnchorFact(personaId: string, key: string, value: string): Promise<void>
+  /** Wipe persona-scoped facts under this persona whose key starts
+   *  with the given prefix. Called before re-seeding anchors so
+   *  archetype switches don't leave stale rows behind. */
+  clearFactsByPrefix(personaId: string, prefix: string): Promise<number>
   /** Read facts for a SPECIFIC persona (UI uses this in the 人物 panel
    *  to show "she knows: …" for personas the user is not currently active). */
   listFactsFor(personaId: string, limit?: number): Promise<Fact[]>
@@ -215,6 +234,46 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
     clearAll() {
       return adapter.clear(persona())
+    },
+
+    async seedLoreEpisode(personaId, text) {
+      const trimmed = text.trim()
+      if (!trimmed) return null
+      try {
+        // Lore is indexed for retrieval, so embedding is required even in
+        // naive mode (otherwise these fragments would never surface in RAG).
+        // The embed call is bounded by the same 5s timeout as live writes.
+        const vec = await withTimeout(embed(trimmed), 5_000, 'embed timed out')
+        return await adapter.addEpisode(
+          personaId,
+          'assistant',
+          trimmed,
+          vec,
+          null,
+          undefined,
+          undefined,
+          'lore',
+        )
+      } catch (err) {
+        reportError('seedLoreEpisode', err)
+        return null
+      }
+    },
+
+    clearLore(personaId) {
+      return adapter.clearLore(personaId)
+    },
+
+    async seedAnchorFact(personaId, key, value) {
+      try {
+        await adapter.upsertFact(personaId, { key, value, confidence: 1.0 })
+      } catch (err) {
+        reportError('seedAnchorFact', err)
+      }
+    },
+
+    clearFactsByPrefix(personaId, prefix) {
+      return adapter.deleteFactsByKeyPrefix(personaId, prefix)
     },
 
     deleteSession(id) {

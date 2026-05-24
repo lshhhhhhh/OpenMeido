@@ -48,12 +48,29 @@ export interface EpisodeImage {
   base64: string
 }
 
+/**
+ * Episode kind discriminator.
+ *
+ *   'chat' — produced by the live conversation loop. Surfaces in recent
+ *            sliding window, session picker, recent-history replay.
+ *   'lore' — pre-seeded backstory fragment (persona's interior life,
+ *            never claims player participation). Hidden from recent
+ *            window + session picker, but indexed in vec0 so the
+ *            semantic-similarity retrieval can pull it into context
+ *            when the conversation topic touches it.
+ *
+ * Default for all writes is 'chat'. Only the lore-seeder writes 'lore'.
+ */
+export type EpisodeKind = 'chat' | 'lore'
+
 export interface Episode {
   id: number
   ts: string
   speaker: Speaker
   text: string
   sessionId: string | null
+  /** 'chat' (default, live conversation) or 'lore' (seeded backstory). */
+  kind: EpisodeKind
   /**
    * Speaker-dependent extras:
    *   assistant rows may have ToolCallPart[] (the calls this turn emitted).

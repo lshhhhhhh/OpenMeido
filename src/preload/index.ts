@@ -277,6 +277,28 @@ const api = {
     delete(personaId: string): Promise<number> {
       return ipcRenderer.invoke('persona:delete', personaId) as Promise<number>
     },
+    /** Wipe + re-seed lore episodes + anchor facts for a (persona, archetype)
+     *  pair. Idempotent. Wizard calls this after archetype pick; Settings
+     *  may call it later if the user switches archetypes. */
+    seedLore(
+      personaId: string,
+      archetype: 'newcomer' | 'childhood',
+    ): Promise<{
+      ok: boolean
+      loreSeeded: number
+      anchorsSeeded: number
+      error?: string
+    }> {
+      return ipcRenderer.invoke('persona:seed-lore', {
+        personaId,
+        archetype,
+      }) as Promise<{
+        ok: boolean
+        loreSeeded: number
+        anchorsSeeded: number
+        error?: string
+      }>
+    },
   },
 
   background: {

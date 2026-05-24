@@ -1,6 +1,6 @@
 {
   "name": "openmeido",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Productivity assistant + Live2D companion for non-programmers",
   "author": "lsh <laishaoheng1996@gmail.com>",
   "main": "./out/main/index.js",
@@ -24,6 +24,7 @@
     "test:text-filter": "node --import tsx tools/smoke-text-filter.mjs",
     "test:task-adapter": "electron tools/smoke-task-adapter.mjs",
     "test:naive-memory": "electron tools/smoke-naive-memory.mjs",
+    "test:persona-lore": "electron tools/smoke-persona-lore.mjs",
     "test:task-agent": "node --env-file=.env --import tsx tools/smoke-task-agent.mjs",
     "test:docx-parse": "node --import tsx tools/smoke-docx-parse.mjs",
     "test:apikey-roundtrip": "node --import tsx tools/smoke-apikey-roundtrip.mjs",

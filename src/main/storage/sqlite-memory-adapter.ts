@@ -31,6 +31,7 @@ import type { AffinityRecord, MemoryAdapter } from '../../core/memory/adapter.js
 import type {
   Episode,
   EpisodeImage,
+  EpisodeKind,
   Fact,
   NewFact,
   SessionSummary,
@@ -47,6 +48,8 @@ interface EpisodeRow {
   toolDataRaw?: string | null
   /** Raw JSON text from the images_data column; null when absent. */
   imagesDataRaw?: string | null
+  /** 'chat' (live conversation) or 'lore' (seeded backstory). */
+  kind?: EpisodeKind | null
 }
 
 function parseToolData(raw: string | null | undefined): Episode['toolParts'] {
@@ -78,6 +81,7 @@ function rowToEpisode(r: EpisodeRow): Episode {
     speaker: r.speaker,
     text: r.text,
     sessionId: r.sessionId,
+    kind: r.kind === 'lore' ? 'lore' : 'chat',
     toolParts: parseToolData(r.toolDataRaw),
     images: parseImagesData(r.imagesDataRaw),
   }
@@ -138,11 +142,13 @@ export function openSqliteMemory(
       tool_data TEXT,
       images_data TEXT,
       persona_id TEXT NOT NULL DEFAULT 'maid',
+      kind TEXT NOT NULL DEFAULT 'chat',
       archived INTEGER DEFAULT 0
     );
 
     CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts);
     CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
+    CREATE INDEX IF NOT EXISTS idx_episodes_kind ON episodes(persona_id, kind);
 
     CREATE TABLE IF NOT EXISTS facts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -227,6 +233,7 @@ export function openSqliteMemory(
           tool_data TEXT,
           images_data TEXT,
           persona_id TEXT NOT NULL DEFAULT 'maid',
+          kind TEXT NOT NULL DEFAULT 'chat',
           archived INTEGER DEFAULT 0
         );
       `)
@@ -245,9 +252,25 @@ export function openSqliteMemory(
         CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts);
         CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
         CREATE INDEX IF NOT EXISTS idx_episodes_persona ON episodes(persona_id);
+        CREATE INDEX IF NOT EXISTS idx_episodes_kind ON episodes(persona_id, kind);
       `)
     })
     rebuild()
+  }
+
+  // Lore-fragment discriminator (v0.2.9). 'chat' = live conversation
+  // (default), 'lore' = pre-seeded backstory fragments (persona's
+  // interior life). Lore is hidden from session pickers + recent-window
+  // replay but stays indexed in vec0 so RAG can surface it when the
+  // conversation topic touches it. Existing rows default to 'chat' on
+  // upgrade — no backfill needed since the DEFAULT applies in-place.
+  const episodeColsAfterRebuild = db
+    .prepare('PRAGMA table_info(episodes)')
+    .all() as { name: string }[]
+  if (!episodeColsAfterRebuild.some((c) => c.name === 'kind')) {
+    db.exec("ALTER TABLE episodes ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'")
+    db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_kind ON episodes(persona_id, kind)')
+    console.log("[memory] migrated: added episodes.kind (default 'chat')")
   }
 
   const factCols = db.prepare("PRAGMA table_info(facts)").all() as { name: string }[]
@@ -393,27 +416,36 @@ export function openSqliteMemory(
   `)
 
   // ---- Prepared statements ----
+  // Lore-aware filtering policy:
+  //   - selectRecent / selectRecentInSession / selectSessions / countEpisodes
+  //     filter kind='chat'. Recent windows + session pickers must NOT include
+  //     pre-seeded backstory — that would feel like noise to users and replay
+  //     fake "previous turns" into the agent loop.
+  //   - selectByKnn does NOT filter kind, so lore fragments compete in vector
+  //     similarity alongside real chat history. That's the whole point — RAG
+  //     surfaces a lore memory when it's topically relevant, and not otherwise.
   const insertEpisode = db.prepare<
-    [string, string, Speaker, string, string | null, string | null, string | null]
+    [string, string, Speaker, string, string | null, string | null, string | null, EpisodeKind]
   >(
-    'INSERT INTO episodes (persona_id, ts, speaker, text, session_id, tool_data, images_data) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO episodes (persona_id, ts, speaker, text, session_id, tool_data, images_data, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   )
   const insertVec = db.prepare<[bigint, Buffer]>(
     'INSERT INTO episodes_vec (episode_id, embedding) VALUES (?, ?)',
   )
   const selectRecent = db.prepare<[string, number]>(
     `SELECT id, ts, speaker, text, session_id AS sessionId,
-            tool_data AS toolDataRaw, images_data AS imagesDataRaw
+            tool_data AS toolDataRaw, images_data AS imagesDataRaw, kind
      FROM episodes
-     WHERE archived = 0 AND persona_id = ?
+     WHERE archived = 0 AND persona_id = ? AND kind = 'chat'
      ORDER BY id DESC
      LIMIT ?`,
   )
   const selectRecentInSession = db.prepare<[string, string, number]>(
     `SELECT id, ts, speaker, text, session_id AS sessionId,
-            tool_data AS toolDataRaw, images_data AS imagesDataRaw
+            tool_data AS toolDataRaw, images_data AS imagesDataRaw, kind
      FROM episodes
-     WHERE archived = 0 AND persona_id = ? AND COALESCE(session_id, 'legacy') = ?
+     WHERE archived = 0 AND persona_id = ? AND kind = 'chat'
+       AND COALESCE(session_id, 'legacy') = ?
      ORDER BY id DESC
      LIMIT ?`,
   )
@@ -426,19 +458,20 @@ export function openSqliteMemory(
         COALESCE(
           (SELECT text FROM episodes e2
            WHERE e2.persona_id = e.persona_id
+             AND e2.kind = 'chat'
              AND COALESCE(e2.session_id, 'legacy') = COALESCE(e.session_id, 'legacy')
              AND e2.speaker = 'user'
            ORDER BY e2.id ASC LIMIT 1),
           ''
         ) AS preview
      FROM episodes e
-     WHERE archived = 0 AND persona_id = ?
+     WHERE archived = 0 AND persona_id = ? AND kind = 'chat'
      GROUP BY COALESCE(session_id, 'legacy')
      ORDER BY MAX(ts) DESC`,
   )
   const selectByKnn = db.prepare<[Buffer, number, string]>(
     `SELECT e.id, e.ts, e.speaker, e.text, e.session_id AS sessionId,
-            e.tool_data AS toolDataRaw, e.images_data AS imagesDataRaw,
+            e.tool_data AS toolDataRaw, e.images_data AS imagesDataRaw, e.kind,
             vc.distance
      FROM (
        SELECT episode_id, distance
@@ -452,7 +485,7 @@ export function openSqliteMemory(
      ORDER BY vc.distance`,
   )
   const countEpisodes = db.prepare<[string]>(
-    'SELECT COUNT(*) AS c FROM episodes WHERE archived = 0 AND persona_id = ?',
+    "SELECT COUNT(*) AS c FROM episodes WHERE archived = 0 AND persona_id = ? AND kind = 'chat'",
   )
 
   // ---- L3 facts prepared statements ----
@@ -607,9 +640,19 @@ export function openSqliteMemory(
       embedding: Float32Array,
       toolData: string | null,
       imagesData: string | null,
+      kind: EpisodeKind,
     ): number => {
       const ts = new Date().toISOString()
-      const row = insertEpisode.run(personaId, ts, speaker, text, sessionId, toolData, imagesData)
+      const row = insertEpisode.run(
+        personaId,
+        ts,
+        speaker,
+        text,
+        sessionId,
+        toolData,
+        imagesData,
+        kind,
+      )
       const episodeId = Number(row.lastInsertRowid)
       if (embedding.length > 0) {
         insertVec.run(BigInt(episodeId), Buffer.from(embedding.buffer))
@@ -624,11 +667,20 @@ export function openSqliteMemory(
   }
 
   return {
-    async addEpisode(personaId, speaker, text, embedding, sessionId = null, toolParts, images) {
+    async addEpisode(
+      personaId,
+      speaker,
+      text,
+      embedding,
+      sessionId = null,
+      toolParts,
+      images,
+      kind = 'chat',
+    ) {
       ensureOpen()
       const toolData = toolParts && toolParts.length > 0 ? JSON.stringify(toolParts) : null
       const imagesData = images && images.length > 0 ? JSON.stringify(images) : null
-      return addTxn(personaId, speaker, text, sessionId, embedding, toolData, imagesData)
+      return addTxn(personaId, speaker, text, sessionId, embedding, toolData, imagesData, kind)
     },
 
     async recent(personaId, n, sessionId) {
@@ -687,6 +739,23 @@ export function openSqliteMemory(
       return wipe()
     },
 
+    async clearLore(personaId) {
+      ensureOpen()
+      const wipe = db.transaction(() => {
+        const ids = db
+          .prepare<[string]>("SELECT id FROM episodes WHERE persona_id = ? AND kind = 'lore'")
+          .all(personaId) as { id: number }[]
+        if (ids.length === 0) return 0
+        const delVec = db.prepare('DELETE FROM episodes_vec WHERE episode_id = ?')
+        for (const { id } of ids) delVec.run(BigInt(id))
+        const result = db
+          .prepare<[string]>("DELETE FROM episodes WHERE persona_id = ? AND kind = 'lore'")
+          .run(personaId)
+        return Number(result.changes)
+      })
+      return wipe()
+    },
+
     async deleteSession(personaId: string, sessionId: string) {
       ensureOpen()
       const wipe = db.transaction(() => {
@@ -719,7 +788,14 @@ export function openSqliteMemory(
       // represent persona-specific context (in-joke nicknames, the
       // way THIS character refers to the user). Add prefixes here as
       // they come up.
-      const PERSONA_SCOPED_PREFIXES = ['user.nicknames.', 'user.preferred_address']
+      const PERSONA_SCOPED_PREFIXES = [
+        'user.nicknames.',
+        'user.preferred_address',
+        // Backstory anchors written by the lore seeder. These describe
+        // THIS persona's relationship with the user, not facts ABOUT the
+        // user, so they must not leak across personas.
+        'persona.',
+      ]
       const scope: 'shared' | 'persona' = PERSONA_SCOPED_PREFIXES.some((p) =>
         input.key.startsWith(p),
       )
@@ -810,6 +886,16 @@ export function openSqliteMemory(
           "DELETE FROM facts WHERE persona_id = ? OR scope = 'shared'",
         )
         .run(personaId)
+      return Number(result.changes)
+    },
+
+    async deleteFactsByKeyPrefix(personaId, prefix) {
+      ensureOpen()
+      const result = db
+        .prepare<[string, string]>(
+          'DELETE FROM facts WHERE persona_id = ? AND key LIKE ?',
+        )
+        .run(personaId, `${prefix}%`)
       return Number(result.changes)
     },
 

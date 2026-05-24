@@ -28,6 +28,7 @@ import {
   getMemoryInitError,
   isNaiveMemoryMode,
 } from './memory-host.js'
+import { registerPersonaLoreIpc } from './persona-lore-host.js'
 import { getReminderService } from './reminder-host.js'
 import { initTasks, getTaskService, getTasksBootAt } from './tasks-host.js'
 import { greetOnLaunch } from './greeting-host.js'
@@ -1308,6 +1309,11 @@ void app.whenReady().then(async () => {
   // session and breaks continuity. createWindow is last so the renderer
   // never sees a half-initialized backend.
   await initMemory()
+  // Persona-lore IPC must register AFTER memory init — the handler
+  // calls getMemoryService() and would NPE if memory hasn't booted.
+  // Registration itself is sync; the wizard / Settings can fire seeds
+  // any time after this point.
+  registerPersonaLoreIpc()
   // Token usage tracker — separate sqlite file (usage.sqlite), not
   // touched by reset:memory. After init the recordUsage path is wired
   // into chat-host.runExtraction + chat/run.streamText so every LLM

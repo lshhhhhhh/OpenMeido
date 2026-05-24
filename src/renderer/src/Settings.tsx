@@ -2929,62 +2929,128 @@ function PresetLinesPanel(): React.ReactElement {
 
 /**
  * Manual update-check panel for Settings → 关于. Shows current app
- * version (so users can verify "did the update actually apply?") and
- * a "立即检查" button that triggers a one-off updater run instead of
- * waiting for the 30 s post-boot or 6 h periodic auto-checks.
+ * version + runs the full updater flow inline (check → available
+ * → downloading → downloaded → install). Previously this just
+ * delegated to the bottom-right UpdaterPill once an update was
+ * found, which forced users to leave the Settings page to see
+ * progress — confusing UX. Now the same state machine renders
+ * here in-place; the pill is still mounted globally for the
+ * auto-check-while-chatting case, but Settings is self-contained.
  *
- * Three feedback states from the click:
- *   - 检查中… (button disabled while in flight)
- *   - 已是最新版本 (after updater:not-available fires; clears in 4s)
- *   - 实际下载流程接管 (UpdaterPill in App.tsx surfaces the result
- *     when updater:downloaded fires — we don't duplicate that here)
+ * State machine mirrors UpdaterPill in App.tsx. queryState() on
+ * mount catches up if an event already fired before mount (boot
+ * race fixed in v0.1.8).
  *
  * Dev mode caveat: updater-host short-circuits when !app.isPackaged,
- * so the button click resolves immediately with no event. The button
- * just gets stuck on "检查中…" briefly. Documented inline so testers
- * don't think it's broken.
+ * so the button resolves with no event. Falls back after 8s.
  */
+type LocalUpdaterState =
+  | { kind: 'idle' }
+  | { kind: 'checking' }
+  | { kind: 'not-available' }
+  | { kind: 'error'; message: string }
+  | { kind: 'available'; version: string }
+  | { kind: 'downloading'; version: string; percent: number; bytesPerSecond: number }
+  | { kind: 'downloaded'; version: string }
+
 function UpdateChecker(): React.ReactElement {
   const [version, setVersion] = useState<string>('')
-  const [checking, setChecking] = useState(false)
-  const [feedback, setFeedback] = useState<string | null>(null)
+  const [state, setState] = useState<LocalUpdaterState>({ kind: 'idle' })
+  const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     void window.api.app.version().then(setVersion)
-    // Two paths resolve the loading button: "no update" gives feedback
-    // inline; "update found" clears the button (UpdaterPill in App.tsx
-    // takes over with the consent banner). Subscribe to both so the
-    // button doesn't hang on "检查中…" when an update IS available.
-    const offNA = window.api.updater.onNotAvailable(() => {
-      setChecking(false)
-      setFeedback('已是最新版本')
-      setTimeout(() => setFeedback(null), 4000)
+    // Catch-up: if an updater event already fired (boot auto-check
+    // ran 30s after launch), reflect that here instead of looking idle.
+    void window.api.updater.queryState().then((s) => {
+      if (s.kind === 'idle') return
+      if (s.kind === 'available') {
+        setState({ kind: 'available', version: s.version })
+      } else if (s.kind === 'progress') {
+        setState({
+          kind: 'downloading',
+          version: s.version,
+          percent: s.percent,
+          bytesPerSecond: s.bytesPerSecond,
+        })
+      } else if (s.kind === 'downloaded') {
+        setState({ kind: 'downloaded', version: s.version })
+      }
     })
-    const offA = window.api.updater.onAvailable(() => {
-      setChecking(false)
-      setFeedback('发现新版本（已在右下角提示）')
-      setTimeout(() => setFeedback(null), 4000)
+    const offNA = window.api.updater.onNotAvailable(() => {
+      setState({ kind: 'not-available' })
+      setTimeout(() => {
+        setState((cur) => (cur.kind === 'not-available' ? { kind: 'idle' } : cur))
+      }, 4000)
+    })
+    const offA = window.api.updater.onAvailable((info) => {
+      setState({ kind: 'available', version: info.version })
+    })
+    const offP = window.api.updater.onProgress((info) => {
+      setState((prev) => {
+        const v =
+          prev.kind === 'available' ||
+          prev.kind === 'downloading' ||
+          prev.kind === 'downloaded'
+            ? prev.version
+            : '?'
+        return {
+          kind: 'downloading',
+          version: v,
+          percent: info.percent,
+          bytesPerSecond: info.bytesPerSecond,
+        }
+      })
+    })
+    const offD = window.api.updater.onDownloaded((info) => {
+      setState({ kind: 'downloaded', version: info.version })
+      setBusy(false)
     })
     return () => {
       offNA()
       offA()
+      offP()
+      offD()
     }
   }, [])
 
   async function check(): Promise<void> {
-    if (checking) return
-    setChecking(true)
-    setFeedback(null)
+    if (state.kind === 'checking') return
+    setState({ kind: 'checking' })
     try {
       await window.api.updater.checkNow()
-      // We don't setChecking(false) here — onNotAvailable / pill will
-      // handle the conclusion. But in case the check silently no-ops
-      // (e.g. dev mode), fall through after 8 s so the button doesn't
-      // hang forever.
-      setTimeout(() => setChecking((c) => (c ? false : c)), 8000)
+      // Dev mode falls through silently — drop back to idle after 8s
+      // so the button doesn't hang.
+      setTimeout(() => {
+        setState((cur) => (cur.kind === 'checking' ? { kind: 'idle' } : cur))
+      }, 8000)
     } catch (err) {
-      setChecking(false)
-      setFeedback(`检查失败：${err instanceof Error ? err.message : String(err)}`)
+      setState({
+        kind: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  async function startDownload(): Promise<void> {
+    if (busy) return
+    setBusy(true)
+    try {
+      await window.api.updater.download()
+    } catch (err) {
+      console.warn('[updater] download request failed:', err)
+      setBusy(false)
+    }
+  }
+
+  async function install(): Promise<void> {
+    if (busy) return
+    setBusy(true)
+    try {
+      await window.api.updater.install()
+    } catch (err) {
+      console.warn('[updater] install request failed:', err)
+      setBusy(false)
     }
   }
 
@@ -2996,31 +3062,153 @@ function UpdateChecker(): React.ReactElement {
           v{version || '...'}
         </div>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <button
-          onClick={() => void check()}
-          disabled={checking}
+
+      {(state.kind === 'idle' || state.kind === 'checking' ||
+        state.kind === 'not-available' || state.kind === 'error') && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <button
+            onClick={() => void check()}
+            disabled={state.kind === 'checking'}
+            style={{
+              padding: '6px 14px',
+              fontSize: 12,
+              background:
+                state.kind === 'checking' ? '#2c3140' : 'rgba(120,160,255,0.18)',
+              border:
+                '1px solid ' +
+                (state.kind === 'checking' ? '#3a3e48' : 'rgba(120,160,255,0.55)'),
+              color: state.kind === 'checking' ? '#888' : '#aad4ff',
+              borderRadius: 6,
+              cursor: state.kind === 'checking' ? 'wait' : 'pointer',
+            }}
+          >
+            {state.kind === 'checking' ? '检查中…' : '立即检查更新'}
+          </button>
+          {state.kind === 'not-available' && (
+            <span style={{ fontSize: 11, color: '#8ec98e' }}>已是最新版本</span>
+          )}
+          {state.kind === 'error' && (
+            <span style={{ fontSize: 11, color: '#f99' }}>检查失败：{state.message}</span>
+          )}
+        </div>
+      )}
+
+      {state.kind === 'available' && (
+        <div
           style={{
-            padding: '6px 14px',
-            fontSize: 12,
-            background: checking ? '#2c3140' : 'rgba(120,160,255,0.18)',
-            border: '1px solid ' + (checking ? '#3a3e48' : 'rgba(120,160,255,0.55)'),
-            color: checking ? '#888' : '#aad4ff',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 12px',
+            background: 'rgba(120,160,255,0.10)',
+            border: '1px solid rgba(120,160,255,0.40)',
             borderRadius: 6,
-            cursor: checking ? 'wait' : 'pointer',
           }}
         >
-          {checking ? '检查中…' : '立即检查更新'}
-        </button>
-        {feedback && (
-          <span style={{ fontSize: 11, color: feedback.startsWith('检查失败') ? '#f99' : '#8ec98e' }}>
-            {feedback}
+          <span style={{ fontSize: 16 }}>✨</span>
+          <span style={{ flex: 1, lineHeight: 1.4 }}>
+            发现新版本 <b style={{ color: '#aad4ff' }}>v{state.version}</b>
           </span>
-        )}
-      </div>
+          <button
+            onClick={() => void startDownload()}
+            disabled={busy}
+            style={{
+              padding: '5px 14px',
+              fontSize: 12,
+              background: '#5a8edf',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 4,
+              cursor: busy ? 'wait' : 'pointer',
+              fontWeight: 500,
+            }}
+          >
+            {busy ? '准备中…' : '立即下载'}
+          </button>
+        </div>
+      )}
+
+      {state.kind === 'downloading' && (() => {
+        const pct = Math.max(0, Math.min(100, state.percent))
+        const mbps = state.bytesPerSecond / (1024 * 1024)
+        return (
+          <div
+            style={{
+              padding: '10px 12px',
+              background: 'rgba(120,160,255,0.10)',
+              border: '1px solid rgba(120,160,255,0.40)',
+              borderRadius: 6,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 16 }}>⬇</span>
+              <span style={{ flex: 1, lineHeight: 1.4 }}>
+                下载中 <b style={{ color: '#aad4ff' }}>v{state.version}</b>
+              </span>
+              <span style={{ fontSize: 11, color: '#aad4ff', fontFamily: 'monospace' }}>
+                {pct.toFixed(0)}% · {mbps.toFixed(1)} MB/s
+              </span>
+            </div>
+            <div
+              style={{
+                width: '100%',
+                height: 4,
+                background: 'rgba(255,255,255,0.08)',
+                borderRadius: 2,
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  width: `${pct}%`,
+                  height: '100%',
+                  background: 'linear-gradient(90deg, #5a8edf, #7ab8ff)',
+                  transition: 'width 200ms ease-out',
+                }}
+              />
+            </div>
+          </div>
+        )
+      })()}
+
+      {state.kind === 'downloaded' && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 12px',
+            background: 'rgba(140,210,140,0.10)',
+            border: '1px solid rgba(140,210,140,0.40)',
+            borderRadius: 6,
+          }}
+        >
+          <span style={{ fontSize: 16 }}>✓</span>
+          <span style={{ flex: 1, lineHeight: 1.4 }}>
+            新版本 <b style={{ color: '#cbe9c9' }}>v{state.version}</b> 已就绪
+          </span>
+          <button
+            onClick={() => void install()}
+            disabled={busy}
+            style={{
+              padding: '5px 14px',
+              fontSize: 12,
+              background: '#5a8edf',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 4,
+              cursor: busy ? 'wait' : 'pointer',
+              fontWeight: 500,
+            }}
+          >
+            {busy ? '准备中…' : '立即重启'}
+          </button>
+        </div>
+      )}
+
       <div style={{ fontSize: 11, color: '#888', marginTop: 10, lineHeight: 1.6 }}>
-        OpenMeido 启动后约 30 秒会自动检查 GitHub Releases。如果发现新版本，会在
-        后台静默下载，下载好后右下角弹一个提示，点"立即重启"即生效。
+        OpenMeido 启动后约 30 秒会自动检查 GitHub Releases。后台静默下载，下载完成后
+        在这里或右下角点"立即重启"即可生效。
       </div>
     </div>
   )

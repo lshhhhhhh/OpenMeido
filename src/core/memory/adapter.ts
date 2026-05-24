@@ -18,6 +18,7 @@
 import type {
   Episode,
   EpisodeImage,
+  EpisodeKind,
   Fact,
   FactCategory,
   NewFact,
@@ -65,6 +66,7 @@ export interface MemoryAdapter {
     sessionId?: string | null,
     toolParts?: (ToolCallPart | ToolResultPart)[],
     images?: EpisodeImage[],
+    kind?: EpisodeKind,
   ): Promise<number>
 
   /**
@@ -94,6 +96,13 @@ export interface MemoryAdapter {
 
   /** Wipe every episode and its embedding for this persona. Returns the number of rows removed. */
   clear(personaId: string): Promise<number>
+
+  /**
+   * Wipe only the kind='lore' episodes (and their vec entries) for this
+   * persona. Called before re-seeding lore so archetype switches don't
+   * pile up dead fragments. Live chat is untouched.
+   */
+  clearLore(personaId: string): Promise<number>
 
   /** Delete just one session's episodes (scoped to this persona). Returns rows removed. */
   deleteSession(personaId: string, sessionId: string): Promise<number>
@@ -130,6 +139,14 @@ export interface MemoryAdapter {
 
   /** Wipe all facts for this persona. Returns rows removed. */
   clearFacts(personaId: string): Promise<number>
+
+  /**
+   * Delete every fact for a persona whose key starts with `prefix`. Used
+   * by the lore seeder to wipe stale archetype anchors before writing
+   * new ones — switching from "newcomer" to "childhood" must not leave
+   * "newcomer"-only keys behind. Returns rows removed.
+   */
+  deleteFactsByKeyPrefix(personaId: string, prefix: string): Promise<number>
 
   /**
    * Manual override: delete one fact by id (hard delete row + any history
