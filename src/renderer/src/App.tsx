@@ -131,6 +131,35 @@ async function decodeBlobTo16kMono(blob: Blob): Promise<Float32Array> {
   return new Float32Array(rendered.getChannelData(0))
 }
 
+/**
+ * Macros: shortcut phrases the user (or a quick-action chip) sends to
+ * the maid that get silently expanded into a fuller, directive prompt
+ * before reaching the model. The user bubble in chat history still
+ * displays the short natural phrase — only the IPC payload is rewritten.
+ *
+ * Why not put this in the system prompt? Because it's a per-turn
+ * intent ("user wants chat with no topic"), not a permanent rule. We
+ * don't want every turn telling the model "by the way, if the user
+ * says 'random chat'..." — that wastes tokens and noises up the prompt.
+ *
+ * Add new entries here as natural shortcuts emerge. Keys are matched
+ * exactly against trim()'d input. To match variants, list each spelling.
+ */
+const USER_MACROS: Record<string, string> = {
+  '跟我随便聊聊吧':
+    '陪我聊会儿吧，你先开个话题——可以聊你刚才看到的、最近想到的、好奇问我点什么、或者回忆我们一起聊过的事。不要回"您想聊什么我都奉陪"这种把球踢回来的话。',
+  '随便聊聊':
+    '陪我聊会儿吧，你先开个话题——可以聊你刚才看到的、最近想到的、好奇问我点什么、或者回忆我们一起聊过的事。不要回"您想聊什么我都奉陪"这种把球踢回来的话。',
+  '跟我聊聊':
+    '陪我聊会儿吧，你先开个话题——可以聊你刚才看到的、最近想到的、好奇问我点什么、或者回忆我们一起聊过的事。不要回"您想聊什么我都奉陪"这种把球踢回来的话。',
+  '陪我聊会儿':
+    '陪我聊会儿吧，你先开个话题——可以聊你刚才看到的、最近想到的、好奇问我点什么、或者回忆我们一起聊过的事。不要回"您想聊什么我都奉陪"这种把球踢回来的话。',
+}
+
+function expandUserMacro(text: string): string {
+  return USER_MACROS[text.trim()] ?? text
+}
+
 export default function App() {
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -931,7 +960,10 @@ export default function App() {
     // Reset the synchronous text accumulator for the new turn so any
     // residue from a cancelled prior turn doesn't leak into TTS.
     accumulatedTextRef.current = ''
-    activeIdRef.current = window.api.chat.send(text, attachments.length ? attachments : undefined)
+    activeIdRef.current = window.api.chat.send(
+      expandUserMacro(text),
+      attachments.length ? attachments : undefined,
+    )
     setInput('')
     setAttachments([])
   }
@@ -955,7 +987,7 @@ export default function App() {
       { role: 'assistant', text: '' },
     ])
     accumulatedTextRef.current = ''
-    activeIdRef.current = window.api.chat.send(t, undefined)
+    activeIdRef.current = window.api.chat.send(expandUserMacro(t), undefined)
   }
 
 

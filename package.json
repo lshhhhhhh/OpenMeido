@@ -1,6 +1,6 @@
 {
   "name": "openmeido",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Productivity assistant + Live2D companion for non-programmers",
   "author": "lsh <laishaoheng1996@gmail.com>",
   "main": "./out/main/index.js",

@@ -301,6 +301,35 @@ export async function runChat(
       { role: 'user', content: userContent },
     ]
 
+    // Gemini-specific: strip pre-text from any assistant message that
+    // also contains a tool-call. The Vercel AI SDK serializes
+    // assistant {text + tool-call} as a single message in our shape
+    // but, when posting to Gemini, splits it into two consecutive
+    // 'model' turns (text-only, then functionCall-only). Gemini
+    // rejects the second with "function call turn comes immediately
+    // after a user turn or after a function response turn".
+    //
+    // We can't influence @ai-sdk/google's internal serialization, so
+    // we sand the input ahead of time: any assistant turn that's
+    // about to emit a tool call drops the conversational lead-in. We
+    // lose a tiny bit of model commentary but the tool call lands
+    // correctly. Loss is small in practice — our system prompt already
+    // tells the model "不要先说'我帮您看一下'再调", so the pre-text
+    // is usually a one-liner the SDK was going to mangle anyway.
+    const isGemini = cfg.backend.baseUrl.includes('googleapis.com')
+    if (isGemini) {
+      for (const msg of messages) {
+        if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
+        const hasCall = msg.content.some(
+          (p) => typeof p === 'object' && p !== null && 'type' in p && p.type === 'tool-call',
+        )
+        if (!hasCall) continue
+        msg.content = msg.content.filter(
+          (p) => typeof p === 'object' && p !== null && 'type' in p && p.type !== 'text',
+        )
+      }
+    }
+
     // Fake-mail dev mode bypasses real IMAP config but the mail tools still
     // need to be exposed to the model — otherwise the synthetic data is
     // unreachable. mail-host.ts also reads OPENMEIDO_FAKE_MAIL; the two must
@@ -792,6 +821,15 @@ function friendlyError(err: unknown): string {
       'Settings → AI 顶部 chip 切换。（原始错误：' +
       raw.slice(0, 120) +
       '…）'
+    )
+  }
+  // Gemini-specific message-sequence rejection. Should be prevented by
+  // the pre-streamText sanding above; if it still slips through, point
+  // the user at the workaround instead of dumping the raw error.
+  if (raw.includes('function call turn comes immediately after')) {
+    return (
+      'Gemini 拒绝了消息序列（它要求 tool 调用必须紧跟用户或上一个 tool 结果）。' +
+      '通常重发就好；如果反复出现，可以临时换 GLM / Qwen / Doubao —— Settings → AI 顶部切换。'
     )
   }
   return raw
