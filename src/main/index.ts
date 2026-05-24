@@ -225,6 +225,23 @@ function createWindow(): void {
     void win.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
+  // External-link handler. Without this, every <a target="_blank"> or
+  // window.open('https://...') call from the renderer pops a new
+  // BrowserWindow INSIDE OpenMeido — clunky, no address bar, no
+  // bookmarks, no extensions. Route http(s) URLs through shell.open
+  // External so they open in the user's OS default browser instead.
+  //
+  // Returning { action: 'deny' } prevents the in-app window. Returning
+  // { action: 'allow' } would let it through (we don't want that for
+  // external URLs). For our own meido-* protocol URLs we deny too
+  // because they're meant to be loaded inline, not as separate windows.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      void shell.openExternal(url)
+    }
+    return { action: 'deny' }
+  })
+
   // Apply the persisted UI zoom on every load (covers HMR refresh in dev
   // and full restart in prod). did-finish-load fires after the renderer's
   // JS is ready, which is what setZoomFactor needs.
