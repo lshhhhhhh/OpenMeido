@@ -20,7 +20,7 @@ import type { MailAdapter } from '../../core/mail/adapter.js'
 import type { MailMessage, MailSummary, ListInboxOptions } from '../../core/mail/types.js'
 
 /** Internal model — flat list, both folders mixed, denormalized for lookup. */
-interface FakeMail {
+export interface FakeMail {
   /** Unique id. INBOX items use a plain integer string ('101'); SENT items
    *  use 'sent:<n>' so readMessage routing matches the IMAP adapter shape. */
   id: string
@@ -46,7 +46,7 @@ const FRANK = 'frank.li@bigcorp.test'
 const NEWS = 'newsletter@infoq.test'
 const ALERT = 'alerts@datadoghq.test'
 
-const FAKE_DATA: FakeMail[] = [
+const DEFAULT_FAKE_DATA: FakeMail[] = [
   // ---------- Thread 1: LunarLink 1.2 release ----------
   {
     id: 'sent:1',
@@ -289,6 +289,43 @@ const FAKE_DATA: FakeMail[] = [
     inReplyTo: '<contract-q6b@openmeido.test>',
   },
 ]
+
+/**
+ * Optional local override. If `./fake-adapter-data.local.ts` exists
+ * (gitignored — kept out of the public repo), its `FAKE_DATA` export
+ * replaces DEFAULT_FAKE_DATA at module load. Used for demo/screen-
+ * recording content the dev doesn't want in version control (parody
+ * emails referencing real people, in-jokes, etc.).
+ *
+ * Implementation: `import.meta.glob` is a Vite directive that's
+ * substituted at build time. In Electron contexts (electron-vite
+ * bundles main), it resolves to either the module map or an empty
+ * object. In plain Node + tsx (smoke test runner), `import.meta.glob`
+ * doesn't exist — the try/catch swallows that case so the smoke
+ * test still imports the file successfully and uses DEFAULT_FAKE_DATA
+ * (which is what its assertions match).
+ */
+let FAKE_DATA: FakeMail[] = DEFAULT_FAKE_DATA
+try {
+  // @ts-expect-error -- import.meta.glob is Vite-only
+  const overrideModules: Record<string, { FAKE_DATA?: FakeMail[] }> = import.meta.glob(
+    './fake-adapter-data.local.ts',
+    { eager: true },
+  )
+  for (const mod of Object.values(overrideModules)) {
+    if (Array.isArray(mod.FAKE_DATA) && mod.FAKE_DATA.length > 0) {
+      FAKE_DATA = mod.FAKE_DATA
+      console.log(
+        `[mail] fake-adapter using LOCAL override (${mod.FAKE_DATA.length} messages)`,
+      )
+      break
+    }
+  }
+} catch {
+  // Non-Vite context (e.g. tsx-based smoke test) — `import.meta.glob`
+  // is undefined and the call above threw. Fall through with the
+  // default data; test assertions still match.
+}
 
 const SNIPPET_LEN = 200
 

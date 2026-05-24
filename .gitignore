@@ -58,3 +58,9 @@ dist-test/
 # unpacked runtime/ + sidecar that ships goes in src/renderer/public/
 # live2d-models/<name>/ and IS tracked.
 /*.zip
+
+# Local override for fake-mail demo data. fake-adapter.ts picks it
+# up at module load via import.meta.glob if present, otherwise uses
+# the in-repo defaults. Lets the dev keep parody/in-joke content out
+# of the public repo while still getting it in `npm run dev:demo`.
+src/main/mail/fake-adapter-data.local.ts
