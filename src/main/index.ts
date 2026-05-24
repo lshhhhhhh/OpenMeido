@@ -1,15 +1,15 @@
-// FIRST IMPORT — runs the reset wipe (if argv / sentinel says to). Must
-// come before any module that reads userData files at import time
+// CRITICAL FIRST IMPORT — `--demo` flag re-points userData to a sandbox
+// dir before anything else touches storage. Same ES-module-hoisting
+// reasoning as reset-handler below: config.ts / sqlite / electron-
+// store all read userData at import time, so the setPath has to land
+// FIRST.
+import './demo-mode.js'
+
+// SECOND IMPORT — runs the reset wipe (if argv / sentinel says to).
+// Must come before any module that reads userData files at import time
 // (config.ts, lines-host.ts, memory adapters, etc.) — otherwise those
 // modules load stale data into in-memory state and a later setConfig()
 // would persist that stale data right back, defeating the reset.
-//
-// ES modules evaluate ALL static imports of a file before that file's
-// own body runs, so the IIFE pattern that used to sit at the top of
-// this file (textually above the imports) was misleading: hoisting
-// meant config.ts had already initialized by the time the IIFE ran.
-// The fix is module-level — make the wipe a side-effect import, and
-// put it first.
 import './reset-handler.js'
 
 import { app, BrowserWindow, ipcMain, protocol, dialog, shell, screen } from 'electron'
@@ -90,6 +90,8 @@ import {
 } from './live2d-models-host.js'
 import { initUpdater } from './updater-host.js'
 import { initUsage } from './usage-host.js'
+import { isDemoMode } from './demo-mode.js'
+import { seedDemoData } from './demo-seed.js'
 import { IPC, type ChatSendPayload } from '../shared/ipc.js'
 import { configSchema, ConfigIPC, type Config } from '../shared/config.js'
 import type { ModelSidecar } from '../shared/live2d-models.js'
@@ -404,6 +406,11 @@ ipcMain.handle('window:getHotkeyStatus', () => getHotkeyStatus())
 // next to the manual update-check button. Single source of truth is
 // package.json (Electron reads it from the bundled main process).
 ipcMain.handle('app:version', () => app.getVersion())
+
+// Demo-mode status — renderer hangs a 🎬 DEMO badge in the corner
+// when this returns true so the user / audience knows the data on
+// screen is synthetic. See src/main/demo-mode.ts for the --demo flag.
+ipcMain.handle('app:isDemoMode', () => isDemoMode())
 
 // ---- Affinity / persona-scoped helpers ----
 ipcMain.handle('affinity:get', async (_event, personaId?: string) => {
@@ -1343,6 +1350,13 @@ void app.whenReady().then(async () => {
   // Skipped in dev mode. Broadcasts updater:downloaded to renderer when
   // a new version is ready; renderer shows a pill to restart.
   initUpdater()
+  // Demo profile seeding — only fires when --demo on argv. Pumps a
+  // few L3 facts + mid-tier affinity + 3 demo tasks into the SANDBOX
+  // userData so screen-recording / showcasing the app starts from a
+  // "user who's already comfortable with her" state, not a cold
+  // stranger. Awaited so a demo always sees the seed take effect
+  // before the first frame.
+  void seedDemoData()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

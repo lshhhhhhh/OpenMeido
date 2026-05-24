@@ -838,6 +838,15 @@ const api = {
     version(): Promise<string> {
       return ipcRenderer.invoke('app:version') as Promise<string>
     },
+    /**
+     * True when the app was launched with `--demo` — main switched
+     * userData to a sandbox dir and seeded synthetic mail / tasks /
+     * facts. Renderer hangs a 🎬 DEMO badge so anyone watching the
+     * screen knows the data isn't real.
+     */
+    isDemoMode(): Promise<boolean> {
+      return ipcRenderer.invoke('app:isDemoMode') as Promise<boolean>
+    },
   },
 
   demos: {

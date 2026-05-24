@@ -1,6 +1,6 @@
 {
   "name": "openmeido",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Productivity assistant + Live2D companion for non-programmers",
   "author": "lsh <laishaoheng1996@gmail.com>",
   "main": "./out/main/index.js",
@@ -9,6 +9,7 @@
     "dev": "chcp 65001 >nul && electron-vite dev",
     "sync-icon": "node -e \"require('fs').copyFileSync('icon/1.png', 'build/icon.png'); console.log('build/icon.png ← icon/1.png')\"",
     "dev:fake-mail": "node scripts/dev-fake-mail.mjs",
+    "dev:demo": "node scripts/dev-demo.mjs",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",

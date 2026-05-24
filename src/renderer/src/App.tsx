@@ -1467,6 +1467,11 @@ export default function App() {
             having to trust a Settings toggle. */}
         <ScreenCaptureIndicator />
 
+        {/* Demo-mode badge — visible when launched with --demo so the
+            audience knows the data on screen (mail / tasks / facts /
+            affinity) is synthetic, not real. */}
+        <DemoModeBadge />
+
       {/* Chat panel — overlays the bottom of the stage container. zIndex
           2 puts it above the Live2D canvas (zIndex 1) so the model's
           lower body is genuinely covered by the chat card, not just
@@ -2811,6 +2816,51 @@ const dismissBtnStyle: React.CSSProperties = {
   cursor: 'pointer',
   padding: 0,
   borderRadius: 4,
+}
+
+/**
+ * Persistent "🎬 DEMO" pill in the top-left when launched with --demo.
+ * Lets anyone watching a screen recording see immediately that the
+ * mail / tasks / facts / affinity on display are synthetic, not real.
+ * Stays visible the entire session — disappearing partway would be
+ * misleading.
+ */
+function DemoModeBadge() {
+  const [active, setActive] = useState(false)
+  useEffect(() => {
+    void window.api.app.isDemoMode().then(setActive)
+  }, [])
+  if (!active) return null
+  return (
+    <div
+      title="演示模式：邮件/任务/事实/好感度都是假数据，不会污染真实安装"
+      style={{
+        // Top-center to avoid colliding with the top-left screen-
+        // capture flash and the top-right affinity chip / Settings
+        // gear. Hard to miss for anyone screen-recording.
+        position: 'absolute',
+        top: 8,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 25,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 10px',
+        background: 'rgba(120, 80, 200, 0.92)',
+        color: '#fff',
+        borderRadius: 999,
+        fontSize: 11,
+        fontWeight: 600,
+        boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
+        pointerEvents: 'none',
+        fontFamily: 'system-ui, sans-serif',
+      }}
+    >
+      <span style={{ fontSize: 13 }}>🎬</span>
+      <span>DEMO</span>
+    </div>
+  )
 }
 
 /**
