@@ -148,7 +148,13 @@ export function openSqliteMemory(
 
     CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts);
     CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
-    CREATE INDEX IF NOT EXISTS idx_episodes_kind ON episodes(persona_id, kind);
+    -- NOTE: idx_episodes_kind is intentionally NOT created here. kind is
+    -- a column added in v0.3.0; on an upgrading user DB the CREATE TABLE
+    -- above is a no-op (old shape, no kind column) and indexing a
+    -- nonexistent column throws "no such column: kind", crashing memory
+    -- init. The kind index is created AFTER the kind-column migration
+    -- below, same discipline as idx_episodes_persona. (This was the
+    -- v0.3.0-0.3.3 memory-init crash for everyone upgrading from <0.3.0.)
 
     CREATE TABLE IF NOT EXISTS facts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -269,9 +275,14 @@ export function openSqliteMemory(
     .all() as { name: string }[]
   if (!episodeColsAfterRebuild.some((c) => c.name === 'kind')) {
     db.exec("ALTER TABLE episodes ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'")
-    db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_kind ON episodes(persona_id, kind)')
     console.log("[memory] migrated: added episodes.kind (default 'chat')")
   }
+  // Index creation runs UNCONDITIONALLY (idempotent via IF NOT EXISTS) and
+  // only AFTER kind is guaranteed to exist — covers both paths: a fresh
+  // install (kind came from CREATE TABLE, migration branch skipped) and an
+  // upgrade (migration branch just added it). Putting it inside the
+  // column-missing branch would skip it on fresh installs.
+  db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_kind ON episodes(persona_id, kind)')
 
   const factCols = db.prepare("PRAGMA table_info(facts)").all() as { name: string }[]
   if (!factCols.some((c) => c.name === 'persona_id')) {
