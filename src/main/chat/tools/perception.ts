@@ -69,10 +69,15 @@ export const readClipboard = tool({
 
 export const readWebPage = tool({
   description:
-    '抓取一个网页，提取出标题 + 正文，返回给你。' +
-    '用户说"总结这个链接"、"读一下这个文章"、"这个网页讲什么"、' +
-    '或者直接发一个 URL 等时调用。返回结构 { title, byline, content }。' +
-    '`url` 必须是 http:// 或 https:// 开头的完整 URL。',
+    '抓取**用户明确给出的某个网页 URL**，提取标题 + 正文。' +
+    '仅在用户**自己粘了一个 http(s) 链接**并要你读/总结它时调用' +
+    '（"总结这个链接"、"读一下 https://… 这篇"、"这个网页讲什么 + 链接"）。\n' +
+    '**关键限制**：\n' +
+    '- 用户没给具体 URL 时，**绝对不要**调用本工具。尤其是问"现在/最新/今天 X 是多少"、' +
+    '"最近新闻"、"谁是当前的 X"这类时效性问题——你已经有联网搜索能力（系统自动处理），' +
+    '**直接回答即可**，不要瞎编一个 URL 来读。瞎编的 URL 会抓取失败，反复重试只会浪费步数、最后什么都答不出来。\n' +
+    '- 抓取失败（返回 error）时**不要换个 URL 重试**，如实告诉用户这个链接读不了。\n' +
+    '`url` 必须是用户给的、http:// 或 https:// 开头的完整 URL。返回 { title, byline, content }。',
   inputSchema: z.object({
     url: z.string().describe('Full HTTP/HTTPS URL of the page to fetch and extract.'),
   }),

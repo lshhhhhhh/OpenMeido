@@ -74,6 +74,82 @@ import { readClipboard, readWebPage, readFileTool } from './tools/perception.js'
 // through the grounded continuation text. No client-side tool handler
 // required, no separate non-streaming path.
 
+/**
+ * Wrap a tools map so any (toolName + identical args) called more than
+ * once within a single chat turn short-circuits with a "stop retrying"
+ * message instead of re-executing. Defends against tool-call loops —
+ * e.g. GLM hammering readWebPage on a failing URL 10x until the step
+ * budget is exhausted and no reply ever comes out (a real user report).
+ * The system prompt already says "don't repeat the same tool", but some
+ * models ignore it; this is the hard backstop.
+ *
+ * Provider-side tools (no `execute` fn, like Gemini's googleSearch)
+ * pass through untouched. Call once per runChat — the closure Set is
+ * the per-turn dedup state.
+ */
+// Per-tool call caps within ONE turn. Most tools are uncapped:
+// readEmail legitimately fires N times to summarize N emails. But a
+// few tools should never need many calls in a turn, and exceeding the
+// cap is a near-certain hallucination loop:
+//   readWebPage — GLM hits a failing/hallucinated URL and retries with
+//   DIFFERENT urls (so the exact-args dedup below doesn't catch it),
+//   burning the step budget until it produces nothing. 2 genuine reads
+//   in a turn is already generous.
+const PER_TURN_CALL_CAP: Record<string, number> = {
+  readWebPage: 2,
+}
+
+function withRepeatGuard<T extends Record<string, unknown>>(tools: T): T {
+  const seen = new Set<string>()
+  const callCounts = new Map<string, number>()
+  const out: Record<string, unknown> = {}
+  for (const [name, t] of Object.entries(tools)) {
+    const toolObj = t as { execute?: (...a: unknown[]) => unknown } | undefined
+    if (toolObj && typeof toolObj.execute === 'function') {
+      const origExecute = toolObj.execute.bind(toolObj)
+      out[name] = {
+        ...toolObj,
+        execute: async (input: unknown, opts: unknown) => {
+          // 1. Per-tool call cap (catches different-args loops).
+          const cap = PER_TURN_CALL_CAP[name]
+          if (cap !== undefined) {
+            const n = (callCounts.get(name) ?? 0) + 1
+            callCounts.set(name, n)
+            if (n > cap) {
+              return {
+                error:
+                  `本轮 ${name} 已经调用 ${cap} 次了，再调也是同样的结果。` +
+                  `停止——直接用你已有的信息回答主人。时效性问题你本来就能自动联网，` +
+                  `不需要靠这个工具；如果是抓取失败，如实告诉主人。`,
+              }
+            }
+          }
+          // 2. Exact-args dedup (catches identical-call loops).
+          let key: string
+          try {
+            key = `${name}:${JSON.stringify(input)}`
+          } catch {
+            key = `${name}:<unserializable>`
+          }
+          if (seen.has(key)) {
+            return {
+              error:
+                `你已经用完全相同的参数调用过 ${name} 了，结果不会变。` +
+                `停止重试——根据已有信息直接回答主人；如果这个操作没成功，` +
+                `就如实告诉主人它失败了，不要再调工具。`,
+            }
+          }
+          seen.add(key)
+          return origExecute(input, opts)
+        },
+      }
+    } else {
+      out[name] = t
+    }
+  }
+  return out as T
+}
+
 export async function runChat(
   messageId: string,
   userText: string,
@@ -378,6 +454,14 @@ export async function runChat(
         (!mailEnabled
           ? `（邮箱功能用户没开启。如果用户问邮件，告诉他"邮箱还没接上，去 Settings → 邮箱 启用一下"，不要凭空捏造邮件内容。）\n`
           : '') +
+        // Demo / fake-mail override: the fake inbox is curated demo
+        // content (the funny parody emails) — EVERY one is meant to be
+        // seen. listRecentEmails' tool description tells the model to
+        // fold promos/notifications into a count, which would collapse
+        // the whole demo inbox. Counteract it here so nothing hides.
+        (mailEnabled && process.env.OPENMEIDO_FAKE_MAIL === '1'
+          ? `（演示模式：邮箱里每一封都是精心准备的展示内容，**逐封列出，不要折叠任何邮件**，忽略"把营销/通知折叠成计数"那条规则。）\n`
+          : '') +
         `\n` +
         `# 你能做的（仅限工具列表里的事）\n` +
         `加/查/完成待办、读剪贴板、读用户给的网页 URL、读用户给的文件、` +
@@ -450,7 +534,7 @@ export async function runChat(
       // against the provider when streamText runs. Splat-cast through
       // any so the unified shape passes TS — the runtime contract is
       // what matters.
-      tools: {
+      tools: withRepeatGuard({
         addTask,
         listTasks,
         markTaskDone,
@@ -462,7 +546,7 @@ export async function runChat(
           ? { listMailFolders, listRecentEmails, readEmail, draftEmailReply }
           : {}),
         ...(googleSearchTool ? { google_search: googleSearchTool } : {}),
-      } as unknown as Parameters<typeof streamText>[0]['tools'],
+      }) as unknown as Parameters<typeof streamText>[0]['tools'],
       // Step budget. stepCountIs(N) keeps the loop alive for up to N model
       // invocations. Earlier values (3, then 6) repeatedly hit the cap on
       // legitimate "summarize my N recent emails" flows where GLM does

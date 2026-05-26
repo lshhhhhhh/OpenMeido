@@ -162,6 +162,37 @@ export function resolveApiKey(cfg: Config = current): string {
 }
 
 /**
+ * Resolve the GPT-SoVITS config with .env fallback for any empty field.
+ *
+ * Why: GPT-SoVITS needs a reference-audio path + its transcript, and
+ * those are fiddly to retype. During demos (which start from a fresh
+ * `--demo` profile, or after a reset) the dev would otherwise have to
+ * re-paste them into Settings every single run. With this, drop them
+ * in `.env` once and any empty field in config falls back to the env
+ * value. Production users have no `.env`, so this is invisible to them.
+ *
+ * Env vars (all optional):
+ *   SOVITS_BASE_URL   — server base URL (config already defaults to
+ *                       http://127.0.0.1:9880, so rarely needed)
+ *   SOVITS_REF_AUDIO  — absolute path to the reference clip
+ *   SOVITS_REF_TEXT   — exact transcript of that clip
+ *   SOVITS_REF_LANG   — reference language (defaults zh)
+ *   SOVITS_TEXT_LANG  — synthesis language (defaults zh)
+ */
+export function resolveSovitsConfig(
+  sovits: Config['tts']['sovits'],
+): Config['tts']['sovits'] {
+  return {
+    ...sovits,
+    baseUrl: sovits.baseUrl || process.env.SOVITS_BASE_URL || sovits.baseUrl,
+    refAudio: sovits.refAudio || process.env.SOVITS_REF_AUDIO || '',
+    refText: sovits.refText || process.env.SOVITS_REF_TEXT || '',
+    refLang: sovits.refLang || process.env.SOVITS_REF_LANG || sovits.refLang,
+    textLang: sovits.textLang || process.env.SOVITS_TEXT_LANG || sovits.textLang,
+  }
+}
+
+/**
  * "Has the USER explicitly configured an AI backend?"
  *
  * Checks `cfg.backend.apiKey` directly — does NOT consult env-var

@@ -761,7 +761,19 @@ export default function App() {
   // sentence would fire demo 1. Modifier-prefixed hotkeys (Ctrl+Shift+D)
   // pass through input-focus suppression because the modifier signals intent.
   useEffect(() => {
+    // Demo-line hotkeys are a screen-recording tool. Only wire the
+    // keydown listener in demo mode — otherwise a real user pressing a
+    // bare digit ('1'/'2' are valid demo hotkeys) outside the chat box
+    // would fire canned demo lines, and every keystroke would pay an
+    // IPC roundtrip to demos.list. Main also returns [] outside demo
+    // mode, so this is belt-and-suspenders + a perf win.
+    let demoMode = false
+    let disposed = false
+    void window.api.app.isDemoMode().then((on) => {
+      demoMode = on
+    })
     const onKeyDown = (e: KeyboardEvent): void => {
+      if (!demoMode || disposed) return
       const hasMod = e.ctrlKey || e.altKey || e.metaKey
       // While focus is in an editable element AND there's no modifier, this
       // is regular typing — don't fire any demo.
@@ -805,7 +817,10 @@ export default function App() {
       })()
     }
     window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
+    return () => {
+      disposed = true
+      window.removeEventListener('keydown', onKeyDown)
+    }
   }, [])
 
   // Diagnose: log window focus/blur + active element. If Windows is taking

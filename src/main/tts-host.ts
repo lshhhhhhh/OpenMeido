@@ -16,7 +16,7 @@
  * sentence is a future polish (matches imouto-oss).
  */
 
-import { getConfig } from './config.js'
+import { getConfig, resolveSovitsConfig } from './config.js'
 import type { Config } from '../shared/config.js'
 
 import { sanitizeForTTS } from './tts/sanitize.js'
@@ -51,11 +51,18 @@ export async function synthesize(
   const safe = sanitizeForTTS(text)
   if (!safe.trim()) throw new Error('tts: empty text')
   const cfg = override ?? getConfig().tts
+  // Backend is whatever the user picked — no env override. (We tried a
+  // TTS_BACKEND=sovits demo shortcut and it backfired: it forced SoVITS
+  // even when the user explicitly picked Edge in Settings.) The only
+  // .env convenience that survives is resolveSovitsConfig below, which
+  // fills EMPTY SoVITS ref fields from env — so a demo just needs the
+  // user to pick "GPT-SoVITS" once and the ref audio/text auto-populate,
+  // no copy-paste. Picking any other engine behaves exactly as chosen.
   switch (cfg.backend) {
     case 'edge':
       return synthesizeEdge(safe, cfg.voice)
     case 'sovits':
-      return synthesizeSovits(safe, cfg.sovits)
+      return synthesizeSovits(safe, resolveSovitsConfig(cfg.sovits))
     case 'minimax':
       return synthesizeMinimax(safe, cfg.minimax)
     case 'volcengine':

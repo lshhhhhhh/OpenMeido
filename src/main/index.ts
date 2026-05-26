@@ -1314,10 +1314,16 @@ void app.whenReady().then(async () => {
   registerLive2DProtocol()
   registerFontProtocol()
   registerBackgroundProtocol()
-  // Eager-seed demos.json — readDemos creates it on first read, but doing
-  // so up-front means the user can find the file immediately after install
-  // instead of having to press the hotkey once to "materialize" it.
-  await readDemos()
+  // Eager-seed demos.json ONLY in demo mode. The demo-line feature
+  // (Ctrl+Shift+D + bare-digit hotkeys → canned screen-recording lines)
+  // is a dev/demo tool, not a user feature. Seeding it for everyone
+  // dropped the placeholder lines ("主任…尼尼孩孩…") into every install,
+  // and because the hotkeys include bare '1'/'2', a real user pressing
+  // a digit outside the chat box would fire them. Gate the whole thing
+  // behind demo mode: don't seed, and demos:list returns [] (below).
+  if (isDemoMode()) {
+    await readDemos()
+  }
 
   // Sequence matters: memory must finish resuming its session before any
   // chat IPC handler fires, otherwise the first turn lands in a fresh
@@ -1498,7 +1504,11 @@ function contentTypeFor(filePath: string): string {
 // Renderer fetches fresh on every hotkey press, so user edits to demos.json
 // land without restart. `demos:reveal` opens the file in the system's default
 // editor (notepad / vscode / whatever) for one-click access.
-ipcMain.handle('demos:list', () => readDemos())
+// Demo lines are a screen-recording tool, not a user feature. Outside
+// demo mode return [] so the renderer's hotkey matcher never fires —
+// even if a stale demos.json exists from an earlier (pre-fix) build that
+// seeded it for everyone.
+ipcMain.handle('demos:list', () => (isDemoMode() ? readDemos() : []))
 ipcMain.handle('demos:reveal', async () => {
   const path = getDemosPath()
   // Ensure file exists so the open succeeds — readDemos creates if missing.
