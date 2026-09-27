@@ -1,86 +1,278 @@
 /**
- * Kimi `$web_search` response stream filter.
+ * Kimi `$web_search` round-trip, hidden inside the SSE stream.
  *
- * Moonshot's Kimi K2 supports a server-side web search via a special
- * `type: 'builtin_function'` tool. When the model triggers it:
- *   1. Stream emits a tool_call chunk with `type: 'builtin_function'`,
- *      `function.name: '$web_search'`.
- *   2. Moonshot's server INTERNALLY executes the search.
- *   3. Model continues streaming the final answer text grounded on
- *      the results — no client-side tool execution needed.
+ * Moonshot's `$web_search` is a `type: 'builtin_function'` tool. It is NOT
+ * fully server-side: when the model decides to search, the stream ends with
+ * `finish_reason: "tool_calls"` and a builtin_function tool_call whose
+ * `arguments` carry an opaque `{search_result: {search_id}, usage}` blob.
+ * The client must echo those arguments back as a `role: "tool"` message and
+ * POST again; only the second response contains the grounded answer.
+ * (Verified 2026-09 with kimi-k2.6 on api.moonshot.ai.)
  *
- * The Vercel AI SDK's OpenAI-compat parser strictly validates
- * `tool_calls[].type === 'function'` and throws on anything else.
- * That breaks the whole stream the moment Moonshot emits the
- * `builtin_function` marker, even though we don't NEED to handle
- * the tool call (server already did).
+ * Vercel AI SDK can't take part in that exchange — its OpenAI-compat parser
+ * rejects `type: 'builtin_function'`, and a builtin call isn't one of our
+ * tools. So this module does the round-trip itself, below the SDK:
  *
- * Fix: wrap the response body and strip `builtin_function` entries
- * from tool_calls arrays in each SSE chunk before they reach the
- * SDK. The model's actual content chunks flow through untouched.
- * If a chunk only carried the builtin_function marker, we drop the
- * whole chunk; if it carried other deltas alongside, we drop just
- * that entry.
+ *   1. Filter each upstream SSE line: drop builtin_function tool_call
+ *      entries (including their follow-up `arguments` chunks, which carry
+ *      no `type`), remembering id/name/arguments.
+ *   2. If the response finishes with only builtin calls, hold back the
+ *      finish chunk + `[DONE]`, append the assistant tool_calls message and
+ *      the echoing tool message to the request, re-POST, and splice the new
+ *      response's lines into the same stream.
+ *   3. The SDK sees one ordinary text stream: the search answer.
+ *
+ * A response that mixes builtin and ordinary function calls just has the
+ * builtin entries stripped — the SDK runs our function tools as usual and
+ * Kimi can search again on the next step.
  */
+
+/** Max search round-trips per request. Kimi normally searches once. */
+const MAX_SEARCH_ROUNDS = 3
+
+interface BuiltinCall {
+  id: string
+  name: string
+  args: string
+}
 
 /**
- * Wraps a fetch Response so its SSE stream has any
- * `type: 'builtin_function'` tool_calls stripped before downstream
- * parsers see them. Returns a new Response with the same status/headers
- * but a filtered body. Pass non-SSE responses through unchanged.
+ * Stateful per-response line filter. One instance per upstream response —
+ * builtin tool_call `arguments` arrive in later chunks keyed only by
+ * `index`, so the filter has to remember which indexes were builtin.
  */
-export function wrapKimiSearchResponse(response: Response): Response {
-  // Bail-outs: error responses (let the SDK see real errors) and
-  // responses without a body (e.g. HEAD, 204).
-  if (!response.body || !response.ok) return response
+export function createKimiSearchFilter() {
+  const builtinByIndex = new Map<number, BuiltinCall>()
+  let sawFunctionCall = false
+  let heldFinish = false
+  let assistantText = ''
 
-  // Confirm we're looking at an event-stream. Non-streaming responses
-  // (chat.completions without stream:true) get their tool_calls inside
-  // a JSON body; we don't handle those here because the chat path
-  // always uses streaming.
+  function processLine(line: string): string | null {
+    if (!line.startsWith('data: ')) return line
+    const payload = line.slice(6)
+    if (payload.trim() === '[DONE]') return heldFinish ? null : line
+    if (payload.trim() === '') return line
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(payload)
+    } catch {
+      return line // malformed JSON — pass through; parser will deal
+    }
+    if (!parsed || typeof parsed !== 'object') return line
+    const choices = (parsed as { choices?: unknown[] }).choices
+    if (!Array.isArray(choices)) return line
+
+    let mutated = false
+    for (const choice of choices) {
+      if (!choice || typeof choice !== 'object') continue
+      const c = choice as { delta?: Record<string, unknown>; finish_reason?: string | null }
+      const delta = c.delta
+      if (delta && typeof delta === 'object') {
+        if (typeof delta.content === 'string') assistantText += delta.content
+        const toolCalls = delta.tool_calls
+        if (Array.isArray(toolCalls)) {
+          const kept: unknown[] = []
+          for (const tc of toolCalls) {
+            const t = tc as {
+              index?: number
+              id?: string
+              type?: string
+              function?: { name?: string; arguments?: string }
+            }
+            const idx = typeof t?.index === 'number' ? t.index : -1
+            if (t?.type === 'builtin_function') {
+              builtinByIndex.set(idx, {
+                id: t.id ?? `builtin_${idx}`,
+                name: t.function?.name ?? '$web_search',
+                args: t.function?.arguments ?? '',
+              })
+            } else if (!t?.type && builtinByIndex.has(idx)) {
+              builtinByIndex.get(idx)!.args += t.function?.arguments ?? ''
+            } else {
+              if (t?.type === 'function') sawFunctionCall = true
+              kept.push(tc)
+            }
+          }
+          if (kept.length !== toolCalls.length) {
+            mutated = true
+            if (kept.length === 0) delete delta.tool_calls
+            else delta.tool_calls = kept
+          }
+        }
+      }
+      if (c.finish_reason === 'tool_calls' && builtinByIndex.size > 0 && !sawFunctionCall) {
+        heldFinish = true
+        c.finish_reason = null
+        mutated = true
+      }
+    }
+
+    if (!mutated) return line
+    // After stripping, drop the chunk unless something useful survived:
+    // usage, a finish_reason, or any delta field besides a bare `role`.
+    const keep =
+      (parsed as { usage?: unknown }).usage != null ||
+      choices.some((ch) => {
+        const c = ch as { delta?: Record<string, unknown>; finish_reason?: string | null }
+        if (c?.finish_reason) return true
+        if (!c?.delta) return true
+        return Object.keys(c.delta).some((k) => k !== 'role' && c.delta![k] != null)
+      })
+    return keep ? 'data: ' + JSON.stringify(parsed) : null
+  }
+
+  return {
+    processLine,
+    /** True once the response ended on builtin-only tool calls. */
+    get needsFollowUp(): boolean {
+      return heldFinish && builtinByIndex.size > 0
+    },
+    get builtinCalls(): BuiltinCall[] {
+      return [...builtinByIndex.values()]
+    },
+    get assistantText(): string {
+      return assistantText
+    },
+  }
+}
+
+/**
+ * Single-line convenience wrapper (fresh filter per call) — keeps the old
+ * pure-function contract for the smoke test.
+ */
+export function filterSseLine(line: string): string | null {
+  return createKimiSearchFilter().processLine(line)
+}
+
+interface ChatRequestBody {
+  messages?: unknown[]
+  [k: string]: unknown
+}
+
+/** Request body for the next round: the assistant's builtin tool_calls
+ *  plus one tool message per call echoing its arguments verbatim. */
+export function buildFollowUpBody(
+  body: ChatRequestBody,
+  calls: BuiltinCall[],
+  assistantText: string,
+): ChatRequestBody {
+  return {
+    ...body,
+    messages: [
+      ...(body.messages ?? []),
+      {
+        role: 'assistant',
+        content: assistantText,
+        tool_calls: calls.map((c) => ({
+          id: c.id,
+          type: 'builtin_function',
+          function: { name: c.name, arguments: c.args },
+        })),
+      },
+      ...calls.map((c) => ({
+        role: 'tool',
+        tool_call_id: c.id,
+        name: c.name,
+        content: c.args,
+      })),
+    ],
+  }
+}
+
+/**
+ * Wrap a streamed Kimi response. `followUp` supplies the parsed request
+ * body and a way to re-POST it; without it, builtin calls are only
+ * stripped (old behaviour).
+ */
+export function wrapKimiSearchResponse(
+  response: Response,
+  followUp?: {
+    body: ChatRequestBody
+    refetch: (body: ChatRequestBody) => Promise<Response>
+  },
+): Response {
+  // Bail-outs: error responses (let the SDK see real errors), bodiless
+  // responses, and non-streaming JSON (the chat path always streams).
+  if (!response.body || !response.ok) return response
   const ct = response.headers.get('content-type') ?? ''
   if (!ct.toLowerCase().includes('text/event-stream')) return response
 
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
   const encoder = new TextEncoder()
-  let pending = '' // incomplete line carried across read() chunks
+  let current = response
+  let body = followUp?.body
+  let cancelled = false
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
 
   const stream = new ReadableStream<Uint8Array>({
-    async pull(controller) {
+    async start(controller) {
       try {
-        const { value, done } = await reader.read()
-        if (done) {
-          // Flush whatever's left even though it's an incomplete
-          // line — better than dropping the tail of the stream.
-          if (pending.length > 0) {
-            controller.enqueue(encoder.encode(pending))
-            pending = ''
+        for (let round = 0; ; round++) {
+          const filter = createKimiSearchFilter()
+          reader = current.body!.getReader()
+          const decoder = new TextDecoder()
+          let pending = '' // incomplete line carried across read() chunks
+          for (;;) {
+            const { value, done } = await reader.read()
+            if (done) break
+            const text = pending + decoder.decode(value, { stream: true })
+            // OpenAI-compat SSE puts each event on one `data:` line, so
+            // splitting on `\n` is enough. Last segment = in-progress line.
+            const lines = text.split('\n')
+            pending = lines.pop() ?? ''
+            const out: string[] = []
+            for (const raw of lines) {
+              const filtered = filter.processLine(raw)
+              if (filtered !== null) out.push(filtered)
+            }
+            if (out.length > 0) controller.enqueue(encoder.encode(out.join('\n') + '\n'))
           }
-          controller.close()
-          return
+          if (pending) {
+            const filtered = filter.processLine(pending)
+            if (filtered !== null) controller.enqueue(encoder.encode(filtered + '\n'))
+          }
+          if (cancelled) return
+
+          if (!filter.needsFollowUp) break
+          if (!followUp || !body || round + 1 >= MAX_SEARCH_ROUNDS) {
+            // Can't (or won't) continue the search — end the stream cleanly
+            // so the SDK finishes the step instead of hanging.
+            controller.enqueue(
+              encoder.encode(
+                'data: ' +
+                  JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) +
+                  '\n\ndata: [DONE]\n\n',
+              ),
+            )
+            break
+          }
+          body = buildFollowUpBody(body, filter.builtinCalls, filter.assistantText)
+          console.log(`[kimi-search] search round ${round + 1} → re-POST with tool result`)
+          current = await followUp.refetch(body)
+          if (!current.ok || !current.body) {
+            const detail = await current.text().catch(() => '')
+            controller.enqueue(
+              encoder.encode(
+                'data: ' +
+                  JSON.stringify({
+                    error: {
+                      message: `Kimi 联网搜索续传失败：${current.status} ${detail.slice(0, 200)}`,
+                      type: 'kimi_search_followup_failed',
+                    },
+                  }) +
+                  '\n\n',
+              ),
+            )
+            break
+          }
         }
-        const text = pending + decoder.decode(value, { stream: true })
-        // SSE messages can carry a multi-line `data:` payload separated
-        // by `\n\n`. For OpenAI-compat each event is a single `data:` line,
-        // so splitting on `\n` is sufficient — and lets us scan/filter
-        // line-by-line cleanly. The last segment is the in-progress line.
-        const lines = text.split('\n')
-        pending = lines.pop() ?? ''
-        const out: string[] = []
-        for (const raw of lines) {
-          const filtered = filterSseLine(raw)
-          if (filtered !== null) out.push(filtered)
-        }
-        if (out.length > 0) {
-          controller.enqueue(encoder.encode(out.join('\n') + '\n'))
-        }
+        controller.close()
       } catch (err) {
         controller.error(err)
       }
     },
     cancel() {
-      void reader.cancel()
+      cancelled = true
+      void reader?.cancel()
     },
   })
 
@@ -89,65 +281,4 @@ export function wrapKimiSearchResponse(response: Response): Response {
     statusText: response.statusText,
     headers: response.headers,
   })
-}
-
-/**
- * Inspect a single SSE line. Returns:
- *   - the original line if it's untouched (non-data, [DONE], no
- *     builtin_function entries)
- *   - a rewritten line if some builtin_function entries needed
- *     removal but other content survives
- *   - null if the whole line should be dropped (delta carried ONLY
- *     a builtin_function marker, nothing else)
- *
- * Exported for unit testing.
- */
-export function filterSseLine(line: string): string | null {
-  if (!line.startsWith('data: ')) return line
-  const payload = line.slice(6)
-  if (payload === '[DONE]' || payload.trim() === '') return line
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(payload)
-  } catch {
-    return line // malformed JSON — pass through; parser will deal
-  }
-  if (!parsed || typeof parsed !== 'object') return line
-  const choices = (parsed as { choices?: unknown[] }).choices
-  if (!Array.isArray(choices)) return line
-
-  let chunkBecameEmpty = true
-  let mutated = false
-  for (const choice of choices) {
-    if (!choice || typeof choice !== 'object') continue
-    const delta = (choice as { delta?: Record<string, unknown> }).delta
-    if (!delta || typeof delta !== 'object') {
-      // No delta = could be a finish_reason chunk; preserve.
-      chunkBecameEmpty = false
-      continue
-    }
-    const toolCalls = delta.tool_calls
-    if (Array.isArray(toolCalls)) {
-      const filtered = toolCalls.filter(
-        (tc) =>
-          !(
-            tc &&
-            typeof tc === 'object' &&
-            (tc as { type?: unknown }).type === 'builtin_function'
-          ),
-      )
-      if (filtered.length !== toolCalls.length) {
-        mutated = true
-        if (filtered.length === 0) delete delta.tool_calls
-        else delta.tool_calls = filtered
-      }
-    }
-    // Anything else in the delta (content / role / finish_reason etc)
-    // means this chunk still carries useful info.
-    if (Object.keys(delta).length > 0) chunkBecameEmpty = false
-  }
-
-  if (!mutated) return line
-  if (chunkBecameEmpty) return null
-  return 'data: ' + JSON.stringify(parsed)
 }

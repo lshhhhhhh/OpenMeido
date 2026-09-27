@@ -89,7 +89,7 @@ function getBackends() {
       baseURL: 'https://api.deepseek.com/v1',
       apiKey: process.env.DEEPSEEK_API_KEY,
     })
-    out.push({ label: 'DeepSeek · deepseek-chat', model: openai.chat('deepseek-chat') })
+    out.push({ label: 'DeepSeek · deepseek-flash', model: openai.chat('deepseek-flash') })
   }
   if (out.length === 0) {
     throw new Error('no DEEPSEEK_API_KEY in .env')

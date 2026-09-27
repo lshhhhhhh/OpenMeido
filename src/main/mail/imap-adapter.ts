@@ -5,10 +5,20 @@
  *
  * Connection lifecycle:
  *   - Lazy connect on first call. One persistent connection per adapter
- *     instance, kept alive via imapflow's built-in IDLE/NOOP.
- *   - Reconnect transparently if the server drops us (network blip, server
- *     idle timeout). One retry per call.
+ *     instance, kept alive via imapflow's built-in IDLE/NOOP. Concurrent
+ *     callers on a cold adapter share ONE in-flight connect.
+ *   - If the server drops us (network blip, server idle timeout, socket
+ *     error), the 'error' / 'close' listeners discard the client and the
+ *     NEXT call dials a fresh one. The call that hit the drop fails — no
+ *     automatic retry.
+ *   - Every public operation runs under a wall-clock timeout. A wedged
+ *     server fails the tool call (and the connection is torn down) instead
+ *     of hanging the chat turn until imapflow's socket timeout.
  *   - close() logs out and tears down. Safe to call multiple times.
+ *
+ * Message ids: INBOX messages are the bare UID ("12345"); messages in the
+ * Sent mailbox are "sent:<uid>". readMessage accepts both, which is what
+ * lets callers walk a reply chain that alternates INBOX ↔ Sent.
  */
 
 import { ImapFlow } from 'imapflow'
@@ -95,6 +105,63 @@ export interface ImapAdapterOptions {
 
 const SNIPPET_LEN = 200
 
+/** TCP connect + greeting + LOGIN budget. imapflow's own connectionTimeout
+ *  only covers the TCP handshake and defaults to 90s; this caps the whole
+ *  connect() including auth. */
+const CONNECT_TIMEOUT_MS = 20_000
+/** Wall-clock budget for one public adapter call (listInbox, readMessage,
+ *  ...). Generous for a single IMAP round-trip set; if we blow it the
+ *  server is wedged, not slow. */
+const OP_TIMEOUT_MS = 45_000
+/** LOGOUT is a courtesy — don't let a dead server stall close(). */
+const LOGOUT_TIMEOUT_MS = 5_000
+
+/** Reject with a timeout error if `p` doesn't settle within `ms`. The
+ *  underlying promise keeps running (JS has no cancellation) — pass
+ *  `onTimeout` to tear the connection down so it actually stops. */
+async function withTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  label: string,
+  onTimeout?: () => void,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      console.warn(`[imap] ${label} timed out after ${ms}ms`)
+      onTimeout?.()
+      reject(new Error(`IMAP ${label} 超时（${Math.round(ms / 1000)} 秒无响应）`))
+    }, ms)
+  })
+  try {
+    // Promise.race subscribes to `p`, so a late rejection after we time
+    // out is observed (no unhandledRejection).
+    return await Promise.race([p, timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Which mailbox a message id points into. See the id note at the top. */
+type MailBox = 'INBOX' | 'SENT'
+interface MessageRef {
+  box: MailBox
+  uid: number
+}
+
+/** "12345" → INBOX uid; "sent:12345" → Sent uid; anything else → null. */
+function parseMessageRef(id: string): MessageRef | null {
+  const s = id.trim()
+  if (/^\d+$/.test(s)) return { box: 'INBOX', uid: Number(s) }
+  const m = /^sent:(\d+)$/i.exec(s)
+  if (m && m[1]) return { box: 'SENT', uid: Number(m[1]) }
+  return null
+}
+
+function formatMessageRef(ref: MessageRef): string {
+  return ref.box === 'SENT' ? `sent:${ref.uid}` : String(ref.uid)
+}
+
 /**
  * Pull the first parent Message-Id out of an `In-Reply-To` header value.
  * mailparser returns it as:
@@ -114,11 +181,28 @@ function normalizeInReplyTo(raw: unknown): string | undefined {
 
 export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
   let client: ImapFlow | null = null
+  /** In-flight connect shared by concurrent callers. Without it, N tool
+   *  calls on a cold adapter each dialed their own ImapFlow and only the
+   *  last one assigned to `client` survived — the rest leaked. */
+  let connecting: Promise<ImapFlow> | null = null
   let closed = false
+  /** Resolved Sent mailbox path. Folder layout doesn't change under a
+   *  live session, and thread walking resolves it once per hop. */
+  let sentPathCache: string | null = null
 
-  async function getClient(): Promise<ImapFlow> {
-    if (closed) throw new Error('imap-adapter: closed')
-    if (client && client.usable) return client
+  /** Forget `c` (if it's still the current client) and kill its socket.
+   *  close() is idempotent and rejects any pending commands / mailbox
+   *  locks, so whoever was awaiting on `c` unblocks with an error. */
+  function discardClient(c: ImapFlow): void {
+    if (client === c) client = null
+    try {
+      c.close()
+    } catch {
+      /* already closed */
+    }
+  }
+
+  async function openClient(): Promise<ImapFlow> {
     const c = new ImapFlow({
       host: opts.host,
       port: opts.port,
@@ -127,18 +211,73 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
       // imapflow ships a noisy default logger that spams stdout with every
       // IMAP frame. Silence it; serious errors still throw from awaited calls.
       logger: false,
+      // Defaults are 90s / 16s / 5min — far longer than a chat turn should
+      // wait. socketTimeout is inactivity-based: while IDLE-ing imapflow
+      // answers it with a NOOP, otherwise it errors and we reconnect.
+      connectionTimeout: CONNECT_TIMEOUT_MS,
+      greetingTimeout: 15_000,
+      socketTimeout: 2 * 60_000,
     })
-    await c.connect()
+    // ImapFlow is an EventEmitter: an 'error' with no listener is thrown
+    // as an uncaught exception and takes the main process down with it.
+    // imapflow already schedules close() after emitting, we just make
+    // sure the next call doesn't pick this client up again.
+    c.on('error', (err: Error) => {
+      console.warn('[imap] connection error:', err?.message ?? err)
+      discardClient(c)
+    })
+    c.on('close', () => {
+      if (client === c) {
+        console.log('[imap] connection closed; next call will reconnect')
+        client = null
+      }
+    })
+    try {
+      await withTimeout(c.connect(), CONNECT_TIMEOUT_MS, 'connect')
+    } catch (err) {
+      discardClient(c)
+      throw err
+    }
+    if (closed) {
+      // Adapter was closed while we were dialing — don't leak the socket.
+      discardClient(c)
+      throw new Error('imap-adapter: closed')
+    }
     client = c
     return c
   }
 
-  async function withInbox<T>(fn: (c: ImapFlow) => Promise<T>): Promise<T> {
-    return withFolder('INBOX', fn)
+  async function getClient(): Promise<ImapFlow> {
+    if (closed) throw new Error('imap-adapter: closed')
+    if (client && client.usable) return client
+    // Stale client (errored / server hung up): make sure its socket is
+    // gone before dialing a replacement.
+    if (client) discardClient(client)
+    if (!connecting) {
+      // Cleared on success AND failure — a failed dial must not poison
+      // every later call with the same rejected promise.
+      connecting = openClient().finally(() => {
+        connecting = null
+      })
+    }
+    return connecting
   }
 
-  /** Same as withInbox but for any folder path the user has. Lock + run
-   *  + release. Throws cleanly if the folder doesn't exist on the server. */
+  /**
+   * Run one public operation under OP_TIMEOUT_MS. On timeout the current
+   * connection is torn down: it's wedged (or at least queued behind a
+   * wedged command — imapflow serializes per connection), and closing it
+   * also rejects the abandoned operation's pending commands so it
+   * releases its mailbox lock instead of lingering.
+   */
+  function withOpTimeout<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    return withTimeout(fn(), OP_TIMEOUT_MS, label, () => {
+      if (client) discardClient(client)
+    })
+  }
+
+  /** Lock `folderPath` + run + release. Throws cleanly if the folder
+   *  doesn't exist on the server. */
   async function withFolder<T>(
     folderPath: string,
     fn: (c: ImapFlow) => Promise<T>,
@@ -202,31 +341,40 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
    * ("Sent", "Sent Items", "[Gmail]/Sent Mail", "已发送邮件", ...) so we
    * prefer the IMAP SPECIAL-USE attribute `\Sent` and fall back to a
    * case-insensitive name match. Returns null when no Sent box is found —
-   * unusual but possible on minimal IMAP servers.
+   * unusual but possible on minimal IMAP servers. A found path is cached
+   * for the adapter's lifetime (a miss is not, so it's re-checked).
    */
   async function findSentMailbox(c: ImapFlow): Promise<string | null> {
+    if (sentPathCache) return sentPathCache
     type Box = { path: string; name?: string; specialUse?: string }
     const list = (await c.list()) as Box[]
     const bySpecial = list.find((b) => b.specialUse === '\\Sent')
-    if (bySpecial) return bySpecial.path
-    const byName = list.find((b) => /^sent/i.test(b.name ?? '') || /sent[\s_-]?(items|mail)/i.test(b.path))
-    return byName?.path ?? null
+    const byName = bySpecial
+      ? undefined
+      : list.find((b) => /^sent/i.test(b.name ?? '') || /sent[\s_-]?(items|mail)/i.test(b.path))
+    sentPathCache = bySpecial?.path ?? byName?.path ?? null
+    return sentPathCache
+  }
+
+  /** Map a MailBox tag to the server's real mailbox path (null = this
+   *  server has no Sent box). */
+  async function mailboxPath(c: ImapFlow, box: MailBox): Promise<string | null> {
+    return box === 'INBOX' ? 'INBOX' : findSentMailbox(c)
   }
 
   /**
-   * Search the Sent mailbox for a message with the given RFC 5322
-   * Message-Id (including the angle brackets) and return its UID, or null
-   * if not found. Caller is responsible for the surrounding mailbox lock
-   * lifecycle — we acquire and release our own here, so the caller must
-   * NOT already hold a different mailbox lock.
+   * Search one mailbox for a message with the given RFC 5322 Message-Id
+   * (including the angle brackets) and return its UID, or null if not
+   * found. We acquire and release our own mailbox lock here, so the caller
+   * must NOT already hold one (imapflow locks are per connection — that
+   * would deadlock).
    */
-  async function findSentUidByMessageId(
+  async function findUidByMessageId(
     c: ImapFlow,
+    path: string,
     messageId: string,
   ): Promise<number | null> {
-    const sentPath = await findSentMailbox(c)
-    if (!sentPath) return null
-    const lock = await c.getMailboxLock(sentPath)
+    const lock = await c.getMailboxLock(path)
     try {
       const uids = (await c.search(
         // `header` search clauses are { name: value } in imapflow's typing.
@@ -243,24 +391,51 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
   }
 
   /**
+   * Locate the parent of a reply by Message-Id, searching `order` in turn.
+   * Returns the first hit as a MessageRef, or null if no searched mailbox
+   * has it.
+   */
+  async function findParentRef(
+    messageId: string,
+    order: MailBox[],
+  ): Promise<MessageRef | null> {
+    const c = await getClient()
+    for (const box of order) {
+      const path = await mailboxPath(c, box)
+      if (!path) continue
+      const uid = await findUidByMessageId(c, path, messageId)
+      if (uid !== null) return { box, uid }
+    }
+    return null
+  }
+
+  /**
    * Recursive readMessage that mirrors the public adapter signature but
    * decrements a depth budget as it walks up the reply chain. depth=1
    * fetches the message + its immediate parent; depth=0 fetches just the
    * message (used to prevent the parent's parent's... recursion).
+   *
+   * Accepts both id forms ("<uid>" = INBOX, "sent:<uid>" = Sent). This
+   * used to be `Number(id)` — every "sent:<uid>" parent id came back NaN →
+   * null, so chat/tools/mail.ts buildEmailThreadContext never got past
+   * the first parent, and readEmail(parent.id) (which types.ts documents
+   * as the way to walk further) always failed.
    */
   async function readMessageWithDepth(
     id: string,
     depth: number,
   ): Promise<MailMessage | null> {
-    const uid = Number(id)
-    if (!Number.isFinite(uid)) return null
+    const ref = parseMessageRef(id)
+    if (!ref) return null
+    const path = await mailboxPath(await getClient(), ref.box)
+    if (!path) return null // "sent:<uid>" but this server has no Sent box
 
-    // First leg: fetch + parse the requested message from INBOX. We release
-    // the INBOX lock BEFORE looking at Sent because imapflow serializes
-    // mailbox access per connection — holding INBOX while we ask for Sent
-    // would deadlock.
-    const main = await withInbox(async (c) => {
-      const msg = await c.fetchOne(String(uid), { source: true }, { uid: true })
+    // First leg: fetch + parse the requested message. We release the lock
+    // BEFORE looking up the parent because imapflow serializes mailbox
+    // access per connection — holding this mailbox while we ask for
+    // another would deadlock.
+    const main = await withFolder(path, async (c) => {
+      const msg = await c.fetchOne(String(ref.uid), { source: true }, { uid: true })
       if (!msg || !msg.source) return null
       const parsed = await simpleParser(msg.source)
       return parsed
@@ -278,7 +453,7 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
     const inReplyTo = normalizeInReplyTo(parsed.inReplyTo)
 
     const result: MailMessage = {
-      id,
+      id: formatMessageRef(ref),
       from: parsed.from?.text ?? '',
       to: toList.map((a) => a.address ?? '').filter(Boolean),
       subject: parsed.subject ?? '',
@@ -295,60 +470,25 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
     }
 
     // Second leg: walk up one parent if this message is a reply and depth
-    // allows. We restrict the parent search to the Sent folder because the
-    // user's documented use case is "I got a reply, what did I say earlier?"
-    // For inbound chains (someone else's reply to someone else) the parent
-    // wouldn't be in Sent anyway. Failing silently is fine: parent stays
-    // null and the model sees that the chain ends here.
+    // allows. Where the parent lives depends on direction: an inbound reply
+    // usually answers something the user sent (→ Sent first), while the
+    // user's own sent reply answers something they received (→ INBOX
+    // first). The other box is the fallback — CC'd multi-party threads,
+    // or the user bumping their own mail. Failing silently is fine:
+    // parent stays null and the model sees that the chain ends here.
     if (depth > 0 && inReplyTo) {
       try {
-        const c = await getClient()
-        const parentUid = await findSentUidByMessageId(c, inReplyTo)
-        if (parentUid !== null) {
-          // Fetch from Sent directly (NOT via withInbox).
-          const sentPath = await findSentMailbox(c)
-          if (sentPath) {
-            const lock = await c.getMailboxLock(sentPath)
-            try {
-              const pmsg = await c.fetchOne(
-                String(parentUid),
-                { source: true },
-                { uid: true },
-              )
-              if (pmsg && pmsg.source) {
-                const pparsed = await simpleParser(pmsg.source)
-                const pTo = Array.isArray(pparsed.to)
-                  ? pparsed.to.flatMap((a) => a.value)
-                  : pparsed.to?.value ?? []
-                result.parent = {
-                  id: `sent:${parentUid}`,
-                  from: pparsed.from?.text ?? '',
-                  to: pTo.map((a) => a.address ?? '').filter(Boolean),
-                  subject: pparsed.subject ?? '',
-                  body: extractBody(pparsed),
-                  ts: (pparsed.date ?? new Date()).toISOString(),
-                  unread: false,
-                  attachments: (pparsed.attachments ?? []).map((a) => ({
-                    filename: a.filename ?? '(unnamed)',
-                    sizeBytes: a.size ?? 0,
-                    mimeType: a.contentType ?? 'application/octet-stream',
-                  })),
-                  messageId: pparsed.messageId,
-                  inReplyTo: normalizeInReplyTo(pparsed.inReplyTo),
-                  // We deliberately don't recurse further — depth=1 fetches
-                  // exactly one parent. The model can ask for grandparents
-                  // by reading the parent.id explicitly.
-                }
-              }
-            } finally {
-              lock.release()
-            }
-          }
-        } else {
-          // We tried and didn't find it — surface null so the model knows
-          // the chain is broken (vs missing inReplyTo entirely).
-          result.parent = null
-        }
+        const order: MailBox[] = ref.box === 'SENT' ? ['INBOX', 'SENT'] : ['SENT', 'INBOX']
+        const parentRef = await findParentRef(inReplyTo, order)
+        const isSelf = parentRef && parentRef.box === ref.box && parentRef.uid === ref.uid
+        // depth - 1 → the parent comes back without ITS parent; callers
+        // walk further by reading parent.id (it's a valid readMessage id).
+        // We tried and didn't find it → null so the model knows the chain
+        // is broken (vs missing inReplyTo entirely).
+        result.parent =
+          parentRef && !isSelf
+            ? await readMessageWithDepth(formatMessageRef(parentRef), depth - 1)
+            : null
       } catch {
         // Parent lookup is best-effort. Network blip / permission error
         // shouldn't fail the main read.
@@ -381,7 +521,7 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
       // collect summaries + the In-Reply-To header on each so we know
       // which ones are replies.
       const folderPath = o.folder && o.folder.trim() ? o.folder : 'INBOX'
-      const results = await withFolder(folderPath, async (c) => {
+      const results = await withOpTimeout('listInbox', () => withFolder(folderPath, async (c) => {
         // Gmail's category:primary filter only makes sense on the INBOX
         // virtual folder, not on user-labeled folders. Skip the filter
         // when reading anything other than INBOX.
@@ -453,7 +593,7 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
           })
         }
         return out
-      })
+      }))
 
       // Phase 2 (email-with-context): look up each reply's parent in Sent.
       // Default OFF (changed 2026-05): per-reply Sent search was the
@@ -465,105 +605,114 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
       if (results.length === 0 || o.includeParents !== true) return results
       const needsParent = results.filter((r) => r.inReplyTo)
       if (needsParent.length === 0) return results
+      // Own timeout budget, separate from Phase 1: N serial searches can
+      // legitimately take a while, and a timeout here isn't fatal — items
+      // are filled in place, so we return whatever parents we got.
       try {
-        const c = await getClient()
-        const sentPath = await findSentMailbox(c)
-        if (!sentPath) return results
-        const lock = await c.getMailboxLock(sentPath)
-        try {
-          for (const item of needsParent) {
-            try {
-              const messageId = item.inReplyTo
-              if (!messageId) continue
-              const uids = (await c.search(
-                { header: { 'message-id': messageId } },
-                { uid: true },
-              )) as number[] | false
-              if (!uids || uids.length === 0) {
-                item.parent = null
-                continue
+        await withOpTimeout('listInbox parents', async () => {
+          const c = await getClient()
+          const sentPath = await findSentMailbox(c)
+          if (!sentPath) return
+          const lock = await c.getMailboxLock(sentPath)
+          try {
+            for (const item of needsParent) {
+              try {
+                const messageId = item.inReplyTo
+                if (!messageId) continue
+                const uids = (await c.search(
+                  { header: { 'message-id': messageId } },
+                  { uid: true },
+                )) as number[] | false
+                if (!uids || uids.length === 0) {
+                  item.parent = null
+                  continue
+                }
+                const parentUid = uids[uids.length - 1]
+                if (parentUid === undefined) continue
+                // Fetch envelope + partial body for the parent summary —
+                // matches the byte-range optimization on Phase 1.
+                const pmsg = await c.fetchOne(
+                  String(parentUid),
+                  {
+                    envelope: true,
+                    source: { start: 0, maxLength: 8192 },
+                  },
+                  { uid: true },
+                )
+                if (!pmsg) {
+                  item.parent = null
+                  continue
+                }
+                const env = pmsg.envelope
+                const from = env?.from?.[0]
+                const fromStr = from
+                  ? `${from.name ? `${from.name} ` : ''}<${from.address ?? ''}>`.trim()
+                  : ''
+                const psnippet = await extractSnippet(pmsg.source)
+                item.parent = {
+                  id: formatMessageRef({ box: 'SENT', uid: parentUid }),
+                  from: fromStr,
+                  subject: env?.subject ?? '',
+                  snippet: psnippet,
+                  ts: new Date(
+                    env?.date ?? pmsg.internalDate ?? Date.now(),
+                  ).toISOString(),
+                  unread: false,
+                }
+              } catch {
+                // Per-item failure shouldn't kill the whole list. Leave parent
+                // as undefined and move on.
               }
-              const parentUid = uids[uids.length - 1]
-              if (parentUid === undefined) continue
-              // Fetch envelope + partial body for the parent summary —
-              // matches the byte-range optimization on Phase 1.
-              const pmsg = await c.fetchOne(
-                String(parentUid),
-                {
-                  envelope: true,
-                  source: { start: 0, maxLength: 8192 },
-                },
-                { uid: true },
-              )
-              if (!pmsg) {
-                item.parent = null
-                continue
-              }
-              const env = pmsg.envelope
-              const from = env?.from?.[0]
-              const fromStr = from
-                ? `${from.name ? `${from.name} ` : ''}<${from.address ?? ''}>`.trim()
-                : ''
-              const psnippet = await extractSnippet(pmsg.source)
-              item.parent = {
-                id: `sent:${parentUid}`,
-                from: fromStr,
-                subject: env?.subject ?? '',
-                snippet: psnippet,
-                ts: new Date(
-                  env?.date ?? pmsg.internalDate ?? Date.now(),
-                ).toISOString(),
-                unread: false,
-              }
-            } catch {
-              // Per-item failure shouldn't kill the whole list. Leave parent
-              // as undefined and move on.
             }
+          } finally {
+            lock.release()
           }
-        } finally {
-          lock.release()
-        }
+        })
       } catch {
-        // Sent folder unreachable / lock failed. List works without parents,
-        // just not as informative.
+        // Sent folder unreachable / lock failed / timed out. List works
+        // without parents, just not as informative.
       }
       return results
     },
 
     async readMessage(id: string) {
-      return readMessageWithDepth(id, 1)
+      return withOpTimeout('readMessage', () => readMessageWithDepth(id, 1))
     },
 
-    async listFolders() {
-      const c = await getClient()
-      // imapflow's c.list() walks LIST/LSUB and returns an array of
-      // { path, name, delimiter, flags, specialUse } per mailbox. The
-      // `name` field is the leaf segment (decoded from modified-UTF7 by
-      // imapflow); `path` is the full hierarchy path we need for
-      // getMailboxLock. specialUse is one of '\\Inbox' / '\\Sent' /
-      // '\\Drafts' / '\\Junk' / '\\Trash' / '\\Archive' / '\\All' when
-      // the server tags it (RFC 6154); undefined otherwise.
-      const raw = await c.list()
-      const out: MailFolder[] = []
-      for (const f of raw) {
-        const path = f.path
-        const su = (f as { specialUse?: string }).specialUse
-        out.push({
-          path,
-          name: f.name || path,
-          isInbox: path === 'INBOX' || su === '\\Inbox',
-          isSpecialUse: typeof su === 'string' && su.length > 0,
-        })
-      }
-      return out
+    listFolders() {
+      return withOpTimeout('listFolders', async () => {
+        const c = await getClient()
+        // imapflow's c.list() walks LIST/LSUB and returns an array of
+        // { path, name, delimiter, flags, specialUse } per mailbox. The
+        // `name` field is the leaf segment (decoded from modified-UTF7 by
+        // imapflow); `path` is the full hierarchy path we need for
+        // getMailboxLock. specialUse is one of '\\Inbox' / '\\Sent' /
+        // '\\Drafts' / '\\Junk' / '\\Trash' / '\\Archive' / '\\All' when
+        // the server tags it (RFC 6154); undefined otherwise.
+        const raw = await c.list()
+        const out: MailFolder[] = []
+        for (const f of raw) {
+          const path = f.path
+          const su = (f as { specialUse?: string }).specialUse
+          out.push({
+            path,
+            name: f.name || path,
+            isInbox: path === 'INBOX' || su === '\\Inbox',
+            isSpecialUse: typeof su === 'string' && su.length > 0,
+          })
+        }
+        return out
+      })
     },
 
     async testConnection() {
       try {
-        const c = await getClient()
-        // Just opening INBOX is enough to prove auth + reachability.
-        const lock = await c.getMailboxLock('INBOX')
-        lock.release()
+        await withOpTimeout('testConnection', async () => {
+          const c = await getClient()
+          // Just opening INBOX is enough to prove auth + reachability.
+          const lock = await c.getMailboxLock('INBOX')
+          lock.release()
+        })
         return { ok: true }
       } catch (err) {
         return {
@@ -575,14 +724,19 @@ export function createImapAdapter(opts: ImapAdapterOptions): MailAdapter {
 
     async close() {
       if (closed) return
+      // Set first: an in-flight openClient() checks it after connect and
+      // discards its fresh socket instead of installing it.
       closed = true
-      if (client) {
+      const c = client
+      client = null
+      if (c) {
         try {
-          await client.logout()
+          await withTimeout(c.logout(), LOGOUT_TIMEOUT_MS, 'logout')
         } catch {
           /* server may have already cut us off */
         }
-        client = null
+        // LOGOUT normally closes the socket; make sure even if it hung.
+        discardClient(c)
       }
     },
   }

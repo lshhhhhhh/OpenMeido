@@ -5,22 +5,42 @@
 // FIRST.
 import './demo-mode.js'
 
-// SECOND IMPORT — runs the reset wipe (if argv / sentinel says to).
+// Exits right here if another instance already owns this userData dir.
+import './single-instance.js'
+
+// NEXT IMPORT — runs the reset wipe (if argv / sentinel says to).
 // Must come before any module that reads userData files at import time
 // (config.ts, lines-host.ts, memory adapters, etc.) — otherwise those
 // modules load stale data into in-memory state and a later setConfig()
 // would persist that stale data right back, defeating the reset.
 import './reset-handler.js'
 
-import { app, BrowserWindow, ipcMain, protocol, dialog, shell, screen } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  protocol,
+  dialog,
+  shell,
+  screen,
+  session,
+  Notification,
+} from 'electron'
 import { join, extname } from 'node:path'
 import { createReadStream, writeFileSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { Readable } from 'node:stream'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { runChat } from './chat.js'
-import { getConfig, setConfig, onConfigChange } from './config.js'
+import { setToolGuardWindow } from './chat/tool-guard.js'
+import {
+  getConfig,
+  setConfig,
+  onConfigChange,
+  getConfigBootIssues,
+  unlockConfigSecrets,
+} from './config.js'
 import {
   initMemory,
   getMemoryService,
@@ -173,6 +193,30 @@ try {
 
 let mainWindow: BrowserWindow | null = null
 
+/** Vite dev server URL — honored only in dev, never in a packaged build
+ *  (an env var shouldn't be able to point the real app at another page). */
+const DEV_RENDERER_URL = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined
+/** The app's own pages (main window + table window), as decoded
+ *  lower-case file paths — compared decoded so a non-ASCII install path
+ *  (e.g. a Chinese Windows user name) matches however it's encoded. */
+const APP_PAGE_PATHS = ['index.html', 'table.html'].map((f) =>
+  decodeURIComponent(pathToFileURL(join(__dirname, '../renderer', f)).pathname).toLowerCase(),
+)
+
+/** True for one of the app's own renderer pages (ignoring hash / query). */
+function isAppPageUrl(url: string): boolean {
+  try {
+    const u = new URL(url)
+    if (DEV_RENDERER_URL && u.origin === new URL(DEV_RENDERER_URL).origin) return true
+    return (
+      u.protocol === 'file:' &&
+      APP_PAGE_PATHS.includes(decodeURIComponent(u.pathname).toLowerCase())
+    )
+  } catch {
+    return false
+  }
+}
+
 function createWindow(): void {
   const cfg = getConfig()
 
@@ -222,10 +266,49 @@ function createWindow(): void {
     },
   })
 
-  if (process.env.ELECTRON_RENDERER_URL) {
-    void win.loadURL(process.env.ELECTRON_RENDERER_URL)
+  if (DEV_RENDERER_URL) {
+    void win.loadURL(DEV_RENDERER_URL)
   } else {
     void win.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+
+  // Never let the main window leave the app page. Dropping a file or a
+  // link anywhere outside the chat's drop zone used to navigate the
+  // whole window to it — and the preload (window.api: config incl. API
+  // keys, chat → tools) re-attaches to whatever page loads. http(s)
+  // links go to the OS browser instead; everything else is dropped.
+  win.webContents.on('will-navigate', (event, url) => {
+    if (isAppPageUrl(url)) return // dev HMR full reload
+    event.preventDefault()
+    if (url.startsWith('http://') || url.startsWith('https://')) void shell.openExternal(url)
+  })
+  win.webContents.on('will-attach-webview', (event) => event.preventDefault())
+
+  // Debug aid: OPENMEIDO_LOG_RENDERER=1 mirrors renderer warnings/errors
+  // (CSP violations, load failures) into the main log — the only way to
+  // see them from a packaged build, where DevTools is closed.
+  if (process.env.OPENMEIDO_LOG_RENDERER === '1') {
+    win.webContents.on('console-message', (e) => {
+      if (e.level === 'warning' || e.level === 'error') {
+        console.log(`[renderer:${e.level}] ${e.message} (${e.sourceId}:${e.lineNumber})`)
+      }
+    })
+  }
+  // Debug aid: OPENMEIDO_DEBUG_CAPTURE=<file.png> saves a capture of this
+  // window (only its own pixels) 15s after load — for checking that a
+  // packaged build actually renders the Live2D stage.
+  const capturePath = process.env.OPENMEIDO_DEBUG_CAPTURE
+  if (capturePath) {
+    win.webContents.once('did-finish-load', () => {
+      setTimeout(() => {
+        if (win.isDestroyed()) return
+        void win.webContents
+          .capturePage()
+          .then((img) => writeFileSync(capturePath, img.toPNG()))
+          .then(() => console.log(`[debug] window captured → ${capturePath}`))
+          .catch((err) => console.warn('[debug] capture failed:', err))
+      }, 15_000)
+    })
   }
 
   // External-link handler. Without this, every <a target="_blank"> or
@@ -330,12 +413,9 @@ function applyStartAtLogin(startAtLogin: boolean): void {
     // almost never what the developer wants.
     return
   }
-  app.setLoginItemSettings({
-    openAtLogin: startAtLogin,
-    // Don't pop the window to the front on auto-launch; we want her to
-    // come up quietly. The greeting + proactive remarks still fire.
-    openAsHidden: false,
-  })
+  // (`openAsHidden` was a macOS-only no-op here and is gone from
+  // Electron's types since v3x.)
+  app.setLoginItemSettings({ openAtLogin: startAtLogin })
 }
 
 // Apply live config changes to the running window where possible. width/height
@@ -519,7 +599,12 @@ ipcMain.handle('stt:transcribe', async (_event, payload: { samples: unknown }) =
       samples = raw
     } else if (ArrayBuffer.isView(raw)) {
       const v = raw as ArrayBufferView
-      samples = new Float32Array(v.buffer, v.byteOffset, v.byteLength / 4)
+      // A Float32Array view needs a 4-byte-aligned offset; IPC Buffers
+      // can land at any offset (it threw RangeError) — copy when unaligned.
+      samples =
+        v.byteOffset % 4 === 0
+          ? new Float32Array(v.buffer, v.byteOffset, Math.floor(v.byteLength / 4))
+          : new Float32Array(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength))
     } else if (raw instanceof ArrayBuffer) {
       samples = new Float32Array(raw)
     } else {
@@ -1306,7 +1391,25 @@ ipcMain.handle('memory:setSession', (_event, id: string) => {
   return id
 })
 
+// A second launch (see single-instance.ts) lands here: surface the window
+// the user was trying to open instead of silently doing nothing.
+app.on('second-instance', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+})
+
 void app.whenReady().then(async () => {
+  // Decrypt stored API keys (safeStorage needs `ready` on Windows). Must
+  // precede everything that can call an LLM or hand config to a window.
+  await unlockConfigSecrets()
+  // Only the app's own page may use device permissions (mic for STT,
+  // clipboard). Anything else that manages to load gets nothing.
+  session.defaultSession.setPermissionRequestHandler((wc, _permission, callback, details) => {
+    callback(isAppPageUrl(details.requestingUrl || wc.getURL()))
+  })
+  session.defaultSession.setPermissionCheckHandler((wc) => !!wc && isAppPageUrl(wc.getURL()))
   // Seed bundled live2d models into userData on first run + register the
   // protocol that serves model files to the renderer. Must happen before
   // createWindow so the renderer's first fetch succeeds.
@@ -1367,8 +1470,10 @@ void app.whenReady().then(async () => {
   // (the registry entry would be orphaned otherwise).
   applyStartAtLogin(getConfig().window.startAtLogin)
   initHotkey(() => mainWindow)
+  setToolGuardWindow(() => mainWindow)
   applyHotkey(getConfig().window.summonHotkey)
   createWindow()
+  notifyConfigBootIssues()
   // Fire-and-forget the greeting — it self-waits for the renderer to be
   // ready, so we don't block window creation behind an LLM round-trip.
   void greetOnLaunch()
@@ -1380,6 +1485,28 @@ void app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
+
+/**
+ * config.json was unreadable or had invalid fields at boot (see
+ * main/config.ts) — tell the user once instead of silently resetting
+ * their settings. Where the backup went matters: their API keys are in it.
+ */
+function notifyConfigBootIssues(): void {
+  const issues = getConfigBootIssues()
+  const backup = issues.corruptBackup ?? issues.invalidBackup
+  if (!issues.corruptBackup && issues.dropped.length === 0 && !issues.secretsLost) return
+  const body = issues.secretsLost && !issues.corruptBackup && issues.dropped.length === 0
+    ? '保存的 API key 无法解密（可能换了电脑或 Windows 用户）。请在 Settings → AI 重新填写。'
+    : issues.corruptBackup
+    ? `设置文件损坏，已恢复默认设置。原文件备份在：${backup}`
+    : `部分设置无效，已恢复默认：${issues.dropped.slice(0, 6).join('、')}${
+        issues.dropped.length > 6 ? ' 等' : ''
+      }。${backup ? `原文件备份在：${backup}` : ''}`
+  console.warn('[config] boot issue notice:', body)
+  if (Notification.isSupported()) {
+    new Notification({ title: 'OpenMeido 设置已修复', body }).show()
+  }
+}
 
 /**
  * Wire `meido-live2d://<name>/<file...>` URLs to disk reads under

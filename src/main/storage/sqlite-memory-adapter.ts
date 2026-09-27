@@ -92,12 +92,21 @@ function resolveSqliteVecExtension(): string {
   const os = process.platform === 'win32' ? 'windows' : process.platform
   const pkg = `sqlite-vec-${os}-${process.arch}`
   const file = `vec0.${ext}`
-  const candidates = [
-    join(process.cwd(), 'node_modules', pkg, file),
-    process.resourcesPath
-      ? join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', pkg, file)
-      : '',
-  ].filter(Boolean) as string[]
+  // Packaged build = Electron (resourcesPath set) NOT launched as
+  // `electron <dir>` (defaultApp). Detected without importing electron so
+  // the adapter still loads under plain-node smoke tests.
+  const packaged = !!process.resourcesPath && !process.defaultApp
+  const unpacked = process.resourcesPath
+    ? join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', pkg, file)
+    : ''
+  // loadExtension() dlopens whatever it's given. In a packaged build the
+  // cwd is wherever the shortcut / shell launched us from, so probing it
+  // first would let a planted node_modules/…/vec0.dll there run inside
+  // our process. Packaged builds only look inside their own install dir;
+  // the cwd probe is for dev (`electron .` from the repo root).
+  const candidates = (
+    packaged ? [unpacked] : [join(process.cwd(), 'node_modules', pkg, file), unpacked]
+  ).filter(Boolean)
   for (const c of candidates) {
     if (existsSync(c)) return c
   }
@@ -121,7 +130,22 @@ export function openSqliteMemory(
 ): MemoryAdapter {
   mkdirSync(dataDir, { recursive: true })
   const db = new Database(join(dataDir, 'memory.sqlite'))
+  // A failed migration (now rolled back, see below) must not leak the
+  // handle — on Windows it keeps memory.sqlite locked for the rest of the
+  // session, so nothing could repair / export / delete it until restart.
+  try {
+    return setupSqliteMemory(db, dim, migrateActivePersona)
+  } catch (err) {
+    db.close()
+    throw err
+  }
+}
 
+function setupSqliteMemory(
+  db: Database.Database,
+  dim: number,
+  migrateActivePersona: string,
+): MemoryAdapter {
   db.pragma('journal_mode = WAL')
   db.pragma('synchronous = NORMAL')
   db.pragma('foreign_keys = ON')
@@ -194,6 +218,12 @@ export function openSqliteMemory(
   // Pattern: PRAGMA table_info to detect missing columns, then ALTER TABLE
   // ADD COLUMN. ALTER would error if the column exists; the PRAGMA guard
   // makes the migration idempotent across launches.
+  //
+  // Any ALTER that is followed by a backfill / seed / index runs inside a
+  // transaction (SQLite DDL is transactional). Otherwise a crash between
+  // the two steps is permanent: on the next launch the PRAGMA guard sees
+  // the column and skips the branch, so e.g. every pre-persona row would
+  // stay on the DEFAULT 'maid' forever instead of the user's persona.
 
   const episodeCols = db
     .prepare("PRAGMA table_info(episodes)")
@@ -213,9 +243,11 @@ export function openSqliteMemory(
     // existing row with the persona they were actively using at upgrade
     // time. Without the backfill, default 'maid' would dump everyone's
     // history into maid even if they were chatting as imouto.
-    db.exec("ALTER TABLE episodes ADD COLUMN persona_id TEXT NOT NULL DEFAULT 'maid'")
-    db.prepare('UPDATE episodes SET persona_id = ?').run(migrateActivePersona)
-    db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_persona ON episodes(persona_id)')
+    db.transaction(() => {
+      db.exec("ALTER TABLE episodes ADD COLUMN persona_id TEXT NOT NULL DEFAULT 'maid'")
+      db.prepare('UPDATE episodes SET persona_id = ?').run(migrateActivePersona)
+      db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_persona ON episodes(persona_id)')
+    })()
     console.log(
       `[memory] migrated: added episodes.persona_id, backfilled to '${migrateActivePersona}'`,
     )
@@ -283,12 +315,18 @@ export function openSqliteMemory(
   // upgrade (migration branch just added it). Putting it inside the
   // column-missing branch would skip it on fresh installs.
   db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_kind ON episodes(persona_id, kind)')
+  // Same discipline for the persona index: fresh installs get persona_id
+  // from CREATE TABLE and skip the migration branch that used to be the
+  // only place this index was created.
+  db.exec('CREATE INDEX IF NOT EXISTS idx_episodes_persona ON episodes(persona_id)')
 
   const factCols = db.prepare("PRAGMA table_info(facts)").all() as { name: string }[]
   if (!factCols.some((c) => c.name === 'persona_id')) {
-    db.exec("ALTER TABLE facts ADD COLUMN persona_id TEXT NOT NULL DEFAULT 'maid'")
-    db.prepare('UPDATE facts SET persona_id = ?').run(migrateActivePersona)
-    db.exec('CREATE INDEX IF NOT EXISTS idx_facts_persona ON facts(persona_id)')
+    db.transaction(() => {
+      db.exec("ALTER TABLE facts ADD COLUMN persona_id TEXT NOT NULL DEFAULT 'maid'")
+      db.prepare('UPDATE facts SET persona_id = ?').run(migrateActivePersona)
+      db.exec('CREATE INDEX IF NOT EXISTS idx_facts_persona ON facts(persona_id)')
+    })()
     console.log(
       `[memory] migrated: added facts.persona_id, backfilled to '${migrateActivePersona}'`,
     )
@@ -298,9 +336,6 @@ export function openSqliteMemory(
   if (!factCols.some((c) => c.name === 'category')) {
     db.exec(
       "ALTER TABLE facts ADD COLUMN category TEXT NOT NULL DEFAULT 'personal'",
-    )
-    db.exec(
-      "CREATE INDEX IF NOT EXISTS idx_facts_category_active ON facts(persona_id, category) WHERE superseded_by IS NULL",
     )
     console.log('[memory] migrated: added facts.category (default personal)')
   }
@@ -324,11 +359,20 @@ export function openSqliteMemory(
   // after this migration will be shared (per scopeFor() rules).
   if (!factCols.some((c) => c.name === 'scope')) {
     db.exec("ALTER TABLE facts ADD COLUMN scope TEXT NOT NULL DEFAULT 'persona'")
-    db.exec(
-      "CREATE INDEX IF NOT EXISTS idx_facts_scope_active ON facts(scope, category) WHERE superseded_by IS NULL",
-    )
     console.log("[memory] migrated: added facts.scope (existing rows kept as 'persona')")
   }
+  // Fact indexes run unconditionally (IF NOT EXISTS) once every column
+  // they cover is guaranteed to exist — same reasoning as idx_episodes_kind.
+  // When they lived inside the column-missing branches, a crash between
+  // ALTER and CREATE INDEX (or a fresh install that already had the
+  // column, for idx_facts_persona) meant the index was never created.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_facts_persona ON facts(persona_id);
+    CREATE INDEX IF NOT EXISTS idx_facts_category_active
+      ON facts(persona_id, category) WHERE superseded_by IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_facts_scope_active
+      ON facts(scope, category) WHERE superseded_by IS NULL;
+  `)
 
   // persona_affinity new columns for milestone + weekly review (v0.0.26).
   // Seed last_milestone to the band the user is currently at — so we
@@ -338,13 +382,16 @@ export function openSqliteMemory(
     .prepare('PRAGMA table_info(persona_affinity)')
     .all() as { name: string }[]
   if (!affCols.some((c) => c.name === 'last_milestone')) {
-    db.exec('ALTER TABLE persona_affinity ADD COLUMN last_milestone INTEGER NOT NULL DEFAULT 0')
     // Seed each existing row's last_milestone to the highest band their
     // current score has already crossed. floor(score / 20) * 20 gives
-    // 0 / 20 / 40 / 60 / 80 — the band lower bound.
-    db.exec(
-      "UPDATE persona_affinity SET last_milestone = CAST(score / 20 AS INTEGER) * 20",
-    )
+    // 0 / 20 / 40 / 60 / 80 — the band lower bound. Atomic with the
+    // ALTER: an unseeded column would replay every earned milestone.
+    db.transaction(() => {
+      db.exec('ALTER TABLE persona_affinity ADD COLUMN last_milestone INTEGER NOT NULL DEFAULT 0')
+      db.exec(
+        "UPDATE persona_affinity SET last_milestone = CAST(score / 20 AS INTEGER) * 20",
+      )
+    })()
     console.log('[memory] migrated: added persona_affinity.last_milestone')
   }
   if (!affCols.some((c) => c.name === 'last_review_at')) {
@@ -442,6 +489,10 @@ export function openSqliteMemory(
   )
   const insertVec = db.prepare<[bigint, Buffer]>(
     'INSERT INTO episodes_vec (episode_id, embedding) VALUES (?, ?)',
+  )
+  const selectEpisodeExists = db.prepare<[number]>('SELECT 1 FROM episodes WHERE id = ?')
+  const selectVecExists = db.prepare<[bigint]>(
+    'SELECT 1 FROM episodes_vec WHERE episode_id = ?',
   )
   const selectRecent = db.prepare<[string, number]>(
     `SELECT id, ts, speaker, text, session_id AS sessionId,
@@ -668,12 +719,29 @@ export function openSqliteMemory(
         kind,
       )
       const episodeId = Number(row.lastInsertRowid)
+      // Zero-length embedding = store without a vector (naive mode, or
+      // the embedder failed). The episode row is what recent() / session
+      // lists read; only the KNN JOIN needs the vec row, so a vectorless
+      // episode is simply invisible to semantic recall.
       if (embedding.length > 0) {
         insertVec.run(BigInt(episodeId), Buffer.from(embedding.buffer))
       }
       return episodeId
     },
   )
+
+  // Late vector attach for episodes written without one. Both checks run
+  // inside the txn so a concurrent delete / double backfill can't leave an
+  // orphan vec row or trip vec0's duplicate-PK error.
+  const setEmbeddingTxn = db.transaction((episodeId: number, embedding: Float32Array): boolean => {
+    if (!selectEpisodeExists.get(episodeId)) return false
+    if (selectVecExists.get(BigInt(episodeId))) return false
+    insertVec.run(
+      BigInt(episodeId),
+      Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength),
+    )
+    return true
+  })
 
   let closed = false
   const ensureOpen = (): void => {
@@ -695,6 +763,12 @@ export function openSqliteMemory(
       const toolData = toolParts && toolParts.length > 0 ? JSON.stringify(toolParts) : null
       const imagesData = images && images.length > 0 ? JSON.stringify(images) : null
       return addTxn(personaId, speaker, text, sessionId, embedding, toolData, imagesData, kind)
+    },
+
+    async setEpisodeEmbedding(episodeId, embedding) {
+      ensureOpen()
+      if (embedding.length === 0) return false
+      return setEmbeddingTxn(episodeId, embedding)
     },
 
     async recent(personaId, n, sessionId) {

@@ -47,6 +47,9 @@ export interface AffinityRecord {
 export interface MemoryAdapter {
   /**
    * Persist a turn together with its embedding. Returns the new row id.
+   * A zero-length `embedding` stores the turn with no vector: it still
+   * shows up in `recent()` / session lists, just not in
+   * `searchByEmbedding()` (naive mode, or the embedder failed).
    *
    * `toolParts` carries the structured tool data for agent-loop replay:
    *   - For `speaker: 'assistant'`, pass the ToolCallPart[] the model
@@ -68,6 +71,15 @@ export interface MemoryAdapter {
     images?: EpisodeImage[],
     kind?: EpisodeKind,
   ): Promise<number>
+
+  /**
+   * Attach an embedding to an episode that was stored without one (the
+   * embed call was slow / failed at write time — see service.addEpisode).
+   * Returns false when the episode no longer exists (deleted in between)
+   * or already has a vector. Optional: adapters without a vector index
+   * can omit it, the episode just stays out of semantic recall.
+   */
+  setEpisodeEmbedding?(episodeId: number, embedding: Float32Array): Promise<boolean>
 
   /**
    * Most-recent N turns in chronological order (oldest first). If `sessionId`

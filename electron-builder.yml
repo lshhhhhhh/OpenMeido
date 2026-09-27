@@ -54,6 +54,24 @@ directories:
 # Asar packaging on. Faster startup, simpler distribution, and the bundle
 # gets a basic obfuscation against casual prying.
 asar: true
+# No per-Electron native rebuild: every native dep is Node-API with bundled
+# prebuilds (better-sqlite3 >= 13, onnxruntime-node, sharp) or a plain DLL
+# (sqlite-vec). @electron/rebuild's node-abi also lags new Electron majors
+# and would fail the build for nothing.
+npmRebuild: false
+# Electron fuses — flipped in the packaged binary, dev `electron .` is
+# unaffected. Closes the "run the signed-looking OpenMeido.exe as a plain
+# Node interpreter" tricks (ELECTRON_RUN_AS_NODE / NODE_OPTIONS / --inspect)
+# and refuses app code from anywhere but app.asar. The app only spawns
+# powershell.exe (notif-listener), never itself, so none of these are used.
+# (Embedded asar integrity validation is left off — electron-builder still
+# marks it experimental outside macOS.)
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  onlyLoadAppFromAsar: true
+  enableCookieEncryption: true
 asarUnpack:
   # Native .node modules MUST be unpacked — the Node loader needs a real
   # file path. Without this you get "ENOENT" on launch.
@@ -89,6 +107,12 @@ files:
   - "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/DirectML.dll"
   - "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxcompiler.dll"
   - "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxil.dll"
+  # better-sqlite3 >= 13 is Node-API and ships prebuilt binaries for every
+  # platform inside the package (no per-Electron-ABI rebuild any more).
+  # Only win32-x64 is loaded; drop the rest plus the C sources.
+  - "!**/node_modules/better-sqlite3/prebuilds/{darwin,linux,linuxmusl}-*.node"
+  - "!**/node_modules/better-sqlite3/prebuilds/win32-arm64.node"
+  - "!**/node_modules/better-sqlite3/{deps,src}/**"
 
 # Files shipped alongside the asar (NOT compressed into it). PowerShell
 # can't read files inside app.asar — the .ps1 listener lives next to the

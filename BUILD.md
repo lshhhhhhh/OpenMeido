@@ -31,7 +31,7 @@ The installer is roughly **180MB compressed / ~750MB unpacked**, dominated by:
 
 | | Size |
 |---|---|
-| Electron 33 runtime | ~250MB |
+| Electron 44 runtime | ~250MB |
 | `node_modules` (transformers, pixi, ai-sdk, etc.) | ~300MB |
 | Bundled renderer JS | ~2MB |
 | Cubism Core + your Live2D model | varies (haitu_vts is ~30MB) |
@@ -91,16 +91,8 @@ After installing, the user has to open Settings (⚙) and:
 4. **Mail tab** (optional) — IMAP credentials for the "check my email" tool
 5. **Proactive tab** (optional) — enable spontaneous remarks
 
-`.env` is **not** honored in installed builds (only in dev mode) — keys go through the Settings UI and are stored in `%APPDATA%/openmeido/config.json`. Mail password is encrypted with `safeStorage` (OS keychain).
+`.env` is **not** honored in installed builds (only in dev mode) — keys go through the Settings UI and are stored in `%APPDATA%/openmeido/config.json`. API keys, TTS tokens and the mail password are encrypted with `safeStorage` (DPAPI on Windows) — see `src/main/config.ts`.
 
-## Native module rebuilds
+## Native modules
 
-`better-sqlite3` and `sqlite-vec` are Node native modules — they ship `.node` binaries built against a specific Node ABI. Electron uses its own ABI, different from system Node.
-
-`electron-builder` handles this automatically via the `postinstall` script which runs `electron-builder install-app-deps` — but if you bump Electron's major version, run:
-
-```powershell
-npm run postinstall
-```
-
-to rebuild the natives for the new ABI.
+No rebuild step is needed when bumping Electron. `better-sqlite3` (v13+), `onnxruntime-node` and `sharp` are Node-API modules that ship prebuilt binaries inside their npm packages, and `sqlite-vec` is a plain loadable `.dll`. So `electron-builder.yml` sets `npmRebuild: false` and there's no `postinstall` hook. (Before v0.4.0, `better-sqlite3` 12 was ABI-specific and had to be rebuilt for every Electron major.)

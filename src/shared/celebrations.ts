@@ -21,7 +21,7 @@
  * branch without booting Electron.
  */
 
-import type { Config } from './config.js'
+import { isBackendConfigured, type Config } from './config.js'
 
 export type CelebrationKind = 'ai' | 'tts'
 
@@ -59,12 +59,15 @@ export function detectCelebrationTriggers(
 ): CelebrationKind[] {
   const triggers: CelebrationKind[] = []
 
-  // AI: apiKey transitions empty → non-empty AND flag not yet flipped.
-  // Trim because users sometimes paste a key with trailing whitespace
-  // and we don't want that to count as "set".
-  const prevKeyEmpty = !prev.backend.apiKey.trim()
-  const nextKeyFilled = !!next.backend.apiKey.trim()
-  if (prevKeyEmpty && nextKeyFilled && !prev.onboarding.aiSetupCelebrated) {
+  // AI: backend goes unconfigured → configured (key pasted, or a local
+  // no-key endpoint like LM Studio picked) AND flag not yet flipped.
+  // isBackendConfigured trims, so a pasted key with trailing whitespace
+  // alone doesn't count as "set".
+  if (
+    !isBackendConfigured(prev.backend) &&
+    isBackendConfigured(next.backend) &&
+    !prev.onboarding.aiSetupCelebrated
+  ) {
     triggers.push('ai')
   }
 

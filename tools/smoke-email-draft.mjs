@@ -30,7 +30,7 @@ const ds = createOpenAI({
   baseURL: 'https://api.deepseek.com/v1',
   apiKey: process.env.DEEPSEEK_API_KEY,
 })
-const model = ds.chat('deepseek-chat')
+const model = ds.chat('deepseek-flash')
 
 // ---------- Test cases ----------
 // Each scenario describes an inbox conversation the user has to reply to.

@@ -40,6 +40,16 @@ export async function listVoices(): Promise<TTSVoice[]> {
 }
 
 /**
+ * Prefix on every synthesis failure meant for the user. The `tts:synthesize`
+ * IPC handler (index.ts) turns a throw into `{ error: err.message }`, so the
+ * message string IS the renderer contract:
+ *   - `语音合成失败：<engine detail>` → show it (toast / alert) as-is.
+ *   - `tts: empty text` (no prefix) → nothing speakable left after
+ *     sanitizeForTTS (e.g. a reply that was all `<think>`); not worth a toast.
+ */
+export const TTS_ERROR_PREFIX = '语音合成失败：'
+
+/**
  * Synthesize `text` using whichever backend is configured. Callers normally
  * pass no `override` and let main read the persisted config; the Settings
  * preview button passes a draft so the user can try changes without saving.
@@ -51,6 +61,18 @@ export async function synthesize(
   const safe = sanitizeForTTS(text)
   if (!safe.trim()) throw new Error('tts: empty text')
   const cfg = override ?? getConfig().tts
+  try {
+    return await synthesizeWith(safe, cfg)
+  } catch (err) {
+    console.warn(`[tts] ${cfg.backend} synth failed:`, err)
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(msg.startsWith(TTS_ERROR_PREFIX) ? msg : TTS_ERROR_PREFIX + msg, {
+      cause: err,
+    })
+  }
+}
+
+async function synthesizeWith(safe: string, cfg: Config['tts']): Promise<TTSResult> {
   // Backend is whatever the user picked — no env override. (We tried a
   // TTS_BACKEND=sovits demo shortcut and it backfired: it forced SoVITS
   // even when the user explicitly picked Edge in Settings.) The only
@@ -67,5 +89,9 @@ export async function synthesize(
       return synthesizeMinimax(safe, cfg.minimax)
     case 'volcengine':
       return synthesizeVolcengine(safe, cfg.volcengine)
+    default:
+      // `override` comes over IPC — don't fall off the switch and resolve
+      // `undefined` into the renderer's audio decoder.
+      throw new Error(`未知的语音引擎：${String((cfg as { backend?: unknown }).backend)}`)
   }
 }

@@ -15,7 +15,7 @@
 
 import { app } from 'electron'
 import { promises as fsp, existsSync } from 'node:fs'
-import { join, basename } from 'node:path'
+import { join, basename, dirname } from 'node:path'
 import AdmZip from 'adm-zip'
 
 import {
@@ -24,6 +24,13 @@ import {
   type ModelListEntry,
   type ModelSidecar,
 } from '../shared/live2d-models.js'
+import {
+  isDirectChildDir,
+  isSafeModelName,
+  planZipExtraction,
+  resolveInside,
+  sanitizeName,
+} from './live2d-path-guard.js'
 
 const SIDECAR_NAME = 'openmeido.json'
 
@@ -92,6 +99,18 @@ export async function initLive2DModels(): Promise<void> {
  */
 export function modelDir(name: string): string {
   return join(getUserRoot(), name)
+}
+
+/**
+ * `modelDir` for names that came from outside (IPC args, the
+ * `meido-live2d://` URL host). Returns null unless `name` is a plain
+ * sanitized segment AND the resolved dir sits directly under the models
+ * root — so `..` / `a/../..` can't turn `deleteModel` into "rm -rf userData".
+ */
+function safeModelDir(name: unknown): string | null {
+  if (!isSafeModelName(name)) return null
+  const dir = modelDir(name)
+  return isDirectChildDir(getUserRoot(), dir) ? dir : null
 }
 
 /**
@@ -220,6 +239,9 @@ export async function listModels(): Promise<ModelListEntry[]> {
   for (const ent of dirs) {
     if (!ent.isDirectory()) continue
     const name = ent.name
+    // A hand-copied dir whose name sanitizeName would rewrite can't be
+    // loaded / deleted through the guarded entry points — don't list it.
+    if (!isSafeModelName(name)) continue
     const sidecar = await readOrDefaultSidecar(name)
     if (!sidecar) continue
     const dir = modelDir(name)
@@ -239,12 +261,18 @@ export async function listModels(): Promise<ModelListEntry[]> {
 }
 
 export async function getSidecar(name: string): Promise<ModelSidecar | null> {
+  if (!safeModelDir(name)) return null
   return readOrDefaultSidecar(name)
 }
 
 export async function setSidecar(name: string, sidecar: ModelSidecar): Promise<void> {
-  const dir = modelDir(name)
+  const dir = safeModelDir(name)
+  if (!dir) throw new Error(`invalid model name: ${String(name)}`)
   if (!existsSync(dir)) throw new Error(`model not installed: ${name}`)
+  // modelFile is later joined onto `dir` for reads — keep it inside the model.
+  if (typeof sidecar?.modelFile !== 'string' || !resolveInside(dir, sidecar.modelFile)) {
+    throw new Error(`invalid modelFile: ${String(sidecar?.modelFile)}`)
+  }
   // Normalize the emotion keys so a typo in the renderer can't permanently
   // break the file — drop anything that isn't a known emotion.
   const knownEmotions = new Set<Emotion>(EMOTIONS)
@@ -268,7 +296,9 @@ export async function setSidecar(name: string, sidecar: ModelSidecar): Promise<v
 }
 
 export async function deleteModel(name: string): Promise<void> {
-  const dir = modelDir(name)
+  // Recursive rm — the name guard is what keeps `..` from wiping userData.
+  const dir = safeModelDir(name)
+  if (!dir) throw new Error(`invalid model name: ${String(name)}`)
   if (!existsSync(dir)) return
   await fsp.rm(dir, { recursive: true, force: true })
 }
@@ -307,7 +337,14 @@ export async function importZip(
   const name = sanitizeName(baseName)
   if (!name) throw new Error('could not derive a usable name from the zip')
 
-  const dst = modelDir(name)
+  const dst = safeModelDir(name)
+  if (!dst) throw new Error(`could not derive a usable name from the zip: ${name}`)
+
+  // Validate every entry (zip-slip + zip-bomb limits) BEFORE touching disk —
+  // see planZipExtraction. Doing it before the overwrite rm also means a bad
+  // zip can't cost the user their existing copy of the model.
+  const plan = planZipExtraction(entries, dst, stripPrefix ? singleTop : null)
+
   if (existsSync(dst)) {
     if (!opts.overwrite) throw new Error(`model already exists: ${name}`)
     await fsp.rm(dst, { recursive: true, force: true })
@@ -317,16 +354,15 @@ export async function importZip(
   // Extract each file relative to dst, stripping the single-top-dir prefix
   // when applicable. We do this entry-by-entry instead of using
   // zip.extractAllTo so we don't leave a leftover top-level dir.
-  for (const entry of entries) {
-    if (entry.isDirectory) continue
-    let rel = entry.entryName.replace(/\\/g, '/')
-    if (stripPrefix && rel.startsWith(singleTop + '/')) {
-      rel = rel.slice(singleTop!.length + 1)
+  try {
+    for (const { entry, outPath } of plan) {
+      await fsp.mkdir(dirname(outPath), { recursive: true })
+      await fsp.writeFile(outPath, entry.getData())
     }
-    if (!rel) continue
-    const outPath = join(dst, rel)
-    await fsp.mkdir(join(outPath, '..'), { recursive: true })
-    await fsp.writeFile(outPath, entry.getData())
+  } catch (err) {
+    // Bad CRC / disk full / whatever — don't leave half a model behind.
+    await fsp.rm(dst, { recursive: true, force: true }).catch(() => {})
+    throw err
   }
 
   // Verify the unpacked tree actually has a model3.json — otherwise we just
@@ -338,18 +374,6 @@ export async function importZip(
   }
 
   return name
-}
-
-/**
- * Replace any character that would be unsafe in a path or URL segment.
- * We keep CJK so Chinese model names round-trip; just kill slashes / quotes /
- * control chars.
- */
-function sanitizeName(s: string): string {
-  return s
-    .replace(/[\\/ -"<>|:?*]/g, '_')
-    .replace(/^[\s.]+|[\s.]+$/g, '')
-    .slice(0, 96)
 }
 
 // ---- AI auto-bind ----
@@ -399,7 +423,8 @@ export async function autoBindEmotions(
   name: string,
   runLLM: (prompt: string) => Promise<string>,
 ): Promise<{ ok: true; sidecar: ModelSidecar } | { ok: false; error: string }> {
-  const dir = modelDir(name)
+  const dir = safeModelDir(name)
+  if (!dir) return { ok: false, error: `invalid model name: ${String(name)}` }
   if (!existsSync(dir)) return { ok: false, error: `model not installed: ${name}` }
 
   const current = await readOrDefaultSidecar(name)
@@ -489,11 +514,13 @@ export async function autoBindEmotions(
  * or the model dir doesn't exist.
  */
 export function resolveModelFile(name: string, relPath: string): string | null {
-  if (!name) return null
-  const dir = modelDir(name)
+  // `name` is the URL host — attacker-shaped as far as we're concerned.
+  const dir = safeModelDir(name)
+  if (!dir) return null
   if (!existsSync(dir)) return null
-  // Normalize and reject any segment that tries to climb out.
+  // Normalize and reject any segment that tries to climb out; resolveInside
+  // then also rejects drive letters / NUL / ADS and double-checks containment.
   const clean = relPath.replace(/\\/g, '/').replace(/^\/+/, '')
   if (clean.split('/').some((seg) => seg === '..' || seg === '')) return null
-  return join(dir, clean)
+  return resolveInside(dir, clean)
 }

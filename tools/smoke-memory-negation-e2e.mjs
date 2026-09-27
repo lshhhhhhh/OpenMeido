@@ -16,7 +16,7 @@
  * This test:
  *   1. Seeds a known personal fact via the adapter.
  *   2. Adds conversational episodes simulating a retraction.
- *   3. Runs the FULL reflectOnce() pipeline against DeepSeek (deepseek-chat,
+ *   3. Runs the FULL reflectOnce() pipeline against DeepSeek (deepseek-flash,
  *      non-reasoning, ~1500 input tokens → ~100 output tokens ≈ $0.0005).
  *   4. Asserts that the old fact value is gone from listActiveFacts.
  *
@@ -67,7 +67,7 @@ async function main() {
     baseURL: 'https://api.deepseek.com/v1',
     apiKey: process.env.DEEPSEEK_API_KEY,
   })
-  const model = ds.chat('deepseek-chat')
+  const model = ds.chat('deepseek-flash')
 
   /** ReflectionExtractor — what the host wires into MemoryService. */
   const extract = async (prompt) => {
@@ -124,7 +124,7 @@ async function main() {
   await svc.addEpisode('assistant', '好的小刘，记下来了。')
 
   // Run the real reflection pass.
-  console.log('  Running reflectOnce against deepseek-chat...')
+  console.log('  Running reflectOnce against deepseek-flash...')
   const n = await svc.reflectOnce()
   check('reflectOnce returned a non-negative count', typeof n === 'number' && n >= 0, `got ${n}`)
 

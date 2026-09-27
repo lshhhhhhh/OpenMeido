@@ -1,11 +1,19 @@
 import { clipboard, dialog } from 'electron'
 import { readFile as fsReadFile } from 'node:fs/promises'
-import { extname } from 'node:path'
+import { extname, isAbsolute } from 'node:path'
 import * as mammoth from 'mammoth'
 
 import { tool } from 'ai'
 import { z } from 'zod'
 import { Readability } from '@mozilla/readability'
+
+import {
+  UNTRUSTED_NOTE,
+  confirmSensitive,
+  isInsideAppData,
+  isPrivateHost,
+  mentionedByUser,
+} from '../tool-guard.js'
 
 /**
  * Pull plain text out of a PDF buffer via pdfjs-dist's legacy build.
@@ -57,7 +65,8 @@ export const readClipboard = tool({
     '返回完整的剪贴板文本（截断到 20KB），可能为空字符串（用户没复制东西）。',
   inputSchema: z.object({}),
   execute: async () => {
-    const text = clipboard.readText()
+    // Async since Electron 4x (was sync in 33).
+    const text = await clipboard.readText()
     if (!text || !text.trim()) {
       return { empty: true, text: '', note: '剪贴板里没有文本内容（可能是图片或者根本没复制东西）。' }
     }
@@ -85,22 +94,48 @@ export const readWebPage = tool({
     if (!/^https?:\/\//i.test(url)) {
       return { error: '只支持 http:// 或 https:// 开头的完整 URL，不要传相对路径或单独的域名。' }
     }
+    // A URL the user didn't give this turn most likely came from content
+    // the model just read (an email, a page) — the classic exfiltration
+    // channel (`https://evil/?d=<secrets>`). Ask first. See tool-guard.ts.
+    const userGave = mentionedByUser(url)
+    if (!userGave) {
+      const ok = await confirmSensitive(
+        '她想打开一个你没给过的网页，允许吗？',
+        `${url}\n\n如果你没让她查这个链接，建议拒绝——它可能来自邮件或网页里藏的指令。`,
+      )
+      if (!ok) {
+        return { error: '主人拒绝了打开这个链接。不要再尝试打开它，也不要换别的链接。' }
+      }
+    }
     try {
       const ctl = new AbortController()
       // 20s timeout — slow CDN + Readability parse + everything else.
       const timer = setTimeout(() => ctl.abort(), 20_000)
       let res: Response
       try {
-        res = await fetch(url, {
-          headers: {
-            // Some sites 403 on non-browser UA. Pretend to be Chrome.
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36',
-            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          },
-          signal: ctl.signal,
-          redirect: 'follow',
-        })
+        // Follow redirects by hand so every hop gets the private-network
+        // check (a public URL can 302 to http://127.0.0.1:…/).
+        let target = url
+        for (let hop = 0; ; hop++) {
+          if (!userGave && (await isPrivateHost(new URL(target).hostname))) {
+            return { error: `${target} 指向本机或内网地址，出于安全不能读取。` }
+          }
+          res = await fetch(target, {
+            headers: {
+              // Some sites 403 on non-browser UA. Pretend to be Chrome.
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36',
+              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            },
+            signal: ctl.signal,
+            redirect: 'manual',
+          })
+          const next = res.headers.get('location')
+          if (res.status < 300 || res.status >= 400 || !next) break
+          if (hop >= 5) return { error: `${url} 重定向次数太多。` }
+          target = new URL(next, target).href
+          if (!/^https?:/i.test(target)) return { error: `${url} 重定向到了非网页地址。` }
+        }
       } finally {
         clearTimeout(timer)
       }
@@ -125,6 +160,7 @@ export const readWebPage = tool({
       const trimmed = article.textContent.trim()
       const content = trimmed.length > MAX ? trimmed.slice(0, MAX) + '\n…[截断]' : trimmed
       return {
+        note: UNTRUSTED_NOTE,
         title: article.title ?? '',
         byline: article.byline ?? '',
         excerpt: article.excerpt ?? '',
@@ -188,6 +224,22 @@ export const readFileTool = tool({
         return { error: '用户取消了文件选择。' }
       }
       absPath = result.filePaths[0]
+    } else {
+      // Relative paths used to resolve against the app's working dir.
+      if (!isAbsolute(absPath)) {
+        return { error: '请给完整路径（比如 C:\\Users\\...\\文件.pdf），或者传空字符串让主人自己选文件。' }
+      }
+      // Never hand out our own data: config.json holds every API key,
+      // memory.sqlite the whole relationship. See tool-guard.ts.
+      if (isInsideAppData(absPath)) {
+        return { error: '这是 OpenMeido 自己的数据文件（里面有设置和密钥），不能读取。' }
+      }
+      // A path the user didn't mention this turn → ask. (The picker branch
+      // above is consent by itself.)
+      if (!mentionedByUser(absPath)) {
+        const ok = await confirmSensitive('她想读取一个你没提到的文件，允许吗？', absPath)
+        if (!ok) return { error: '主人拒绝了读取这个文件。不要再尝试。' }
+      }
     }
     try {
       const buf = await fsReadFile(absPath)
@@ -203,6 +255,7 @@ export const readFileTool = tool({
           const text = value ?? ''
           const content = text.length > MAX ? text.slice(0, MAX) + '\n…[截断]' : text
           return {
+            note: UNTRUSTED_NOTE,
             path: absPath,
             sizeBytes: buf.length,
             sizeChars: text.length,
@@ -226,6 +279,7 @@ export const readFileTool = tool({
           const text = await extractPdfText(buf)
           const content = text.length > MAX ? text.slice(0, MAX) + '\n…[截断]' : text
           return {
+            note: UNTRUSTED_NOTE,
             path: absPath,
             sizeBytes: buf.length,
             sizeChars: text.length,
@@ -252,6 +306,7 @@ export const readFileTool = tool({
       const text = buf.toString('utf-8')
       const content = text.length > MAX ? text.slice(0, MAX) + '\n…[截断]' : text
       return {
+        note: UNTRUSTED_NOTE,
         path: absPath,
         sizeBytes: buf.length,
         sizeChars: text.length,

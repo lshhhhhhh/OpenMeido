@@ -316,16 +316,26 @@
     renderActive()
   }
 
+  // Spreadsheet formula injection (OWASP "CSV Injection"): a cell starting
+  // with = + - @ (or tab / CR) is evaluated as a formula when the export is
+  // opened / pasted in Excel / WPS / LibreOffice — and cell text here comes
+  // from email subjects and LLM output (`=HYPERLINK(...)`, `@SUM(...)`).
+  // Prefix such cells with a single quote so the spreadsheet keeps them as
+  // text. Plain numbers ("-12.5", "+3") are left alone so negative values
+  // still sort / sum as numbers.
+  function neutralizeFormula(v) {
+    const s = v === undefined || v === null ? '' : String(v)
+    if (typeof v === 'number' || /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(s)) return s
+    return /^[\t\r\n]|^\s*[=+\-@]/.test(s) ? "'" + s : s
+  }
+
   function toTSV(data) {
-    const head = data.columns.join('\t')
+    const cell = (v) => neutralizeFormula(v).replace(/\t/g, ' ').replace(/\r?\n|\r/g, ' ')
+    const head = data.columns.map(cell).join('\t')
     const body = data.rows
       .map((r) =>
         data.columns
-          .map((_, i) => {
-            const v = Array.isArray(r) ? r[i] : undefined
-            const s = v === undefined || v === null ? '' : String(v)
-            return s.replace(/\t/g, ' ').replace(/\r?\n/g, ' ')
-          })
+          .map((_, i) => cell(Array.isArray(r) ? r[i] : undefined))
           .join('\t'),
       )
       .join('\n')
@@ -334,7 +344,7 @@
 
   function toCSV(data) {
     const esc = (v) => {
-      const s = v === undefined || v === null ? '' : String(v)
+      const s = neutralizeFormula(v)
       if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"'
       return s
     }

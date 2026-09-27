@@ -94,26 +94,23 @@ export async function synthesizeVolcengine(
 ): Promise<TTSResult> {
   const req = buildVolcengineRequest(text, cfg)
 
-  // 60s timeout — same rationale as MiniMax.
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 60_000)
+  // 60s timeout — same rationale as MiniMax (AbortSignal.timeout so the
+  // budget covers the body read too, not just the headers).
+  const signal = AbortSignal.timeout(60_000)
+  const timeoutMsg = '火山引擎 请求超时（60s）——网络或服务异常。'
   let resp: Response
   try {
     resp = await fetch(req.url, {
       method: 'POST',
       headers: req.headers,
       body: JSON.stringify(req.body),
-      signal: controller.signal,
+      signal,
     })
   } catch (err) {
-    if (controller.signal.aborted) {
-      throw new Error('火山引擎 请求超时（60s）——网络或服务异常。')
-    }
+    if (signal.aborted) throw new Error(timeoutMsg)
     throw new Error(
       `连不上火山引擎 (${req.url}) — ${err instanceof Error ? err.message : String(err)}`,
     )
-  } finally {
-    clearTimeout(timer)
   }
 
   if (!resp.ok) {
@@ -121,10 +118,18 @@ export async function synthesizeVolcengine(
     throw new Error(`火山引擎 HTTP ${resp.status}: ${body.slice(0, 300) || resp.statusText}`)
   }
 
-  const json = (await resp.json()) as {
+  let json: {
     code?: number
     message?: string
     data?: string
+  }
+  try {
+    json = (await resp.json()) as typeof json
+  } catch (err) {
+    if (signal.aborted) throw new Error(timeoutMsg)
+    throw new Error(
+      `火山引擎 返回的不是合法 JSON — ${err instanceof Error ? err.message : String(err)}`,
+    )
   }
 
   // ByteDance 用 code === 3000 表示成功；任何别的 code 都是错误（哪怕 HTTP 200）。

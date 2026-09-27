@@ -16,7 +16,12 @@ import {
   type ModelSidecar,
 } from '../../shared/live2d-models'
 import { BASE_URL_PRESETS, findPreset, suggestedModels } from './backend-presets'
-import { performanceModel, visionModel } from '../../shared/lightweight-models'
+import {
+  lightweightModel,
+  performanceModel,
+  supportsVision,
+  visionModel,
+} from '../../shared/lightweight-models'
 import {
   MINIMAX_MODELS,
   MINIMAX_PRESET_VOICES,
@@ -51,16 +56,19 @@ function textCapability(baseUrl: string, currentModel: string): Capability {
 }
 
 function visionCapability(baseUrl: string, currentModel: string): Capability {
+  // Mirrors chat/run.ts routing: image turns use the current model when it
+  // can see, otherwise auto-switch to the host's vision tier.
+  if (currentModel && supportsVision(baseUrl, currentModel)) {
+    if (baseUrl.includes('127.0.0.1') || baseUrl.includes('localhost'))
+      return {
+        kind: 'depends',
+        hint: `取决于加载的模型（${currentModel}），仅多模态模型可用`,
+      }
+    return { kind: 'have', model: currentModel }
+  }
   const vis = visionModel(baseUrl)
-  if (vis) return { kind: 'have', model: vis }
-  if (baseUrl.includes('deepseek.com'))
-    return { kind: 'none', hint: 'DeepSeek 不支持图像 — 换 Gemini / GLM / Qwen' }
-  if (baseUrl.includes('127.0.0.1') || baseUrl.includes('localhost'))
-    return {
-      kind: 'depends',
-      hint: `取决于加载的模型（${currentModel || '?'}），仅多模态模型可用`,
-    }
-  return { kind: 'none', hint: '当前 backend 没有视觉模型 — 换 Gemini / GLM / Qwen' }
+  if (vis) return { kind: 'have', model: `${vis}（发图时自动切换）` }
+  return { kind: 'none', hint: '当前模型不能看图 — 换一个多模态模型，或换 Gemini / GLM / Qwen' }
 }
 
 function searchCapability(baseUrl: string): Capability {
@@ -301,6 +309,8 @@ export function Settings({ initial, onClose }: SettingsProps) {
                       ...draft.backend,
                       baseUrl: p.url,
                       model: stillValid ? draft.backend.model : newDefault,
+                      // An override id from another provider means nothing here.
+                      fastModel: '',
                       apiKey: updatedMap[p.url] ?? '',
                       apiKeys: updatedMap,
                     },
@@ -512,10 +522,37 @@ export function Settings({ initial, onClose }: SettingsProps) {
                   ? '✏️ 其它'
                   : `✏️ ${draft.backend.model}`}
               </button>
+              {/* Side-task model override. Normally automatic (cheap tier
+                  per provider, falling back to the chat model if that id
+                  was retired); this is the escape hatch when a provider
+                  pulls a model before an app update ships. */}
+              <div style={{ width: '100%', fontSize: 11, color: '#999', marginTop: 6 }}>
+                后台任务模型（情绪 / 问候 / 主动搭话 / 记忆整理）：
+                <code style={{ color: '#ddd' }}>
+                  {draft.backend.fastModel ||
+                    `自动（${lightweightModel(draft.backend.baseUrl) ?? draft.backend.model}）`}
+                </code>{' '}
+                <button
+                  style={{ ...chipStyle(false), padding: '1px 6px', fontSize: 11 }}
+                  onClick={async () => {
+                    const v = await prompt(
+                      '后台任务用的 model id（留空 = 自动）',
+                      draft.backend.fastModel,
+                    )
+                    if (v !== null) {
+                      setDraft({ ...draft, backend: { ...draft.backend, fastModel: v.trim() } })
+                    }
+                  }}
+                >
+                  ✏️ 改
+                </button>
+              </div>
             </div>
           )}
 
-          {/* Connectivity test — hits /models, no tokens spent. On success
+          {/* Connectivity test — GET /models plus a one-line completion on
+              the chosen model (a few tokens; catches retired ids and empty
+              balances that /models alone let through). On success
               the main process pushes 'chat:status: ok' which the title-bar
               pill listens to and goes green. */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1830,7 +1867,7 @@ function VoiceTab({
         draft,
       )
       if ('error' in r) {
-        alert(`试听失败：${r.error}`)
+        alert(r.error.startsWith('语音合成失败') ? r.error : `试听失败：${r.error}`)
         return
       }
       const { playMp3Base64 } = await import('./tts/player')
@@ -3168,9 +3205,11 @@ function UpdateChecker({
       )}
 
       {/* Download source toggle. GitHub direct is fastest outside CN
-          but often crawls < 100 KB/s from mainland — a ~70MB installer
-          can take 15+ min. ghproxy is a community CDN that fronts
-          GitHub from CN at 1-5 MB/s. Same .exe, same signature. */}
+          but often crawls < 100 KB/s from mainland — a ~200MB installer
+          can take ages. '国内镜像' (config value 'ghproxy', kept for
+          compatibility) fetches the installer through community GitHub
+          proxies while version info + checksum still come from GitHub,
+          so a mirror can't tamper with it — see updater-host.ts. */}
       <div
         style={{
           marginTop: 12,
@@ -3183,7 +3222,7 @@ function UpdateChecker({
           {(
             [
               { id: 'github' as const, label: 'GitHub', hint: '官方源 · 海外更快' },
-              { id: 'ghproxy' as const, label: 'ghproxy', hint: '国内镜像 · 大陆更快' },
+              { id: 'ghproxy' as const, label: '国内镜像', hint: '大陆更快 · 校验和仍来自 GitHub' },
             ]
           ).map((opt) => {
             const selected = currentMirror === opt.id

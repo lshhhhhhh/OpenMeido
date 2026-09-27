@@ -64,14 +64,27 @@ function buildUrl(bundle: TabsBundle): string {
   const json = JSON.stringify(bundle)
   const b64 = Buffer.from(json, 'utf-8').toString('base64')
   const hash = `#data=${encodeURIComponent(b64)}`
-  const base = process.env.ELECTRON_RENDERER_URL
-    ? `${process.env.ELECTRON_RENDERER_URL}/table.html`
+  // Dev server only when unpackaged — a stray ELECTRON_RENDERER_URL in a
+  // packaged app's environment must not point this window (which renders
+  // email subjects etc.) at some other origin.
+  const devUrl = app.isPackaged ? undefined : process.env.ELECTRON_RENDERER_URL
+  const base = devUrl
+    ? `${devUrl}/table.html`
     : `file://${join(__dirnameLocal, '../renderer/table.html')}`
   const url = `${base}${hash}`
   console.log(
     `[table-host] buildUrl tabs=${bundle.tabs.length} payloadBytes=${json.length} hashBytes=${hash.length}`,
   )
   return url
+}
+
+function isHttpUrl(url: string): boolean {
+  try {
+    const { protocol } = new URL(url)
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
 }
 
 /** Generic title used when no single tab's title can be promoted to
@@ -148,9 +161,22 @@ export function openTableWindow(payload: TablePayload, opts: OpenTableOptions = 
     },
   })
 
+  // Same policy as the main window (index.ts): only http(s) goes to the OS
+  // browser. Table cells carry LLM / email-derived text, so a `file:`,
+  // `ms-settings:` or custom-protocol URL must never reach openExternal.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    if (isHttpUrl(url)) void shell.openExternal(url)
     return { action: 'deny' }
+  })
+  // Our own loads come from loadURL (which doesn't emit will-navigate), so
+  // anything that fires here is the page trying to leave — a clicked link,
+  // a dropped file, a script. Keep the window on the table page; hash-only
+  // changes and blob: downloads (CSV export) are left alone.
+  win.webContents.on('will-navigate', (e, url) => {
+    const current = win.webContents.getURL().split('#')[0]
+    if (url.split('#')[0] === current || url.startsWith('blob:')) return
+    e.preventDefault()
+    if (isHttpUrl(url)) void shell.openExternal(url)
   })
   win.webContents.on('did-fail-load', (_e, code, desc, validatedURL) => {
     console.warn(

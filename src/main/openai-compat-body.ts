@@ -21,18 +21,38 @@ export interface BodyTransformFlags {
    *  Force-disable to avoid the 400. */
   isKimi?: boolean
   /** Kimi web search: inject `$web_search` builtin function tool when
-   *  searchEnabled. Moonshot's server auto-executes it; the response-
-   *  side stream filter in chat/kimi-search-stream.ts strips the
-   *  builtin_function tool_call chunks before Vercel AI SDK rejects
-   *  them. */
+   *  searchEnabled. chat/kimi-search-stream.ts hides the builtin
+   *  tool_call from Vercel AI SDK and performs the echo round-trip
+   *  Moonshot requires before it streams the grounded answer. */
   injectKimiSearch?: boolean
   /** DeepSeek reasoner — when replaying an assistant tool-call message
    *  back to the API, `reasoning_content` is required. Vercel AI SDK
    *  doesn't capture it, so we fill an empty string. */
   isDeepSeek?: boolean
+  /** Hosts whose models think by default (Kimi, DeepSeek, GLM, Doubao)
+   *  when thinking isn't wanted — side tasks (one-line outputs) and
+   *  Doubao chat. All four accept `thinking: {type: 'disabled'}`, except
+   *  the always-thinking ids in ALWAYS_THINKS. */
+  disableThinking?: boolean
+  /** api.openai.com — GPT-6 on /chat/completions rejects function tools
+   *  unless `reasoning_effort` is 'none' (verified 2026-09), so it's set
+   *  for every gpt-6 request that doesn't pick one. */
+  isOpenAI?: boolean
+  /** DashScope (Qwen). Qwen 3.5+ are hybrid thinkers that think by
+   *  default in streaming mode; with thinking on, qwen3.7-plus sometimes
+   *  reasoned about a tool and then never called it. Its switch is the
+   *  non-standard `enable_thinking`, not `thinking`. */
+  isQwen?: boolean
 }
 
+/** Models that always think and 400 on `thinking: {type: 'disabled'}`
+ *  ("该模型始终思考，不支持关闭思考"). */
+const ALWAYS_THINKS = /^glm-5\.3-flash/
+
 interface OpenAIRequestBody {
+  model?: string
+  reasoning_effort?: string
+  enable_thinking?: boolean
   tools?: unknown[]
   thinking?: { type: 'enabled' | 'disabled' }
   messages?: Array<{
@@ -57,16 +77,22 @@ export function transformOpenAIBody(
     else body.tools = [entry]
   }
   if (flags.injectKimiSearch) {
-    // Moonshot's `$web_search` builtin function. Server-executed: the
-    // SSE stream will emit a tool_call chunk with type='builtin_function'
-    // (which our response-side filter strips), then continue with the
-    // grounded answer text.
+    // Moonshot's `$web_search` builtin function. The response-side
+    // wrapper (chat/kimi-search-stream.ts) strips the builtin tool_call
+    // and does the tool-result echo round-trip.
     const entry = { type: 'builtin_function', function: { name: '$web_search' } }
     if (Array.isArray(body.tools)) body.tools.push(entry)
     else body.tools = [entry]
   }
-  if (flags.isKimi) {
+  const model = typeof body.model === 'string' ? body.model : ''
+  if ((flags.isKimi || flags.disableThinking) && !ALWAYS_THINKS.test(model)) {
     body.thinking = { type: 'disabled' }
+  }
+  if (flags.isOpenAI && /^gpt-6/.test(model) && body.reasoning_effort == null) {
+    body.reasoning_effort = 'none'
+  }
+  if (flags.isQwen && body.enable_thinking == null) {
+    body.enable_thinking = false
   }
   if (flags.isDeepSeek && Array.isArray(body.messages)) {
     for (const msg of body.messages) {
@@ -88,6 +114,9 @@ export function needsBodyTransform(flags: BodyTransformFlags): boolean {
     flags.injectGlmSearch ||
       flags.injectKimiSearch ||
       flags.isKimi ||
-      flags.isDeepSeek,
+      flags.isDeepSeek ||
+      flags.disableThinking ||
+      flags.isOpenAI ||
+      flags.isQwen,
   )
 }

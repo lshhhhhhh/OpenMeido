@@ -53,7 +53,7 @@ const BACKENDS = {
   deepseek: {
     baseUrl: 'https://api.deepseek.com',
     envKey: 'DEEPSEEK_API_KEY',
-    defaultModel: 'deepseek-chat',
+    defaultModel: 'deepseek-flash',
   },
   gemini: {
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',

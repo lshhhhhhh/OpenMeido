@@ -805,9 +805,13 @@ const api = {
      * User clicked "立即更新" on the banner after seeing the available
      * notification — main starts the actual file download. Progress
      * flows via updater:progress; completion via updater:downloaded.
+     * Resolves `{ ok: false, error }` when every mirror + GitHub failed
+     * (undefined in dev).
      */
-    download(): Promise<void> {
-      return ipcRenderer.invoke('updater:download') as Promise<void>
+    download(): Promise<{ ok: boolean; error?: string } | null | undefined> {
+      return ipcRenderer.invoke('updater:download') as Promise<
+        { ok: boolean; error?: string } | null | undefined
+      >
     },
     /**
      * Trigger a one-off update check (vs. waiting for the 30 s post-

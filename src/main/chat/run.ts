@@ -19,6 +19,7 @@ import { resolvePersona } from '../../shared/config.js'
 import { formatLocalNow } from '../../shared/time-format.js'
 import {
   performanceModel,
+  supportsVision,
   visionModel,
   resolveTemperature,
 } from '../../shared/lightweight-models.js'
@@ -29,11 +30,12 @@ import { pickColdStartLine } from '../lines-host.js'
 import { recordUsage, providerFromUrl } from '../usage-host.js'
 import { createTextDeltaFilter } from '../chat-text-filter.js'
 import { classifyAndApply } from '../emotion-classifier.js'
-import { transformOpenAIBody, needsBodyTransform } from '../openai-compat-body.js'
-import { wrapKimiSearchResponse } from './kimi-search-stream.js'
+import { fetchWithTransientRetry, makeProviderFetch } from '../llm-fetch.js'
+import { friendlyLlmError } from '../llm-errors.js'
 import { isMailEnabled } from '../mail-host.js'
 
 import { setActiveEmit } from './active-emit.js'
+import { setTurnUserText } from './tool-guard.js'
 import {
   cleanInlineText,
   extractBakedEmotion,
@@ -65,14 +67,11 @@ import { readClipboard, readWebPage, readFileTool } from './tools/perception.js'
 // always invoked once per reply with a lightweight LLM call, so every
 // turn ends with the right face instead of whatever was held last.
 
-// Kimi `$web_search` IS supported via fetch wrapping (added 2026-05):
-// request-side injects the builtin_function tool entry, response-side
-// strips the builtin_function tool_call chunks from the SSE stream
-// before Vercel AI SDK's strict parser rejects them. See
-// chat/kimi-search-stream.ts + openai-compat-body.ts (injectKimiSearch).
-// Moonshot's server auto-executes the search; we just need to pipe
-// through the grounded continuation text. No client-side tool handler
-// required, no separate non-streaming path.
+// Kimi `$web_search` is supported via fetch wrapping: request-side
+// injects the builtin_function tool entry; response-side hides the
+// builtin tool_call from Vercel AI SDK and performs the tool-result echo
+// round-trip Moonshot requires before it streams the grounded answer.
+// See chat/kimi-search-stream.ts + llm-fetch.ts.
 
 /**
  * Wrap a tools map so any (toolName + identical args) called more than
@@ -158,6 +157,9 @@ export async function runChat(
 ): Promise<void> {
   const localEmit = (body: ChatEventBody): void => emit({ messageId, ...body })
   setActiveEmit(localEmit)
+  // What the user actually typed this turn — tool-guard checks tool
+  // paths / URLs against it before touching files or the network.
+  setTurnUserText(userText)
   console.log(
     `[chat] runChat entry messageId=${messageId} userText="${userText.slice(0, 60)}" imageCount=${images?.length ?? 0}`,
   )
@@ -204,22 +206,11 @@ export async function runChat(
 
     const memory = getMemoryService()
 
-    // Fire-and-forget the user-turn write. We don't await it — the model
-    // call doesn't depend on storage finishing, and a slow embedding API
-    // shouldn't block the user's reply latency.
-    // Images travel with the user episode so follow-up turns can re-attach
-    // them — see episodesToMessages for the replay logic.
-    if (memory) {
-      const persistedImages =
-        images && images.length > 0
-          ? images.map((img) => ({ mimeType: img.mimeType, base64: img.base64 }))
-          : undefined
-      void memory.addEpisode('user', userText, undefined, persistedImages)
-    }
-
     // Pull context BEFORE the model call so the retrieved messages can be
     // interleaved. retrieve() awaits embedding for the query, so this is
-    // the one place where we do wait.
+    // the one place where we do wait. Runs BEFORE this turn's user
+    // episode is written — otherwise the recent window (and semantic
+    // recall) returned the current message too and it was sent twice.
     const tRetrieve = Date.now()
     console.log('[chat] retrieving context (embed + recent + recalled)...')
     const { recent, recalled } = memory
@@ -228,10 +219,29 @@ export async function runChat(
     console.log(
       `[chat] retrieve done in ${Date.now() - tRetrieve}ms recent=${recent.length} recalled=${recalled.length}`,
     )
-    const historyMessages = episodesToMessages(
+    let historyMessages = episodesToMessages(
       [...recalled, ...recent],
       cfg.memory.imageRecallTurns,
     )
+
+    // Don't await the user-turn write — the model call doesn't depend on
+    // storage finishing, and a slow embedding shouldn't block the reply.
+    // The promise heads the persistence chain below so the assistant
+    // episodes can never land before it. Images travel with the user
+    // episode so follow-up turns can re-attach them — see
+    // episodesToMessages for the replay logic.
+    const userEpisodeWrite: Promise<unknown> = memory
+      ? memory
+          .addEpisode(
+            'user',
+            userText,
+            undefined,
+            images && images.length > 0
+              ? images.map((img) => ({ mimeType: img.mimeType, base64: img.base64 }))
+              : undefined,
+          )
+          .catch((err) => console.warn('[chat] persist user episode failed:', err))
+      : Promise.resolve()
 
     const persona = resolvePersona(cfg.persona)
 
@@ -263,22 +273,38 @@ export async function runChat(
     // Provider-tool result type (opaque to us). We just need to splat it
     // into the `tools` map when set; the SDK validates the shape internally.
     let googleSearchTool: unknown = null
-    // Three-tier model policy: fast for side tasks (greeting / classifier
-    // / etc., handled inside chat-host.runExtraction), perf for normal
-    // chat, vision when the user attached images this turn. We pick perf
-    // or vision automatically; cfg.backend.model is the manual-override
-    // escape hatch — when set, it wins (custom fine-tunes, local LM
-    // Studio model names, etc).
+    // Model choice: cfg.backend.model (always set — the wizard/Settings
+    // store the provider's perf tier there) for normal chat. Image turns
+    // need a model that can see: if the chosen one is a known text-only
+    // id (glm-5.1, deepseek-v4-pro, …) we switch to the host's vision tier
+    // for THIS turn. Before, the saved model always won and GLM — the
+    // default recommendation — 400'd on every pasted image.
+    const baseUrl = cfg.backend.baseUrl
     const visionRequired = images !== undefined && images.length > 0
-    const autoModelId = visionRequired
-      ? visionModel(cfg.backend.baseUrl) ?? performanceModel(cfg.backend.baseUrl)
-      : performanceModel(cfg.backend.baseUrl)
-    const modelId = cfg.backend.model || autoModelId || cfg.backend.model
-    if (cfg.backend.baseUrl.includes('googleapis.com')) {
-      const google = createGoogleGenerativeAI({ apiKey })
+    let modelId = cfg.backend.model || performanceModel(baseUrl) || ''
+    if (visionRequired && !supportsVision(baseUrl, modelId)) {
+      const vis = visionModel(baseUrl)
+      if (vis) {
+        console.log(`[chat] image turn: "${modelId}" is text-only → using "${vis}"`)
+        modelId = vis
+      }
+    }
+    // Images replayed from earlier turns (imageRecallTurns) would 400 a
+    // text-only model the same way. The model already answered about
+    // them back then, so a placeholder loses little.
+    if (!supportsVision(baseUrl, modelId)) {
+      historyMessages = stripImagesFromMessages(historyMessages)
+    }
+    if (baseUrl.includes('googleapis.com')) {
+      const google = createGoogleGenerativeAI({ apiKey, fetch: fetchWithTransientRetry })
       model = google(modelId)
-      if (cfg.backend.searchEnabled) {
+      // @ai-sdk/google only sends function tools alongside googleSearch
+      // for gemini-3* ids; on anything else it silently DROPS our tools
+      // (tasks / mail / files / tables). Search is the lesser loss.
+      if (cfg.backend.searchEnabled && modelId.includes('gemini-3')) {
         googleSearchTool = google.tools.googleSearch({})
+      } else if (cfg.backend.searchEnabled) {
+        console.log(`[chat] googleSearch skipped: "${modelId}" can't combine it with function tools`)
       }
     } else {
       // GLM (bigmodel.cn) supports a non-standard `web_search` tool that
@@ -294,12 +320,12 @@ export async function runChat(
       const isKimi =
         cfg.backend.baseUrl.includes('moonshot.cn') ||
         cfg.backend.baseUrl.includes('moonshot.ai')
+      // (Was also matching any id containing "r1" — which sent a stray
+      // reasoning_content field to unrelated providers.)
       const isDeepSeek =
         cfg.backend.baseUrl.toLowerCase().includes('deepseek') ||
         cfg.backend.baseUrl.toLowerCase().includes('siliconflow') ||
-        modelId.toLowerCase().includes('deepseek') ||
-        modelId.toLowerCase().includes('r1') ||
-        modelId.toLowerCase().includes('reasoner')
+        modelId.toLowerCase().includes('deepseek')
 
       const injectGlmSearch = isGlm && cfg.backend.searchEnabled
       const injectKimiSearch = isKimi && cfg.backend.searchEnabled
@@ -317,40 +343,27 @@ export async function runChat(
             ') is not Gemini / GLM / Kimi. No-op.',
         )
       }
-      // Provider-specific body mutations live in openai-compat-body.ts —
-      // see that file for the per-flag rationale (GLM web_search inject,
-      // Kimi $web_search inject, Kimi thinking-disable, DeepSeek
-      // reasoning_content fill).
-      const bodyFlags = { injectGlmSearch, injectKimiSearch, isKimi, isDeepSeek }
-      const wrappedFetch = needsBodyTransform(bodyFlags)
-        ? ((async (url, init) => {
-            if (init && init.method === 'POST' && typeof init.body === 'string') {
-              try {
-                const body = JSON.parse(init.body)
-                transformOpenAIBody(body, bodyFlags)
-                init = { ...init, body: JSON.stringify(body) }
-              } catch {
-                /* malformed body — fall through to original fetch */
-              }
-            }
-            const response = await globalThis.fetch(
-              url as Parameters<typeof globalThis.fetch>[0],
-              init as Parameters<typeof globalThis.fetch>[1],
-            )
-            // Response-side filtering: strip Moonshot's builtin_function
-            // tool_call chunks from the SSE stream so Vercel AI SDK's
-            // strict parser doesn't choke on type='builtin_function'.
-            // Only active when we asked Moonshot to use $web_search.
-            if (injectKimiSearch) {
-              return wrapKimiSearchResponse(response)
-            }
-            return response
-          }) as typeof globalThis.fetch)
-        : undefined
+      // Provider-specific body mutations (openai-compat-body.ts), the Kimi
+      // search round-trip, and transient-429 retry all live in the fetch
+      // built by llm-fetch.ts.
+      // Doubao Seed thinks by default and nothing in our stream handling
+      // needs it — switch it off like Kimi (faster, no reasoning-replay
+      // surprises on tool turns).
+      const isDoubao =
+        cfg.backend.baseUrl.includes('volces.com') || cfg.backend.baseUrl.includes('ark.cn-beijing')
+      const wrappedFetch = makeProviderFetch({
+        injectGlmSearch,
+        injectKimiSearch,
+        isKimi,
+        isDeepSeek,
+        disableThinking: isDoubao,
+        isOpenAI: cfg.backend.baseUrl.includes('openai.com'),
+        isQwen: cfg.backend.baseUrl.includes('dashscope.aliyuncs.com'),
+      })
       const openai = createOpenAI({
         baseURL: cfg.backend.baseUrl,
         apiKey,
-        ...(wrappedFetch ? { fetch: wrappedFetch } : {}),
+        fetch: wrappedFetch,
       })
       // .chat() forces the classic POST /chat/completions path. The default
       // openai(...) factory in @ai-sdk/openai v6 hits POST /responses (the
@@ -377,7 +390,7 @@ export async function runChat(
             ...images.map((img) => ({
               type: 'image' as const,
               image: Buffer.from(img.base64, 'base64'),
-              mimeType: img.mimeType,
+              mediaType: img.mimeType,
             })),
           ]
         : userText
@@ -542,7 +555,9 @@ export async function runChat(
         readWebPage,
         readFile: readFileTool,
         presentTable,
-        ...(cfg.mail.enabled
+        // Same flag as the system prompt above (includes fake-mail demo
+        // mode and .env IMAP creds) — the two used to disagree.
+        ...(mailEnabled
           ? { listMailFolders, listRecentEmails, readEmail, draftEmailReply }
           : {}),
         ...(googleSearchTool ? { google_search: googleSearchTool } : {}),
@@ -563,6 +578,11 @@ export async function runChat(
       // the renderer — the user sees the response repeated 2-3 times.
       // Better to surface the error once than to duplicate output.
       maxRetries: 0,
+      // A stalled provider stream used to leave the chat panel "busy"
+      // forever with no way out. chunkMs covers silence between chunks
+      // (reasoning deltas count, so thinking models are fine); totalMs
+      // caps the whole agent loop.
+      timeout: { chunkMs: 90_000, totalMs: 300_000 },
     })
 
     // Accumulate the full assistant text so we can persist it after streaming.
@@ -633,8 +653,11 @@ export async function runChat(
           rawText += part.text
           const { emit: clean, resetLength } = filter.process(part.text)
           if (resetLength && resetLength > 0) {
-            // Implicit `</think>` arrived — roll back the reasoning prefix.
+            // Implicit `</think>` arrived — roll back the reasoning prefix,
+            // including from the capture that gets persisted (hidden
+            // reasoning used to be saved and replayed into history).
             assistantText = assistantText.slice(0, -resetLength)
+            curCap.text = curCap.text.slice(0, -resetLength)
             currentStepEmittedLen = Math.max(0, currentStepEmittedLen - resetLength)
             localEmit({ type: 'text-reset', length: resetLength })
           }
@@ -683,9 +706,12 @@ export async function runChat(
           break
         }
         case 'error':
+          // API errors arrive as a stream part, not a throw — map them
+          // here too or users see raw provider JSON.
+          console.warn('[chat] stream error:', part.error)
           localEmit({
             type: 'error',
-            error: part.error instanceof Error ? part.error.message : String(part.error),
+            error: friendlyLlmError(part.error, { baseUrl, modelId }),
           })
           return
         default:
@@ -697,6 +723,7 @@ export async function runChat(
     const flushed = filter.flush()
     if (flushed.resetLength && flushed.resetLength > 0) {
       assistantText = assistantText.slice(0, -flushed.resetLength)
+      curCap.text = curCap.text.slice(0, -flushed.resetLength)
       currentStepEmittedLen = Math.max(0, currentStepEmittedLen - flushed.resetLength)
       localEmit({ type: 'text-reset', length: flushed.resetLength })
     }
@@ -760,6 +787,17 @@ export async function runChat(
       localEmit({ type: 'text', delta: hint })
     }
 
+    // Nothing to show at all — typically the step budget ran out mid-tool
+    // loop, or a provider ended the stream without text. An empty bubble
+    // reads as "she froze"; say something instead.
+    if (!assistantText.trim()) {
+      console.warn('[chat] turn ended with no text (step cap or empty completion)')
+      const hint = '（我查了一圈，但没来得及整理好……主人能换个问法再问一次吗？）'
+      assistantText = hint
+      curCap.text = hint
+      localEmit({ type: 'text', delta: hint })
+    }
+
     // Push the final in-progress capture. After the last tool-result there's
     // usually one more step worth of text (the model's wrap-up reply) — and
     // even for tool-less turns the single text-only step lives here.
@@ -786,7 +824,7 @@ export async function runChat(
       // with: "an assistant message with 'tool_calls' must be followed by
       // tool messages responding to each 'tool_call_id'" (Kimi / strict
       // OpenAI-compat backends).
-      let persistChain: Promise<unknown> = Promise.resolve()
+      let persistChain: Promise<unknown> = userEpisodeWrite
       for (const cap of captures) {
         const stepText = cleanInlineText(cap.text)
         if (stepText || cap.calls.length > 0) {
@@ -865,12 +903,12 @@ export async function runChat(
     }
 
     // Record token usage for the Settings → AI 用量 dashboard.
-    // result.usage from streamText resolves AFTER the stream fully
-    // drains; awaiting it here at the end is the safe moment. Wrap
-    // defensively — provider impls vary and a usage shape mismatch
-    // shouldn't taint the user-visible "done" event.
+    // totalUsage (all steps) — `usage` is the LAST step only, which
+    // under-counted every tool-calling turn. Resolves after the stream
+    // drains. Wrap defensively — provider impls vary and a usage shape
+    // mismatch shouldn't taint the user-visible "done" event.
     try {
-      const usage = (await result.usage) as
+      const usage = (await result.totalUsage) as
         | {
             inputTokens?: number
             outputTokens?: number
@@ -895,9 +933,11 @@ export async function runChat(
 
     localEmit({ type: 'done' })
   } catch (err) {
+    console.warn('[chat] runChat failed:', err)
+    const cfg = getConfig()
     localEmit({
       type: 'error',
-      error: friendlyError(err),
+      error: friendlyLlmError(err, { baseUrl: cfg.backend.baseUrl, modelId: cfg.backend.model }),
     })
   } finally {
     setActiveEmit(null)
@@ -905,31 +945,19 @@ export async function runChat(
 }
 
 /**
- * Translate provider-side error messages into something a user can act on.
- * The bare deserialize errors from DeepSeek / Volcengine etc. read like
- * compiler output ("unknown variant `image_url`") — a one-line hint pointing
- * at the actual cause saves a lot of "wait what?".
+ * Replace image parts in replayed history with a short text marker, for
+ * models that can't take images. Returns new message objects; the input
+ * is left untouched.
  */
-function friendlyError(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err)
-  // DeepSeek V4 chat completions doesn't accept image_url content — it
-  // errors with this exact deserialize message. Surface a fix instead.
-  if (raw.includes("unknown variant `image_url`")) {
-    return (
-      'DeepSeek 当前不支持发图。要用截屏请换成 GLM / Gemini / Qwen / Doubao —— ' +
-      'Settings → AI 顶部 chip 切换。（原始错误：' +
-      raw.slice(0, 120) +
-      '…）'
+function stripImagesFromMessages(messages: ModelMessage[]): ModelMessage[] {
+  return messages.map((msg) => {
+    if (msg.role !== 'user' || !Array.isArray(msg.content)) return msg
+    if (!msg.content.some((p) => p.type === 'image' || p.type === 'file')) return msg
+    const content = msg.content.map((p) =>
+      p.type === 'image' || p.type === 'file'
+        ? { type: 'text' as const, text: '[图片：当前模型看不到]' }
+        : p,
     )
-  }
-  // Gemini-specific message-sequence rejection. Should be prevented by
-  // the pre-streamText sanding above; if it still slips through, point
-  // the user at the workaround instead of dumping the raw error.
-  if (raw.includes('function call turn comes immediately after')) {
-    return (
-      'Gemini 拒绝了消息序列（它要求 tool 调用必须紧跟用户或上一个 tool 结果）。' +
-      '通常重发就好；如果反复出现，可以临时换 GLM / Qwen / Doubao —— Settings → AI 顶部切换。'
-    )
-  }
-  return raw
+    return { ...msg, content }
+  })
 }

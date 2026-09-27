@@ -45,7 +45,14 @@ let naiveMode = true
  *  shows "已就绪" while the App banner still nags to download — a real
  *  bug users hit. Calling exitNaiveMemoryMode() here flips the flag,
  *  broadcasts the change, and fires the naive-exit hooks (including
- *  the persona-lore auto-reseed). Subsequent reads return false. */
+ *  the persona-lore auto-reseed). Subsequent reads return false.
+ *
+ *  Safe to poll while a download is mid-flight: findBundledModel only
+ *  says yes when EVERY model file is present and size-verified
+ *  (model.onnx exact), and both writers into hf-cache — our
+ *  embed-download-host (.part + rename) and transformers.js's own cache
+ *  (tmp + rename) — only ever expose complete files at the final path.
+ *  So this can't flip to full mode on a half-written model. */
 export function isNaiveMemoryMode(): boolean {
   if (naiveMode && findBundledModel()) {
     console.log('[memory] isNaiveMemoryMode self-heal: model is on disk, exiting naive mode')
@@ -179,18 +186,12 @@ export async function initMemory(): Promise<void> {
             // once with a trivial input to trigger that path.
             await m.embedLocal('warmup')
             if (naiveMode) {
-              naiveMode = false
               console.log('[memory] remote embed reachable — exiting naive mode')
-              // Tell the renderer so the chat-panel banner can hide and
-              // the Settings panel can refresh. We re-use the existing
-              // embed:downloadComplete channel — the App.tsx + Settings
-              // subscriptions both already listen and update state on
-              // {ok: true}.
-              for (const w of BrowserWindow.getAllWindows()) {
-                if (!w.isDestroyed()) {
-                  w.webContents.send('embed:downloadComplete', { ok: true })
-                }
-              }
+              // Same exit path as a finished download: flips the flag,
+              // fires the naive-exit callbacks (persona-lore reseed — the
+              // old inline version skipped them, so lore stayed
+              // un-embedded) and tells the renderer to hide the banner.
+              exitNaiveMemoryMode()
             }
           } catch (err) {
             console.warn('[memory] remote embed unreachable, staying naive:', err)

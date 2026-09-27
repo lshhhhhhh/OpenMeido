@@ -22,12 +22,23 @@ const FULL_SIZE = { width: 1600, height: 900 }
 const PREVIEW_SIZE = { width: 240, height: 135 }
 
 export interface ScreenInfo {
-  /** Desktop-capturer source id, opaque to renderer; pass back to captureScreenPng. */
+  /** Stable key for this display (see screenKey) — what the exclusion
+   *  list stores. Opaque to the renderer. */
   id: string
   /** Display name from the OS — usually "Screen 1" / "屏幕 2" etc. */
   name: string
   /** Tiny base64 PNG preview for the screen picker UI. */
   previewBase64: string
+}
+
+/**
+ * Exclusion-list key for a capture source. Prefers the OS display id
+ * (stable across launches and Electron upgrades) over the source id,
+ * whose format Electron has changed before — and a changed format made
+ * every stored exclusion silently stop matching.
+ */
+function screenKey(s: Electron.DesktopCapturerSource): string {
+  return s.display_id ? `display:${s.display_id}` : s.id
 }
 
 /**
@@ -40,7 +51,7 @@ export async function listScreens(): Promise<ScreenInfo[]> {
     thumbnailSize: PREVIEW_SIZE,
   })
   return sources.map((s) => ({
-    id: s.id,
+    id: screenKey(s),
     name: s.name || s.id,
     previewBase64: s.thumbnail.toPNG().toString('base64'),
   }))
@@ -63,8 +74,21 @@ export async function captureAllScreensPng(
   // Honor the user's exclusion list — they opted certain displays out
   // of "what the AI can see" via Settings → 主动 → 屏幕选择. Empty list
   // = capture everything (default).
+  // Match either key form: lists saved before v0.4.0 hold raw source ids.
   const excluded = new Set(excludedIds)
-  const filtered = sources.filter((s) => !excluded.has(s.id))
+  const isExcluded = (s: Electron.DesktopCapturerSource): boolean =>
+    excluded.has(s.id) || excluded.has(screenKey(s))
+  const filtered = sources.filter((s) => !isExcluded(s))
+  // Fail closed: the user excluded something, nothing matches, and there
+  // are still several screens — the ids went stale and we can't tell
+  // which one they meant to hide. (One screen left = the excluded
+  // monitor was most likely unplugged, which is fine to proceed with.)
+  if (excludedIds.length > 0 && filtered.length === sources.length && sources.length >= 2) {
+    throw new Error(
+      '屏幕排除设置对不上现在的显示器了。为了不误截你排除的屏幕，先暂停截屏——' +
+        '去 Settings → 主动 → 屏幕选择 重新勾选一次就好。',
+    )
+  }
   if (excludedIds.length > 0) {
     console.log(
       `[screen] excluded ${sources.length - filtered.length}/${sources.length} source(s) by user setting`,

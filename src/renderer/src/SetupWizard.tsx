@@ -114,9 +114,9 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
       }
       const testResult = await window.api.chat.test(draftBackend)
       if (!testResult.ok) {
-        setError(
-          `连接测试失败：${testResult.error ?? '未知错误'}。可能 key 错了 / 网络不通 / 模型名不对。`,
-        )
+        // testBackend already maps provider errors to an actionable
+        // sentence (bad key / no balance / retired model / network).
+        setError(`连接测试失败：${testResult.error ?? '未知错误'}`)
         setSaving(false)
         return
       }
@@ -138,6 +138,7 @@ export function SetupWizard({ initial, onSkip, onSave }: Props) {
           model: defaultModel,
           apiKey: trimmed,
           apiKeys,
+          fastModel: initial.backend.fastModel,
           // Preserve whatever toggle the user had before; this wizard is
           // about provider/key, not search settings.
           searchEnabled: initial.backend.searchEnabled,

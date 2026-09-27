@@ -45,7 +45,9 @@
 
 到 [Releases](https://github.com/lshhhhhhh/OpenMeido/releases) 拿最新的 `OpenMeido-Setup-X.X.X.exe`，双击安装。无签名，Windows SmartScreen 弹一次「更多信息 → 仍要运行」过掉。
 
-**国内用户**：装好后第一次升级慢的话，去 Settings → 关于 → 下载源切到 **ghproxy** 镜像，速度从几十 KB/s 提到 1-5 MB/s。
+**国内用户**：自动升级慢的话，去 Settings → 关于 → 下载源切到 **国内镜像**，速度从几十 KB/s 提到 1-5 MB/s。版本信息和校验和仍然从 GitHub 拿，镜像只负责传安装包，改不了内容。
+
+> **v0.3.x 切过 ghproxy 的用户请注意**：旧版本用的 ghproxy.com 已经失效，App 里的自动更新会一直检查不到新版。请到 [Releases](https://github.com/lshhhhhhh/OpenMeido/releases) 手动下载一次最新安装包，直接覆盖安装即可（设置和记忆都会保留）。之后就能正常自动更新了。
 
 ### 首次启动
 
@@ -53,10 +55,10 @@
 
 | Backend | 特点 |
 |---|---|
-| **智谱 GLM** | 免费多模态 · 国内 · 内置搜索 ★ 推荐 |
-| **Kimi** | Moonshot · 内置搜索 · 国内 / 国际两个端点 |
+| **智谱 GLM** | 免费多模态 · 国内 · 内置搜索 ★ 推荐（默认的 glm-5.1 用新人赠送额度，用完后可在 Settings 换成免费的 glm-4.6v-flash） |
+| **Kimi** | Moonshot · 内置搜索 · 国内 / 国际两个端点（key 不通用） |
 | Gemini | Google · 有免费额度 · grounding 搜索 |
-| DeepSeek | V4 价格屠夫（不支持图） |
+| DeepSeek | V4 价格屠夫 · 发图时自动切到能看图的 deepseek-flash |
 | 通义千问 Qwen | 阿里 · 新用户送 token |
 | 豆包 Doubao | 字节 · 国内手机号 |
 | OpenAI | 付费 |
@@ -74,7 +76,7 @@
 - **3 种内置字体**：小赖（日系手书）/ LXGW 文楷 / 得意黑
 - **跨会话记忆**：她记得你的名字、工作、兴趣，自然带进后续对话
 - **透明窗口 + 点穿**：形象边缘点击穿透到桌面，形象本体 + 聊天框正常响应
-- **自动更新**：electron-updater + GitHub Releases，国内可用 ghproxy 镜像
+- **自动更新**：electron-updater + GitHub Releases，国内可切镜像下载（校验和仍来自 GitHub）
 - **本地数据 / 离线优先**：长期记忆 embed 在本地跑（bge-small-zh-v1.5），不上云
 
 ---
@@ -85,7 +87,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `config.json` | Backend / 人设 / 邮箱 / 语音 / 主动模式等 |
+| `config.json` | Backend / 人设 / 邮箱 / 语音 / 主动模式等（API key 和邮箱密码用 Windows DPAPI 加密保存） |
 | `memory.sqlite` | 对话记忆 + 好感度 + 提炼的事实 + lore 碎片 |
 | `live2d-models/<name>/openmeido.json` | 每个 Live2D 模型的情绪/表情绑定 |
 | `lines.json` | 闭嘴按钮反馈台词（不暴露在 UI，高级用户可手编）|
@@ -153,10 +155,10 @@ A setup window asks you to pick an AI backend, register, and paste an API key. *
 
 | Backend | Notes |
 |---|---|
-| **Zhipu GLM** | Free multimodal · China-accessible · built-in search ★ recommended |
+| **Zhipu GLM** | Free multimodal · China-accessible · built-in search ★ recommended (default glm-5.1 runs on the signup credit; switch to the free glm-4.6v-flash once it runs out) |
 | **Kimi** | Moonshot · built-in search · CN / intl endpoints |
 | Gemini | Google · free quota · grounding search |
-| DeepSeek | V4 cheapest (text-only) |
+| DeepSeek | V4 cheapest · image turns auto-switch to deepseek-flash |
 | Qwen | Alibaba · new-user token bonus |
 | Doubao | ByteDance · mainland-China phone required |
 | OpenAI | Paid |
@@ -174,7 +176,7 @@ Want more? Grab any zip from the [Live2D sample library](https://www.live2d.com/
 - **3 bundled fonts**: Xiaolai (Japanese-style handwriting) / LXGW WenKai / Smiley Sans
 - **Cross-session memory**: She remembers your name, work, interests — brings them up naturally
 - **Transparent window + click-through**: empty pixels pass clicks to your desktop; body + chat panel intercept normally
-- **Auto-update**: electron-updater + GitHub Releases (CN users can switch to ghproxy mirror in Settings)
+- **Auto-update**: electron-updater + GitHub Releases (CN users can switch to a download mirror in Settings; version info + checksums still come from GitHub)
 - **Offline-first memory**: bge-small-zh-v1.5 embedding model runs locally, no cloud needed
 
 ---
@@ -185,7 +187,7 @@ All user data under `%APPDATA%/openmeido/`. Settings GUI covers ~all config; han
 
 | File | What |
 |---|---|
-| `config.json` | Backend / persona / mail / voice / proactive |
+| `config.json` | Backend / persona / mail / voice / proactive (API keys + mail password encrypted with Windows DPAPI) |
 | `memory.sqlite` | Chat memory + affinity + distilled facts + lore fragments |
 | `live2d-models/<name>/openmeido.json` | Per-model emotion/expression mapping |
 | `lines.json` | Mute-button feedback lines (not in UI; advanced-user override) |

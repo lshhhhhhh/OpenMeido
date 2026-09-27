@@ -18,6 +18,8 @@ import { pipeline, env, type AutomaticSpeechRecognitionPipeline } from '@hugging
 import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { withHfRemoteLoad } from './local-embed.js'
+
 /**
  * whisper-base is the sweet spot: ~74 MB, ~5x faster than -small, still
  * good Chinese accuracy. -tiny (39 MB) loses too much; -small (244 MB)
@@ -88,7 +90,32 @@ interface ProgressEvent {
   total?: number
 }
 
-async function tryLoad(remoteHost: string): Promise<AutomaticSpeechRecognitionPipeline> {
+/**
+ * Load straight from <userData>/hf-cache without any network. Uses the
+ * per-call `local_files_only` flag instead of the shared env, and skips
+ * the remote lock — so an already-downloaded Whisper doesn't queue behind
+ * an embed-model download (or vice versa).
+ */
+async function tryLoadLocal(cacheDir: string): Promise<AutomaticSpeechRecognitionPipeline> {
+  const t0 = Date.now()
+  console.log(`[stt] loading ${STT_MODEL} from local cache`)
+  const p = await pipeline('automatic-speech-recognition', STT_MODEL, {
+    dtype: 'fp32',
+    local_files_only: true,
+    cache_dir: cacheDir,
+  })
+  console.log(`[stt] loaded from local cache in ${Date.now() - t0}ms`)
+  return p as AutomaticSpeechRecognitionPipeline
+}
+
+async function tryLoad(
+  remoteHost: string,
+  cacheDir: string,
+): Promise<AutomaticSpeechRecognitionPipeline> {
+  // Caller holds withHfRemoteLoad (shared with local-embed): transformers
+  // re-reads these globals for every file, so they must not change until
+  // pipeline() resolves.
+  env.allowRemoteModels = true
   env.remoteHost = remoteHost
   const t0 = Date.now()
   console.log(`[stt] loading ${STT_MODEL} via ${remoteHost}`)
@@ -118,6 +145,7 @@ async function tryLoad(remoteHost: string): Promise<AutomaticSpeechRecognitionPi
   }
   const p = await pipeline('automatic-speech-recognition', STT_MODEL, {
     dtype: 'fp32',
+    cache_dir: cacheDir,
     progress_callback: handleProgress,
   } as unknown as Parameters<typeof pipeline>[2])
   console.log(`[stt] loaded from ${remoteHost} in ${Date.now() - t0}ms`)
@@ -129,7 +157,9 @@ function getTranscriber(): Promise<AutomaticSpeechRecognitionPipeline> {
   const cacheDir = join(app.getPath('userData'), 'hf-cache')
   mkdirSync(cacheDir, { recursive: true })
   env.cacheDir = cacheDir
-  env.allowRemoteModels = true
+  // NOTE: env.allowRemoteModels / env.remoteHost are set inside the
+  // shared remote lock (tryLoad), never here — local-embed's loader
+  // shares the same global env object.
   // Mark "downloading" before we start so the UI can show a spinner from
   // the moment the user taps mic / clicks "下载". cleared on success or
   // failure below.
@@ -142,20 +172,38 @@ function getTranscriber(): Promise<AutomaticSpeechRecognitionPipeline> {
     broadcast('stt:downloadProgress', { ...downloadState })
   }
   const attempt = (async (): Promise<AutomaticSpeechRecognitionPipeline> => {
-    let lastErr: unknown
-    for (const host of HF_MIRRORS) {
+    if (modelAlreadyPresent) {
       try {
-        const p = await tryLoad(host)
-        downloadState.inProgress = false
-        if (!modelAlreadyPresent) {
-          broadcast('stt:downloadComplete', { ok: true })
-        }
-        return p
+        return await tryLoadLocal(cacheDir)
       } catch (err) {
-        lastErr = err
-        console.warn(`[stt] ${host} failed:`, err instanceof Error ? err.message : err)
+        // Some file the pipeline needs isn't cached (e.g. an older
+        // partial fetch) — fall through to the remote path to fill it in.
+        console.warn(
+          `[stt] local load failed, trying remote:`,
+          err instanceof Error ? err.message : err,
+        )
       }
     }
+    const loaded = await withHfRemoteLoad(async () => {
+      let lastErr: unknown
+      for (const host of HF_MIRRORS) {
+        try {
+          return { ok: true as const, p: await tryLoad(host, cacheDir) }
+        } catch (err) {
+          lastErr = err
+          console.warn(`[stt] ${host} failed:`, err instanceof Error ? err.message : err)
+        }
+      }
+      return { ok: false as const, lastErr }
+    })
+    if (loaded.ok) {
+      downloadState.inProgress = false
+      if (!modelAlreadyPresent) {
+        broadcast('stt:downloadComplete', { ok: true })
+      }
+      return loaded.p
+    }
+    const lastErr = loaded.lastErr
     downloadState.inProgress = false
     const msg = lastErr instanceof Error ? lastErr.message : String(lastErr ?? 'unknown')
     if (!modelAlreadyPresent) {

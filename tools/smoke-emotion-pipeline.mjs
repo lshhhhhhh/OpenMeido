@@ -102,7 +102,9 @@ await check('expression branch: broadcasts setExpression + pushes event', async 
     modelName: 'fake',
   })
   assert.equal(s.sent.length, 1, 'expected exactly 1 command')
-  assert.deepEqual(s.sent[0], { type: 'setExpression', name: 'joy_face' })
+  // decayMs is only set when the caller passes textLength (baked-emotion
+  // path); the classifier path here leaves it undefined.
+  assert.deepEqual(s.sent[0], { type: 'setExpression', name: 'joy_face', decayMs: undefined })
   assert.equal(s.events.length, 1, 'expected exactly 1 event')
   assert.equal(s.events[0].emotion, '开心')
   assert.equal(s.events[0].kind, 'expression')

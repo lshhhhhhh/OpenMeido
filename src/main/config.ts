@@ -7,27 +7,86 @@
  */
 
 import Store from 'electron-store'
-import { BrowserWindow, safeStorage } from 'electron'
+import { app, BrowserWindow, safeStorage } from 'electron'
+import { renameSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 
-import { configSchema, ConfigIPC, type Config } from '../shared/config.js'
-import { migrateProactiveLegacyKnobs } from '../shared/config-migrations.js'
+import {
+  configSchema,
+  ConfigIPC,
+  isBackendConfigured,
+  isLocalEndpoint,
+  mapConfigSecrets,
+  type Config,
+} from '../shared/config.js'
+import { parseConfigLenient, runConfigMigrations } from '../shared/config-migrations.js'
 import { detectCelebrationTriggers } from '../shared/celebrations.js'
 
-const store = new Store<Config>({
-  name: 'config',
-  defaults: configSchema.parse({}),
-})
+/** What went wrong loading config.json at boot, for a one-time notice. */
+export interface ConfigBootIssues {
+  /** config.json wasn't valid JSON — moved aside to this path. */
+  corruptBackup?: string
+  /** Fields that failed validation and fell back to defaults. */
+  dropped: string[]
+  /** Copy of the pre-repair file when `dropped` is non-empty. */
+  invalidBackup?: string
+  /** Encrypted API keys couldn't be decrypted (profile / machine moved). */
+  secretsLost?: boolean
+}
+const bootIssues: ConfigBootIssues = { dropped: [] }
+export function getConfigBootIssues(): ConfigBootIssues {
+  return bootIssues
+}
 
-// Pre-Zod migrations for shape changes between releases. Zod silently
-// strips unknown keys, which is fine for additions but loses information
-// when a boolean field is replaced by an enum (e.g. proactive.enabled →
-// proactive.mode). Translate before parsing so opt-outs survive the
-// upgrade.
-migrateProactiveLegacyKnobs(store.store as unknown as Record<string, unknown>)
+function openStore(): Store<Config> {
+  const opts = { name: 'config', defaults: configSchema.parse({}) }
+  try {
+    return new Store<Config>(opts)
+  } catch (err) {
+    // conf throws from its constructor on unparseable JSON
+    // (clearInvalidConfig defaults to false). Before, that meant the app
+    // could never start again until the user found and deleted the file.
+    // Move it aside (keeps their keys recoverable by hand) and start fresh.
+    const file = join(app.getPath('userData'), 'config.json')
+    const backup = file.replace(/\.json$/, `.corrupt-${Date.now()}.json`)
+    try {
+      renameSync(file, backup)
+      bootIssues.corruptBackup = backup
+    } catch (moveErr) {
+      console.error('[config] could not move corrupt config.json aside:', moveErr)
+    }
+    console.error(`[config] config.json unreadable — moved to ${backup}:`, err)
+    return new Store<Config>(opts)
+  }
+}
 
-// Re-validate on load — recovers gracefully if a previous version wrote a
-// shape we no longer accept, or if the user hand-edited the JSON badly.
-let current: Config = configSchema.parse(store.store)
+const store = openStore()
+
+// `store.store` re-reads and re-parses the file on EVERY access, so take
+// one copy and do everything on it — the old code migrated one copy and
+// then parsed a fresh one, silently discarding every migration.
+const raw = store.store as unknown as Record<string, unknown>
+
+// Pre-Zod migrations for shape changes between releases (Zod silently
+// strips unknown keys, which loses intent when e.g. a boolean becomes an
+// enum) and for provider-retired model ids. See shared/config-migrations.ts.
+if (runConfigMigrations(raw)) console.log('[config] applied config migrations')
+
+// Validate without ever throwing: a single bad field falls back to its
+// default instead of bricking startup.
+const lenient = parseConfigLenient(raw)
+if (lenient.dropped.length > 0) {
+  bootIssues.dropped = lenient.dropped
+  const backup = store.path.replace(/\.json$/, `.invalid-${Date.now()}.json`)
+  try {
+    writeFileSync(backup, JSON.stringify(raw, null, 2), 'utf-8')
+    bootIssues.invalidBackup = backup
+  } catch (err) {
+    console.warn('[config] could not back up invalid config:', err)
+  }
+  console.warn(`[config] reset invalid fields to defaults: ${lenient.dropped.join(', ')}`)
+}
+let current: Config = lenient.config
 
 // Wizard-completion migration. The flag was added in v0.0.40; existing
 // installs land on the default `false` which would re-prompt long-time
@@ -45,6 +104,110 @@ store.store = current
 
 // Migration body lives in src/shared/config-migrations.ts so it stays
 // unit-testable from plain Node (no Electron module-load side effects).
+
+// ── Credentials at rest ─────────────────────────────────────────────────
+// API keys / TTS tokens are stored in config.json as `enc:v1:<base64>`
+// (safeStorage → DPAPI on Windows) and held as plaintext only in memory.
+// Before v0.4.0 every provider key sat in config.json in the clear.
+//
+// Uses the async safeStorage API — the sync one is deprecated in Electron
+// 45 and removed in 46. safeStorage only works after app `ready`, but this
+// module loads earlier, so until unlockConfigSecrets() runs (first thing
+// in whenReady) `current` still holds the ciphertext strings. Nothing needs
+// a key before ready; isAiConfigured only checks non-emptiness.
+//
+// (mail.password still uses its older sync scheme — see setConfig and
+// decryptMailPassword; move it over before bumping to Electron 46.)
+const SECRET_PREFIX = 'enc:v1:'
+let secretsUnlocked = false
+let encryptionAvailable = false
+/** plaintext → ciphertext for every secret seen, so saves that don't
+ *  change a key stay synchronous (and don't rewrite fresh ciphertext). */
+const cipherCache = new Map<string, string>()
+
+/** Sealed copy for disk, or null if some secret isn't encrypted yet. */
+function sealFromCache(cfg: Config): Config | null {
+  if (!secretsUnlocked || !encryptionAvailable) return cfg
+  let missing = false
+  const sealed = mapConfigSecrets(cfg, (v) => {
+    if (!v || v.startsWith(SECRET_PREFIX)) return v
+    const c = cipherCache.get(v)
+    if (!c) missing = true
+    return c ?? ''
+  })
+  return missing ? null : sealed
+}
+
+let persistChain: Promise<void> = Promise.resolve()
+
+/** Write `current` to disk with secrets sealed. Synchronous when every
+ *  secret is already cached; otherwise encrypts the new ones first. */
+function persist(): void {
+  const sealed = sealFromCache(current)
+  if (sealed) {
+    store.store = sealed
+    return
+  }
+  persistChain = persistChain.then(async () => {
+    try {
+      const pending = new Set<string>()
+      mapConfigSecrets(current, (v) => {
+        if (v && !v.startsWith(SECRET_PREFIX) && !cipherCache.has(v)) pending.add(v)
+        return v
+      })
+      for (const plain of pending) {
+        const buf = await safeStorage.encryptStringAsync(plain)
+        cipherCache.set(plain, SECRET_PREFIX + buf.toString('base64'))
+      }
+      const out = sealFromCache(current) // latest state, not a stale snapshot
+      if (out) store.store = out
+    } catch (err) {
+      // Never fall back to writing plaintext; the next save retries.
+      console.error('[config] could not encrypt credentials — config not saved:', err)
+    }
+  })
+}
+
+/**
+ * Decrypt credentials into memory, and re-save any still stored in
+ * plaintext (first launch after upgrading) encrypted. Await once, right
+ * at the start of app.whenReady, before any window or LLM call.
+ */
+export async function unlockConfigSecrets(): Promise<void> {
+  if (secretsUnlocked) return
+  encryptionAvailable = await safeStorage.isAsyncEncryptionAvailable().catch(() => false)
+  const ciphertexts = new Set<string>()
+  let sawPlaintext = false
+  mapConfigSecrets(current, (v) => {
+    if (v.startsWith(SECRET_PREFIX)) ciphertexts.add(v)
+    else if (v) sawPlaintext = true
+    return v
+  })
+  const plainOf = new Map<string, string>()
+  let lost = false
+  let reEncrypt = false
+  for (const c of ciphertexts) {
+    try {
+      if (!encryptionAvailable) throw new Error('safeStorage unavailable')
+      const r = await safeStorage.decryptStringAsync(Buffer.from(c.slice(SECRET_PREFIX.length), 'base64'))
+      plainOf.set(c, r.result)
+      if (r.shouldReEncrypt) reEncrypt = true
+      else cipherCache.set(r.result, c)
+    } catch (err) {
+      lost = true
+      console.warn('[config] could not decrypt a stored credential:', err)
+      plainOf.set(c, '')
+    }
+  }
+  current = mapConfigSecrets(current, (v) => (v.startsWith(SECRET_PREFIX) ? plainOf.get(v) ?? '' : v))
+  secretsUnlocked = true
+  if (lost) bootIssues.secretsLost = true
+  if ((sawPlaintext || reEncrypt) && encryptionAvailable) {
+    persist()
+    await persistChain
+    console.log('[config] credentials encrypted at rest')
+  }
+}
 
 type ChangeListener = (next: Config) => void
 const mainListeners = new Set<ChangeListener>()
@@ -87,7 +250,7 @@ export function setConfig(next: Config): Config {
   }
 
   current = configSchema.parse(next)
-  store.store = current
+  persist()
 
   // Notify in-process subscribers (chat.ts re-reads provider on next call).
   for (const cb of mainListeners) cb(current)
@@ -153,7 +316,9 @@ export function resolveBackendKey(backend: Config['backend']): string {
   if (url.includes('dashscope.aliyuncs.com')) return process.env.DASHSCOPE_API_KEY ?? ''
   if (url.includes('volces.com') || url.includes('ark.cn-beijing')) return process.env.ARK_API_KEY ?? ''
   if (url.includes('moonshot.cn') || url.includes('moonshot.ai')) return process.env.MOONSHOT_API_KEY ?? ''
-  // Local / self-hosted endpoints often don't need a real key.
+  // Local servers (LM Studio, Ollama…) ignore auth, but the OpenAI client
+  // refuses to send a request without SOME key.
+  if (isLocalEndpoint(url)) return 'local-no-key'
   return process.env.OPENAI_API_KEY ?? ''
 }
 
@@ -195,8 +360,8 @@ export function resolveSovitsConfig(
 /**
  * "Has the USER explicitly configured an AI backend?"
  *
- * Checks `cfg.backend.apiKey` directly — does NOT consult env-var
- * fallback. The env-var path is a developer convenience (so devs don't
+ * Checks `cfg.backend.apiKey` directly (or a local no-key endpoint
+ * like LM Studio) — does NOT consult env-var fallback. The env-var path is a developer convenience (so devs don't
  * have to retype their key after reset:all wipes config), but it would
  * silently bleed through to UX gating and defeat the very mode we want
  * to test. Real production users have no .env, so the distinction is
@@ -213,5 +378,5 @@ export function resolveSovitsConfig(
  * with cold-start replies STILL doesn't fire any LLM. Consistent UX.)
  */
 export function isAiConfigured(cfg: Config = current): boolean {
-  return cfg.backend.apiKey.trim().length > 0
+  return isBackendConfigured(cfg.backend)
 }

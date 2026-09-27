@@ -105,6 +105,14 @@ async function getRecentSelfRemarks(memory: MemoryService): Promise<string[]> {
 
 let pollTimer: NodeJS.Timeout | null = null
 let lastFiredAt = 0
+// Consecutive LLM failures → exponential backoff before the next attempt.
+// A permanent failure (retired model id, bad key, empty wallet) used to
+// reset the cooldown to 0, so with the 5s poll it re-captured every
+// screen and re-sent a doomed request every 5 seconds, indefinitely.
+let consecutiveFailures = 0
+let backoffUntil = 0
+const FAILURE_BACKOFF_BASE_MS = 60_000
+const FAILURE_BACKOFF_MAX_MS = 30 * 60_000
 let lastAssistantAt = Date.now()
 let lastUserAt = Date.now()
 let idleArmed = true // true → next idle threshold crossing can fire
@@ -231,6 +239,7 @@ async function evaluate(): Promise<void> {
   const cadence = cadenceFor(cfg.proactive.mode, cadenceTier)
   if (!cadence) return
   const now = Date.now()
+  if (now < backoffUntil) return
   const sinceLastFire = (now - lastFiredAt) / 1000
   const sinceLastUser = (now - lastUserAt) / 1000
   if (sinceLastFire < cadence.cooldownSec) return
@@ -400,11 +409,22 @@ async function evaluate(): Promise<void> {
       })
     }
   } catch (err) {
-    console.warn('[proactive] LLM call failed:', err)
-    // Release the cooldown so a working call can be tried sooner.
-    lastFiredAt = 0
+    // Back off 1 → 2 → 4 … → 30 min. A transient blip costs one skipped
+    // minute; a permanent error stops hammering the provider (and the
+    // screen) while the user fixes Settings — any successful call resets.
+    consecutiveFailures++
+    const wait = Math.min(
+      FAILURE_BACKOFF_BASE_MS * 2 ** (consecutiveFailures - 1),
+      FAILURE_BACKOFF_MAX_MS,
+    )
+    backoffUntil = Date.now() + wait
+    console.warn(
+      `[proactive] LLM call failed (${consecutiveFailures}x) — backing off ${Math.round(wait / 1000)}s:`,
+      err,
+    )
     return
   }
+  consecutiveFailures = 0
   const decision = parseDecision(raw)
   // Save silent observations from this capture regardless of whether
   // she ends up speaking — the memory of "what was on screen" is
@@ -599,6 +619,10 @@ async function forceOnboardingPeek(): Promise<void> {
 
 export function startProactive(): void {
   stopProactive()
+  // Runs on every config change — the user may just have fixed the key
+  // or model that was failing, so give it a fresh try.
+  consecutiveFailures = 0
+  backoffUntil = 0
   const cfg = getConfig()
   if (cfg.proactive.mode === 'mute') return
   // Initial wait so we don't fire one second after startup. Poll interval

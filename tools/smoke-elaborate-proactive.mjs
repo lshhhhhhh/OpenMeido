@@ -26,7 +26,7 @@ const ds = createOpenAI({
   baseURL: 'https://api.deepseek.com/v1',
   apiKey: process.env.DEEPSEEK_API_KEY,
 })
-const model = ds.chat('deepseek-chat')
+const model = ds.chat('deepseek-flash')
 
 // Non-stranger tiers — elaborate is gated to 0% at stranger by design.
 const TIER_SCORES = [30, 60, 90]

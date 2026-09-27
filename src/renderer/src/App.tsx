@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import type { ChatEvent, ChatImageAttachment } from '../../shared/ipc'
-import { resolvePersona, backgroundFor } from '../../shared/config'
+import { resolvePersona, backgroundFor, isBackendConfigured } from '../../shared/config'
 import { Live2DCanvas } from './live2d/Live2DCanvas'
 import type { Live2DController, Coverage } from './live2d/stage'
 import { playMp3Base64, warmupAudioContext, type PlayHandle } from './tts/player'
@@ -211,8 +211,12 @@ export default function App() {
   // LLM health — 'idle' (untested), 'ok' (last call succeeded), 'error'
   // (last call failed). Updates on chat events.
   const [llmStatus, setLlmStatus] = useState<'idle' | 'ok' | 'error'>('idle')
-  // Transient memory-write-failure banner. Auto-clears after 8 seconds.
-  const [memoryError, setMemoryError] = useState<string | null>(null)
+  // Transient warning strip at the top of the chat panel (memory-write
+  // failures, TTS failures). Auto-clears after 8 seconds.
+  const [panelWarning, setPanelWarning] = useState<string | null>(null)
+  // TTS failures repeat on every reply while e.g. Edge's endpoint is down;
+  // warn at most once a minute instead of on every bubble.
+  const lastTtsWarnAtRef = useRef(0)
   // Naive-mode banner state. True when the embed model isn't on disk
   // yet — banner persists (doesn't auto-clear) until the user finishes
   // the in-app download. Flipped via embed.status() at boot + via the
@@ -546,9 +550,9 @@ export default function App() {
   // Memory write failures bubble up here so silent failures get visible.
   useEffect(() => {
     return window.api.memory.onError((info) => {
-      setMemoryError(`记忆 ${info.operation} 失败: ${info.message}`)
+      setPanelWarning(`记忆 ${info.operation} 失败: ${info.message}`)
       // Auto-dismiss after 8 seconds; user can also click ×.
-      setTimeout(() => setMemoryError(null), 8000)
+      setTimeout(() => setPanelWarning(null), 8000)
     })
   }, [])
 
@@ -935,6 +939,17 @@ export default function App() {
       if ('error' in result) {
         console.warn('[tts] synth failed:', result.error)
         setSpeakingIdx(null)
+        // 'tts: empty text' = nothing speakable after cleanup — not a
+        // failure. Everything else is prefixed 语音合成失败：… by main.
+        // Without this the user just got a silent maid and no clue why.
+        if (
+          result.error.startsWith('语音合成失败') &&
+          Date.now() - lastTtsWarnAtRef.current > 60_000
+        ) {
+          lastTtsWarnAtRef.current = Date.now()
+          setPanelWarning(`${result.error}（可在 Settings → 语音 换引擎）`)
+          setTimeout(() => setPanelWarning(null), 8000)
+        }
         return
       }
       const ctrl = live2dRef.current
@@ -1625,7 +1640,7 @@ export default function App() {
               lineHeight: 1.45,
             }}
           >
-            {memoryError && (
+            {panelWarning && (
               <div
                 style={{
                   fontSize: 11,
@@ -1638,9 +1653,9 @@ export default function App() {
                   alignItems: 'center',
                 }}
               >
-                <span>⚠ {memoryError}</span>
+                <span>⚠ {panelWarning}</span>
                 <button
-                  onClick={() => setMemoryError(null)}
+                  onClick={() => setPanelWarning(null)}
                   style={{
                     border: 'none',
                     background: 'transparent',
@@ -1874,7 +1889,7 @@ export default function App() {
               had to find the gear icon themselves. The banner is
               louder (orange + button) than the embedding-model banner
               because no-AI is a blocking state, not optional. */}
-          {config && !config.backend.apiKey.trim() && (
+          {config && !isBackendConfigured(config.backend) && (
             <div
               style={{
                 ...noDragRegion,
@@ -2734,7 +2749,8 @@ function CelebrationOverlay() {
  */
 type UpdaterState =
   | { kind: 'hidden' }
-  | { kind: 'available'; version: string }
+  /** `error` = the last download attempt failed; shown under the button. */
+  | { kind: 'available'; version: string; error?: string }
   | {
       kind: 'downloading'
       version: string
@@ -2826,13 +2842,24 @@ function UpdaterPill() {
         <span style={{ fontSize: 16 }}>✨</span>
         <span style={{ flex: 1, lineHeight: 1.4 }}>
           发现新版本 <b>v{state.version}</b>，立即下载？
+          {state.error && (
+            <span style={{ display: 'block', color: '#f6a', fontSize: 11, marginTop: 2 }}>
+              {state.error}
+            </span>
+          )}
         </span>
         <button
           onClick={async () => {
             if (busy) return
             setBusy(true)
             try {
-              await window.api.updater.download()
+              const r = await window.api.updater.download()
+              if (r && !r.ok) {
+                // Main tried every mirror + GitHub. Drop back from the
+                // progress bar to the button, with the reason.
+                setState({ kind: 'available', version: state.version, error: r.error })
+                setBusy(false)
+              }
             } catch (err) {
               console.warn('[updater] download request failed:', err)
               setBusy(false)

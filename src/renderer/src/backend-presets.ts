@@ -91,8 +91,8 @@ export function findPreset(url: string): BackendPreset | undefined {
 /**
  * Suggested multimodal-capable model ids per provider, three per family —
  * cheap / balanced / flagship. ALL entries support image input (OpenMeido
- * needs vision for screenshot perception), verified against provider docs
- * 2026-05.
+ * needs vision for screenshot perception) unless noted, verified against
+ * each provider's GET /models 2026-09.
  */
 export const MODEL_SUGGESTIONS_BY_HOST: {
   match: (url: string) => boolean
@@ -100,60 +100,49 @@ export const MODEL_SUGGESTIONS_BY_HOST: {
 }[] = [
   {
     match: (url) => url.includes('openai.com'),
-    models: ['gpt-5.4-mini', 'gpt-5.5', 'gpt-5.5-pro'],
+    models: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'],
   },
   {
     match: (url) => url.includes('googleapis.com'),
-    models: ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview'],
+    // 3.8-flash + 3.5-flash-lite have a free tier; 3.1-pro-preview doesn't.
+    models: ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview'],
   },
   {
     match: (url) => url.includes('anthropic.com'),
-    models: ['claude-haiku-4-5', 'claude-sonnet-4-6', 'claude-opus-4-7'],
+    models: ['claude-haiku-4-5', 'claude-sonnet-5', 'claude-opus-5'],
   },
   {
     match: (url) => url.includes('bigmodel.cn'),
-    // glm-4.6v-flash (free, fast, vision) → glm-4.6v (vision flagship) →
-    // glm-5.1 (text-only newest flagship; only safe when no images in
-    // the turn).
-    models: ['glm-4.6v-flash', 'glm-4.6v', 'glm-5.1'],
+    // glm-4.6v-flash (free, vision) → glm-5.1 (default; text-only, image
+    // turns auto-switch to glm-4.6v) → glm-5.3-flash (2026-08, natively
+    // multimodal, ~1/10 of glm-5.3's price, always thinks) → glm-5.3
+    // (newest text flagship).
+    models: ['glm-4.6v-flash', 'glm-5.1', 'glm-5.3-flash', 'glm-5.3'],
   },
   {
-    // DeepSeek V4 — chat completions endpoint is TEXT-ONLY despite some
-    // community articles claiming "V4 vision". Sending `image_url` content
-    // returns a JSON-deserialize error from their parser. For screenshots
-    // switch backends (GLM / Gemini / Qwen all work).
-    // Legacy `deepseek-chat` / `deepseek-reasoner` aliases retire 2026-07-24.
+    // DeepSeek (2026-07 lineup): deepseek-flash is multimodal and cheap;
+    // deepseek-v4-pro is text-only (image turns auto-switch to flash —
+    // see lightweight-models.ts). The old deepseek-v4-flash / deepseek-chat
+    // names are aliases of flash.
     match: (url) => url.includes('deepseek.com'),
-    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    models: ['deepseek-v4-pro', 'deepseek-flash'],
   },
   {
     match: (url) => url.includes('dashscope.aliyuncs.com'),
-    models: ['qwen3-vl-plus', 'qwen3-vl-flash'],
+    models: ['qwen3.8-flash', 'qwen3.7-plus', 'qwen3.8-max'],
   },
   {
     match: (url) => url.includes('volces.com') || url.includes('ark.cn-beijing'),
-    models: [
-      'doubao-1-5-vision-pro-250328',
-      'doubao-1-5-vision-pro-32k-250115',
-    ],
+    models: ['doubao-seed-2-1-lite-260915', 'doubao-seed-2-1-pro-260915'],
   },
   {
-    // Moonshot Kimi — mainland (api.moonshot.cn). Full K2 lineup including
-    // the cheap/fast preview tiers. OpenMeido leads with kimi-k2.6 (the
-    // only multimodal flagship); turbo-preview and 0905-preview are
-    // text-only fallbacks for users who don't need vision.
-    // Verified against platform.kimi.com/docs/models.md 2026-05.
-    match: (url) => url.includes('moonshot.cn'),
-    models: ['kimi-k2.6', 'kimi-k2-0905-preview', 'kimi-k2-turbo-preview'],
-  },
-  {
-    // Moonshot Kimi — international (api.moonshot.ai). Narrower model list:
-    // verified via GET /v1/models 2026-05 → only kimi-k2.6, kimi-k2.5,
-    // moonshot-v1-* are available. NO kimi-k2-turbo-preview / k2-thinking
-    // / 0905-preview on this endpoint. Keys from platform.kimi.ai are NOT
-    // interchangeable with platform.kimi.com keys.
-    match: (url) => url.includes('moonshot.ai'),
-    models: ['kimi-k2.6', 'kimi-k2.5', 'moonshot-v1-128k-vision-preview'],
+    // Moonshot Kimi — both endpoints (api.moonshot.cn / api.moonshot.ai)
+    // carry the same lineup after the 2026-05-25 and 2026-08-31
+    // retirements: kimi-k2.6 (multimodal, default) and kimi-k3 (flagship,
+    // multimodal, pricier). Keys are NOT interchangeable between the two
+    // platforms. Verified via GET /v1/models 2026-09.
+    match: (url) => url.includes('moonshot.cn') || url.includes('moonshot.ai'),
+    models: ['kimi-k2.6', 'kimi-k3'],
   },
   {
     match: (url) => url.includes('127.0.0.1') || url.includes('localhost'),

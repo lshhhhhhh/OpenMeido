@@ -3,6 +3,7 @@ import { z } from 'zod'
 
 import { getMailService } from '../../mail-host.js'
 import { getMemoryService } from '../../memory-host.js'
+import { UNTRUSTED_NOTE } from '../tool-guard.js'
 import { runExtraction } from '../../chat-host.js'
 import { getActiveEmit } from '../active-emit.js'
 
@@ -197,7 +198,9 @@ export const readEmail = tool({
       // Cap body length so a 200KB email doesn't blow the model context.
       const MAX_BODY = 4000
       const body = msg.body.length > MAX_BODY ? msg.body.slice(0, MAX_BODY) + '\n…[truncated]' : msg.body
-      return { ...msg, body }
+      // Anyone can send the user an email — mark the body as third-party
+      // text so embedded "instructions" aren't taken as the user's.
+      return { note: UNTRUSTED_NOTE, ...msg, body }
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) }
     }
@@ -215,9 +218,20 @@ async function buildEmailThreadContext(
   maxDepth: number = 5,
 ): Promise<{ from: string; ts: string; subject: string; body: string }[]> {
   const chain: { from: string; ts: string; subject: string; body: string }[] = []
+  const seen = new Set<string>()
   let currentId: string | undefined = startUid
-  for (let i = 0; i < maxDepth && currentId; i++) {
-    const msg = await mail.readMessage(currentId)
+  for (let i = 0; i < maxDepth && currentId && !seen.has(currentId); i++) {
+    seen.add(currentId) // malformed In-Reply-To loops
+    let msg: Awaited<ReturnType<typeof mail.readMessage>>
+    try {
+      msg = await mail.readMessage(currentId)
+    } catch (err) {
+      // A failed hop (IMAP timeout / dropped connection) truncates the
+      // thread instead of failing the whole draft. An empty chain is
+      // handled by the caller.
+      console.warn(`[mail] thread walk stopped at id="${currentId}":`, err)
+      break
+    }
     if (!msg) break
     chain.push({
       from: msg.from,
@@ -229,7 +243,8 @@ async function buildEmailThreadContext(
           : msg.body,
     })
     // The adapter already does one-level parent lookup. We use its
-    // parent.id if present to walk further.
+    // parent.id if present to walk further — ids come back as "<uid>"
+    // (INBOX) or "sent:<uid>" (Sent) and readMessage accepts both.
     currentId = msg.parent?.id
   }
   return chain.reverse() // oldest first

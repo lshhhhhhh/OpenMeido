@@ -125,15 +125,25 @@ export function getMailService(): MailService | null {
   return service
 }
 
+/**
+ * Detach the current adapter and close it in the background.
+ *
+ * The module vars MUST be nulled synchronously, before awaiting close().
+ * The old version nulled them after the await — so a getMailService()
+ * landing during the LOGOUT round-trip (including the one that called
+ * us: it builds the replacement right after `void teardown()`) had its
+ * freshly built adapter wiped on resume, orphaning an open IMAP socket
+ * on every credential change.
+ */
 async function teardown(): Promise<void> {
-  if (adapter) {
-    try {
-      await adapter.close()
-    } catch {
-      /* ignore */
-    }
-    adapter = null
-    service = null
+  const old = adapter
+  adapter = null
+  service = null
+  if (!old) return
+  try {
+    await old.close()
+  } catch {
+    /* ignore */
   }
 }
 

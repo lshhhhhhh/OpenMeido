@@ -35,26 +35,23 @@ export async function synthesizeSovits(
   }
 
   // 120s timeout because cold-start SoVITS inference on CPU can run that
-  // long for medium-length text. On GPU it's typically <5s.
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 120_000)
+  // long for medium-length text. On GPU it's typically <5s. AbortSignal.timeout
+  // so the budget also covers reading the WAV body, not just the headers.
+  const signal = AbortSignal.timeout(120_000)
+  const timeoutMsg = 'GPT-SoVITS 请求超时（120s）—— 服务器是否在跑？'
   let resp: Response
   try {
     resp = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: controller.signal,
+      signal,
     })
   } catch (err) {
-    if (controller.signal.aborted) {
-      throw new Error('GPT-SoVITS 请求超时（120s）—— 服务器是否在跑？')
-    }
+    if (signal.aborted) throw new Error(timeoutMsg)
     throw new Error(
       `连不上 GPT-SoVITS (${cfg.baseUrl}) — 检查 api_v2.py 是否在跑，端口是否对。底层错误：${err instanceof Error ? err.message : String(err)}`,
     )
-  } finally {
-    clearTimeout(timer)
   }
 
   if (!resp.ok) {
@@ -64,7 +61,15 @@ export async function synthesizeSovits(
     )
   }
 
-  const buf = Buffer.from(await resp.arrayBuffer())
+  let buf: Buffer
+  try {
+    buf = Buffer.from(await resp.arrayBuffer())
+  } catch (err) {
+    if (signal.aborted) throw new Error(timeoutMsg)
+    throw new Error(
+      `GPT-SoVITS 响应读取失败 — ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
   if (buf.length === 0) {
     throw new Error('GPT-SoVITS 返回空响应 — 检查 ref_audio 路径在服务器上是否可读')
   }

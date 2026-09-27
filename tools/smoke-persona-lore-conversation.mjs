@@ -37,7 +37,7 @@ const ds = createOpenAI({
   baseURL: 'https://api.deepseek.com/v1',
   apiKey: process.env.DEEPSEEK_API_KEY,
 })
-const model = ds.chat('deepseek-chat')
+const model = ds.chat('deepseek-flash')
 
 // factsBlock-equivalent (mirrors service.factsBlock for anchor facts).
 // Production code lives in core/memory/service.ts; duplicated here so

@@ -86,25 +86,24 @@ export async function synthesizeMinimax(
 
   // 60s timeout. T2A v2 typically returns in <2s for one reply; 60s
   // covers tail latencies and gives us a clear error vs hanging forever.
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 60_000)
+  // AbortSignal.timeout (not a setTimeout cleared after fetch) so the budget
+  // also covers reading the body — fetch resolves on headers, and a stalled
+  // body would otherwise hang resp.json() forever.
+  const signal = AbortSignal.timeout(60_000)
+  const timeoutMsg = 'MiniMax 请求超时（60s）——网络或 MiniMax 服务异常。'
   let resp: Response
   try {
     resp = await fetch(req.url, {
       method: 'POST',
       headers: req.headers,
       body: JSON.stringify(req.body),
-      signal: controller.signal,
+      signal,
     })
   } catch (err) {
-    if (controller.signal.aborted) {
-      throw new Error('MiniMax 请求超时（60s）——网络或 MiniMax 服务异常。')
-    }
+    if (signal.aborted) throw new Error(timeoutMsg)
     throw new Error(
       `连不上 MiniMax (${req.url}) — ${err instanceof Error ? err.message : String(err)}`,
     )
-  } finally {
-    clearTimeout(timer)
   }
 
   if (!resp.ok) {
@@ -112,9 +111,17 @@ export async function synthesizeMinimax(
     throw new Error(`MiniMax HTTP ${resp.status}: ${body.slice(0, 300) || resp.statusText}`)
   }
 
-  const json = (await resp.json()) as {
+  let json: {
     data?: { audio?: string; status?: number }
     base_resp?: { status_code?: number; status_msg?: string }
+  }
+  try {
+    json = (await resp.json()) as typeof json
+  } catch (err) {
+    if (signal.aborted) throw new Error(timeoutMsg)
+    throw new Error(
+      `MiniMax 返回的不是合法 JSON — ${err instanceof Error ? err.message : String(err)}`,
+    )
   }
 
   // MiniMax 用 base_resp.status_code 表示业务错误（HTTP 200 但内容失败）。

@@ -60,9 +60,10 @@ export interface MailMessage {
   inReplyTo?: string
   /**
    * When THIS message is a reply (has inReplyTo) AND we successfully located
-   * its parent on the server (typically in the user's Sent folder), this is
+   * its parent on the server (the user's Sent folder or INBOX), this is
    * the parent's full content. Walked one level only — for deeper history,
-   * the model can call readEmail(parent.id) to recurse.
+   * the model can call readEmail(parent.id) to recurse (parent.id is a
+   * valid readMessage id: "<uid>" for INBOX, "sent:<uid>" for Sent).
    * `null` (vs undefined) means "we tried and didn't find it" — the parent
    * may have been deleted, archived elsewhere, or never stored locally.
    */

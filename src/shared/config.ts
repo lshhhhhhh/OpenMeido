@@ -288,6 +288,14 @@ export const configSchema = z.object({
       // mini tier, so 5.4-mini stays the budget pick after 5.5 launched.
       model: z.string().default('gpt-5.4-mini'),
       /**
+       * Model for side tasks (emotion classifier, greetings, proactive
+       * remarks, reflection…). Empty = automatic: the host's lightweight
+       * tier from shared/lightweight-models.ts, falling back to `model`
+       * if that id turns out to be retired. Escape hatch for when a
+       * provider retires our hardcoded pick before an app update ships.
+       */
+      fastModel: z.string().default(''),
+      /**
        * Let the LLM browse the web for current information. When true:
        *   - Gemini backend: passes useSearchGrounding to the model factory.
        *     Model autonomously decides when to search; results grounded.
@@ -758,17 +766,17 @@ export const configSchema = z.object({
     .object({
       /**
        * Download source for auto-updates. GitHub Releases is the default
-       * (fastest in most regions); ghproxy is a community mirror that
-       * fronts GitHub through China-accessible CDN. Users in mainland
-       * China often see GitHub direct downloads stall at < 100 KB/s,
-       * making the ~70MB installer take 15+ minutes. The mirror is a
-       * one-click fix without server-side infrastructure.
+       * (fastest in most regions). 'ghproxy' — the value name is kept for
+       * config compatibility; the UI calls it 国内镜像 — downloads the
+       * installer through community GitHub proxies (list + rotation in
+       * main/updater-host.ts). Users in mainland China often see GitHub
+       * direct downloads stall at < 100 KB/s.
        *
-       * Trade-offs:
-       *   - github: official, signed, fast outside CN
-       *   - ghproxy: third-party reliability, but consistently 1-5 MB/s
-       *     from inside CN. Same .exe + same signature — ghproxy just
-       *     re-serves the bytes.
+       * Version info and the installer's sha512 always come from GitHub
+       * in both modes; electron-updater verifies the mirrored bytes
+       * against it. (Until v0.4.0 the whole feed came from ghproxy.com,
+       * which later redirected to an unrelated site's homepage and broke
+       * updates for everyone who had it enabled.)
        *
        * Default github. User can flip in Settings → 关于 if updates
        * are crawling.
@@ -892,6 +900,53 @@ export function resolvePersona(cfg: Config['persona']): {
     name: personaPresets.maid.name,
     traits: personaPresets.maid.traits,
   }
+}
+
+/**
+ * Apply `fn` to every credential field in the config (API keys, per-
+ * backend key map, TTS tokens) and return a new Config. Used by main to
+ * encrypt secrets for disk and decrypt them after app ready. The mail
+ * password has its own older scheme (mail.passwordEncrypted) and is left
+ * alone here.
+ */
+export function mapConfigSecrets(cfg: Config, fn: (value: string) => string): Config {
+  return {
+    ...cfg,
+    backend: {
+      ...cfg.backend,
+      apiKey: fn(cfg.backend.apiKey),
+      apiKeys: Object.fromEntries(
+        Object.entries(cfg.backend.apiKeys).map(([url, key]) => [url, fn(key)]),
+      ),
+    },
+    embedding: { ...cfg.embedding, apiKey: fn(cfg.embedding.apiKey) },
+    tts: {
+      ...cfg.tts,
+      minimax: { ...cfg.tts.minimax, apiKey: fn(cfg.tts.minimax.apiKey) },
+      volcengine: {
+        ...cfg.tts.volcengine,
+        accessToken: fn(cfg.tts.volcengine.accessToken),
+        bodyToken: fn(cfg.tts.volcengine.bodyToken),
+      },
+    },
+  }
+}
+
+/**
+ * Local / self-hosted OpenAI-compatible server (LM Studio, Ollama, llama.cpp
+ * server…). These take no API key, so "configured" can't mean "has a key".
+ */
+export function isLocalEndpoint(baseUrl: string): boolean {
+  return /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])(:\d+)?(\/|$)/i.test(baseUrl.trim())
+}
+
+/**
+ * "Has the user set up an AI backend?" — a key in config, or a local
+ * endpoint (which needs none). Deliberately ignores .env fallbacks; see
+ * isAiConfigured in main/config.ts for why.
+ */
+export function isBackendConfigured(backend: Config['backend']): boolean {
+  return backend.apiKey.trim().length > 0 || isLocalEndpoint(backend.baseUrl)
 }
 
 // IPC channel names live in src/shared/config-ipc.ts — a Zod-free tiny file

@@ -191,16 +191,39 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
             images,
           )
         }
-        const vec = await withTimeout(embed(text || ' '), 5_000, 'embed timed out')
-        return await adapter.addEpisode(
+        // The embedder must never cost the user their message. On failure
+        // or a >5s stall we still persist the turn, just without a vector:
+        // the recent window (L1) replays it normally, only L2 semantic
+        // recall can't find it. (This used to drop the whole episode and
+        // show a toast — the user's line was simply gone from history.)
+        // Wrapped so even a synchronous throw from `embed` lands here as
+        // a rejection instead of skipping the write.
+        const pending = Promise.resolve().then(() => embed(text || ' '))
+        let vec: Float32Array | null = null
+        try {
+          vec = await withTimeout(pending, 5_000, 'embed timed out')
+        } catch (err) {
+          console.warn('[memory] embed failed/slow — saving episode without vector:', err)
+        }
+        const id = await adapter.addEpisode(
           persona(),
           speaker,
           text,
-          vec,
+          vec ?? new Float32Array(0),
           sessionId,
           toolParts,
           images,
         )
+        if (!vec) {
+          // Usually just slow (ONNX cold start right after the model
+          // lands): attach the vector once it arrives so the turn becomes
+          // recallable after all. A genuine embed failure is reported
+          // here, once, instead of from the timeout above.
+          pending
+            .then((late) => adapter.setEpisodeEmbedding?.(id, late))
+            .catch((err) => reportError('embed', err))
+        }
+        return id
       } catch (err) {
         reportError('addEpisode', err)
         return null

@@ -28,7 +28,7 @@
  *   - Lv.5 asks back / shares own view markers
  *   - Lv.5 expresses disagreement on prompt B
  *
- * Cost: 4 deepseek-chat calls × ~$0.0005 ≈ $0.002 per run.
+ * Cost: 4 deepseek-flash calls × ~$0.0005 ≈ $0.002 per run.
  *
  * Run: npm run test:tier-depth   (or: node --env-file=.env --import tsx tools/smoke-tier-depth.mjs)
  */
@@ -48,7 +48,7 @@ const ds = createOpenAI({
   baseURL: 'https://api.deepseek.com/v1',
   apiKey: process.env.DEEPSEEK_API_KEY,
 })
-const model = ds.chat('deepseek-chat')
+const model = ds.chat('deepseek-flash')
 
 let passed = 0
 let failed = 0

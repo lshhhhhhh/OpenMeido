@@ -26,7 +26,10 @@
 
 import { app, BrowserWindow, ipcMain } from 'electron'
 import pkg from 'electron-updater'
+import ghProviderPkg from 'electron-updater/out/providers/GitHubProvider.js'
+import type { UpdateInfo } from 'builder-util-runtime'
 const { autoUpdater } = pkg
+const { GitHubProvider } = ghProviderPkg
 
 import { getConfig, onConfigChange } from './config.js'
 
@@ -35,40 +38,111 @@ const PERIODIC_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
 
 let initialized = false
 
+const OWNER = 'lshhhhhhh'
+const REPO = 'OpenMeido'
+
+/**
+ * Prefix-style GitHub download proxies, tried in order. Each takes
+ * `<mirror>https://github.com/...` and streams the same bytes.
+ *
+ * They are only trusted for BYTES, never for metadata: version info and
+ * the sha512 in latest.yml always come from GitHub itself (see
+ * MirroredGitHubProvider), and electron-updater verifies the downloaded
+ * installer against that sha512. So a mirror that goes rogue or changes
+ * hands can break a download but can't swap the installer. That matters:
+ * the old feed pointed wholesale at ghproxy.com, which later started
+ * 301-redirecting to another site's homepage, leaving every user who
+ * enabled it unable to update at all.
+ *
+ * Checked 2026-09: all four serve release assets path-preserving.
+ */
+const DOWNLOAD_MIRRORS = [
+  'https://ghfast.top/',
+  'https://gh-proxy.com/',
+  'https://ghproxy.net/',
+  'https://gh.llkk.cc/',
+]
+/** Index into DOWNLOAD_MIRRORS; advanced when a download fails. */
+let mirrorIndex = 0
+let mirrorEnabled = false
+
+/**
+ * GitHub provider that fetches releases.atom + latest.yml from GitHub as
+ * usual but rewrites the installer / blockmap URLs through the current
+ * download mirror.
+ */
+class MirroredGitHubProvider extends GitHubProvider {
+  resolveFiles(updateInfo: Parameters<InstanceType<typeof GitHubProvider>['resolveFiles']>[0]) {
+    const files = super.resolveFiles(updateInfo)
+    const mirror = mirrorEnabled ? DOWNLOAD_MIRRORS[mirrorIndex] : undefined
+    if (!mirror) return files
+    return files.map((f) => ({
+      ...f,
+      url: new URL(mirror + f.url.href),
+      ...(f.packageInfo ? { packageInfo: { ...f.packageInfo, path: mirror + f.packageInfo.path } } : {}),
+    }))
+  }
+}
+
 /**
  * Apply the configured mirror choice to electron-updater. Called at
  * init and on config change so users can flip the toggle without
- * relaunching. The 'github' branch resets back to the publish config
- * shipped in electron-builder.yml (owner/repo); the 'ghproxy' branch
- * uses a generic provider pointed at the ghproxy CDN, which fronts
- * GitHub from inside CN at 1-5 MB/s (vs sub-100KB/s direct).
+ * relaunching. Both modes read metadata from GitHub; 'ghproxy' (the
+ * config value is kept for compatibility — it now means "国内镜像")
+ * additionally routes the big installer download through a mirror.
  */
 function applyMirrorConfig(): void {
   if (!app.isPackaged) return
-  const mirror = getConfig().updater.mirror
+  mirrorEnabled = getConfig().updater.mirror === 'ghproxy'
   try {
-    if (mirror === 'ghproxy') {
-      // ghproxy.com transparently proxies GitHub. The /releases/latest/
-      // download/ URL resolves to the most recent release's assets,
-      // including latest.yml — electron-updater's generic provider
-      // fetches latest.yml from <url>/latest.yml then the installer
-      // from <url>/<filename>. Same bytes as github direct; same
-      // signature; just a different transport.
-      autoUpdater.setFeedURL({
-        provider: 'generic',
-        url: 'https://ghproxy.com/https://github.com/lshhhhhhh/OpenMeido/releases/latest/download',
-      })
-      console.log('[updater] using ghproxy mirror')
-    } else {
-      autoUpdater.setFeedURL({
-        provider: 'github',
-        owner: 'lshhhhhhh',
-        repo: 'OpenMeido',
-      })
-      console.log('[updater] using github direct')
-    }
+    autoUpdater.setFeedURL({
+      provider: 'custom',
+      updateProvider: MirroredGitHubProvider,
+      owner: OWNER,
+      repo: REPO,
+    } as unknown as Parameters<typeof autoUpdater.setFeedURL>[0])
+    console.log(
+      `[updater] feed: github metadata, downloads via ${mirrorEnabled ? DOWNLOAD_MIRRORS[mirrorIndex] : 'github direct'}`,
+    )
   } catch (err) {
     console.warn('[updater] setFeedURL failed:', err)
+  }
+}
+
+/**
+ * Download the pending update. With the mirror on, try each mirror in
+ * turn, then GitHub direct. A fresh check is needed between attempts
+ * because electron-updater resolves file URLs at check time.
+ */
+async function downloadWithFallback(): Promise<{ ok: boolean; error?: string }> {
+  const attempts = mirrorEnabled ? DOWNLOAD_MIRRORS.length + 1 : 1
+  let lastErr: unknown = null
+  for (let i = 0; i < attempts; i++) {
+    try {
+      if (i > 0) {
+        mirrorIndex = i < DOWNLOAD_MIRRORS.length ? i : 0
+        if (i >= DOWNLOAD_MIRRORS.length) mirrorEnabled = false // last resort: github direct
+        console.log(
+          `[updater] retrying download via ${mirrorEnabled ? DOWNLOAD_MIRRORS[mirrorIndex] : 'github direct'}`,
+        )
+        await autoUpdater.checkForUpdates()
+      }
+      await autoUpdater.downloadUpdate()
+      return { ok: true }
+    } catch (err) {
+      lastErr = err
+      console.warn(`[updater] download attempt ${i + 1}/${attempts} failed:`, err)
+    }
+  }
+  // Restore the configured mode for the next session of attempts.
+  mirrorIndex = 0
+  mirrorEnabled = getConfig().updater.mirror === 'ghproxy'
+  const msg = lastErr instanceof Error ? lastErr.message : String(lastErr)
+  return {
+    ok: false,
+    error: /ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|net::|timeout/i.test(msg)
+      ? '下载失败：网络连不上 GitHub / 镜像，稍后再试，或者去 GitHub Releases 手动下载安装包。'
+      : `下载失败：${msg.slice(0, 120)}`,
   }
 }
 
@@ -109,6 +183,9 @@ export function initUpdater(): void {
       console.log('[updater] dev mode — checkNow no-op')
       return null
     }
+    // A manual check restarts mirror rotation from the top.
+    mirrorIndex = 0
+    mirrorEnabled = getConfig().updater.mirror === 'ghproxy'
     console.log('[updater] manual check requested')
     return autoUpdater.checkForUpdates().catch((err) => {
       console.warn('[updater] manual check failed:', err)
@@ -121,11 +198,13 @@ export function initUpdater(): void {
       return
     }
     console.log('[updater] user consented — starting download')
-    try {
-      await autoUpdater.downloadUpdate()
-    } catch (err) {
-      console.warn('[updater] download failed:', err)
+    const result = await downloadWithFallback()
+    if (!result.ok && lastState.kind === 'progress') {
+      // Let a renderer that mounts later show the download button again
+      // instead of a progress bar frozen mid-way.
+      lastState = { kind: 'available', version: lastState.version }
     }
+    return result
   })
   ipcMain.handle('updater:install', () => {
     if (!app.isPackaged) {
@@ -177,8 +256,17 @@ export function initUpdater(): void {
   autoUpdater.on('checking-for-update', () => {
     console.log('[updater] checking for updates...')
   })
-  autoUpdater.on('update-available', (info) => {
+  autoUpdater.on('update-available', (info: UpdateInfo) => {
     console.log(`[updater] update available: ${info.version}`)
+    // The 6-hourly re-check fires this again even after the same version
+    // finished downloading (or while it's downloading) — don't knock the
+    // pill back from "restart to update" / the progress bar to "download".
+    if (
+      (lastState.kind === 'downloaded' || lastState.kind === 'progress') &&
+      lastState.version === info.version
+    ) {
+      return
+    }
     lastState = { kind: 'available', version: info.version }
     broadcast('updater:available', { version: info.version })
   })

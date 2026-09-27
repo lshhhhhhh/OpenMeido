@@ -71,6 +71,13 @@ export function createTaskService(deps: TaskServiceDeps): TaskService {
     const delay = Math.min(msUntil(task.fireAt), MAX)
     const t = setTimeout(() => {
       timers.delete(task.id)
+      // Capped at ~24.8 days: if the real fire time is still ahead, this
+      // was just the cap expiring — re-arm instead of firing (and marking
+      // notified) weeks early.
+      if (msUntil(task.fireAt!) > 1000) {
+        arm(task)
+        return
+      }
       const now = new Date().toISOString()
       void adapter.markNotified(task.id, now).catch((err) => report('markNotified', err))
       try {
